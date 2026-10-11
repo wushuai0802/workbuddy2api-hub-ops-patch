@@ -36,7 +36,7 @@ class InstallerTests(unittest.TestCase):
             for name in installer.FILES
         }
         self.meta = {
-            "patch_id": "v1.6.19-ops.synthetic", "base_tag": installer.BASE_TAG,
+            "patch_id": installer.BASE_TAG + "-ops.synthetic", "base_tag": installer.BASE_TAG,
             "upstream_commit": installer.UPSTREAM_COMMIT,
             "files": {
                 name: {
@@ -196,11 +196,16 @@ class InstallerTests(unittest.TestCase):
                 self.assertEqual(self.snapshot(), before)
 
     def test_changed_dependency_is_not_modified(self):
-        (self.target / "wb_updates.py").write_bytes(b"# different version\n")
-        before = self.snapshot()
-        with self.assertRaisesRegex(ValueError, "unchanged dependency"):
-            self.bundle.apply(self.target)
-        self.assertEqual(self.snapshot(), before)
+        for name in ("wb_updates.py", "wb_upstream_pool.py"):
+            with self.subTest(name=name):
+                path = self.target / name
+                original = path.read_bytes()
+                path.write_bytes(b"# different version\n")
+                before = self.snapshot()
+                with self.assertRaisesRegex(ValueError, "unchanged dependency"):
+                    self.bundle.apply(self.target)
+                self.assertEqual(self.snapshot(), before)
+                path.write_bytes(original)
 
     def test_existing_new_module_and_extra_module_are_refused(self):
         for name in ("wb_ops.py", "wb_custom.py"):

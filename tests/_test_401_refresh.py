@@ -57,12 +57,15 @@ class Account:
 class Pool:
     def __init__(self, accounts):
         self.accounts = accounts
-        self.affinity = type("Affinity", (), {"unbind": lambda self, key: None})()
+        self.affinity = type("Affinity", (), {"demote": lambda self, key, uid: None})()
+
+    def apply_remaining_weights(self, weights):
+        self.weights = weights
 
     def count_ready(self, realm=None, model=None):
         return len(self.accounts)
 
-    def pick_for_session(self, realm=None, session_key=None, exclude=None, model=None):
+    def pick_for_session(self, realm=None, session_key=None, exclude=None, model=None, page=None):
         return next((a for a in self.accounts
                      if a.uid not in (exclude or ()) and a.admitted and a.enabled), None)
 
@@ -89,9 +92,7 @@ class AuthRefreshTests(unittest.TestCase):
             return io.BytesIO(b"ok")
 
         with patch.multiple(wb, POOL=Pool(accounts), ACCOUNTS_DIR=self.tempdir.name,
-                            apply_daily_token_limit=lambda: None,
-                            apply_daily_credit_limit=lambda: None,
-                            apply_model_daily_token_limit=lambda: None,
+                            apply_daily_guards=lambda: None,
                             auto_switch_product_enabled=lambda: False,
                             prompt_cache_key_enabled=lambda: False,
                             retry_bump=self.counters.append,
@@ -210,6 +211,9 @@ class AuthRefreshTests(unittest.TestCase):
                     "model_daily_token_limit": 50,
                     "model_daily_tokens": {"deepseek-v4.1-flash": 50},
                     "enterprise_id": "test-enterprise",
+                    "model_caps": {"deepseek-v4.1-flash": {"at": time.time() - 10,
+                                                          "reset": time.time() + 600}},
+                    "last_activity_report": "synthetic-activity-record",
                 }
                 for name, value in fields.items():
                     setattr(account, name, value)
@@ -220,6 +224,9 @@ class AuthRefreshTests(unittest.TestCase):
                 for name, value in fields.items():
                     self.assertEqual(getattr(account, name), value, name)
                 self.assertIs(account._credits_lock, credits_lock)
+                saved = account.to_dict()
+                self.assertEqual(saved["modelCaps"], fields["model_caps"])
+                self.assertEqual(saved["lastActivityReport"], fields["last_activity_report"])
                 self.assertFalse(account.ready(model="deepseek-v4.1-flash"))
                 self.assertEqual(refresh.call_count, 0 if already_refreshed else 1)
                 if not already_refreshed:

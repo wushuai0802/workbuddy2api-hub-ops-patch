@@ -8,14 +8,16 @@
 
 ## 下载与适用版本
 
-当前发布：**v1.6.19-ops.20261011.2**（2026-10-11）。
+当前发布：**v1.6.20-ops.20261011.1**（2026-10-11）。
 
-- [下载补丁 ZIP 与 SHA256SUMS.txt](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.6.19-ops.20261011.2)
-- ZIP 文件名：`workbuddy2api-hub-v1.6.19-ops-20261011-r2.zip`
-- 仅支持官方 **v1.6.19**，提交 **`55dbb9ebcac3d55b26442d9bbc8b2e11ece637da`**。
+- [下载补丁 ZIP 与 SHA256SUMS.txt](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.6.20-ops.20261011.1)
+- ZIP 文件名：`workbuddy2api-hub-v1.6.20-ops-20261011-r1.zip`
+- 仅支持官方 **v1.6.20**，提交 **`cb6a844588705ea01388be2b9df1f0cbbbcde357`**。
 - 需要 Python **3.11+**；Docker 安装需要从打过补丁的准确官方源码重新构建镜像。
 
 这是**非官方补丁包**，不是完整 Hub、账号包、现成 Docker 镜像或适用于任意版本的通用覆盖包。安装器检查源码基线与补丁校验和；已有其他补丁、混合源码或不匹配的版本会被拒绝。
+
+仍使用官方 v1.6.19 的用户请使用[对应的历史 r2 Release](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.6.19-ops.20261011.2)及其 tag 内的说明。两个补丁包的基线不同，不能交叉安装。
 
 ## 有哪些补丁
 
@@ -37,11 +39,11 @@
 在你自己的工作目录中获取固定版本的两个仓库：
 
 ~~~sh
-git clone --depth 1 --branch v1.6.19-ops.20261011.2 https://github.com/wushuai0802/workbuddy2api-hub-ops-patch.git ops-patch-20261011
-git clone --depth 1 --branch v1.6.19 https://github.com/ardeyouxipianyi/workbuddy2api-hub.git workbuddy2api-hub-v1.6.19
-git -C workbuddy2api-hub-v1.6.19 rev-parse HEAD
-python3 -B ops-patch-20261011/apply.py --verify-package
-python3 -B ops-patch-20261011/apply.py --target ./workbuddy2api-hub-v1.6.19 --dry-run
+git clone --depth 1 --branch v1.6.20-ops.20261011.1 https://github.com/wushuai0802/workbuddy2api-hub-ops-patch.git ops-patch-v1620
+git clone --depth 1 --branch v1.6.20 https://github.com/ardeyouxipianyi/workbuddy2api-hub.git workbuddy2api-hub-v1.6.20
+git -C workbuddy2api-hub-v1.6.20 rev-parse HEAD
+python3 -B ops-patch-v1620/apply.py --verify-package
+python3 -B ops-patch-v1620/apply.py --target ./workbuddy2api-hub-v1.6.20 --dry-run
 ~~~
 
 提交必须与上面的完整 SHA 一致。`--dry-run` 通过只表示文件可以应用；**还没有修改源码或部署**。下一步按照 [安装与回滚指南](docs/INSTALL.md) 保存自己的配置、数据和旧镜像，暂停目标服务，再应用补丁和定向重建。
@@ -50,9 +52,19 @@ python3 -B ops-patch-20261011/apply.py --target ./workbuddy2api-hub-v1.6.19 --dr
 
 不要在运行中的容器里临时复制单个文件；容器重建可能丢掉这种修改。也不要删除安装状态或备份来绕过拒绝检查。已有未知补丁时，另建准确的干净官方源码目录，保留原部署后再准备新镜像。
 
+## 官方 v1.6.20 的变化与升级注意
+
+本次迁移保留官方 v1.6.20 的面板排序、今日活动与签到记录、更新检查、剩余用量估算和限额持久化，以及连接复用、轮询和统计性能改进。官方的面板 401 轮询修复与本补丁的模型接口 401 凭据续期解决不同问题；推理复读、空答安全恢复、工具图片和推理历史等核心保护仍需本补丁。完整原生更新见[上游 v1.6.20 记录](https://github.com/ardeyouxipianyi/workbuddy2api-hub/blob/v1.6.20/docs/CHANGELOG.md)。
+
+- 上游请求体上限从 50 MiB 收紧到 **16 MiB**，本补丁保留该默认值。需要发送更大 JSON 历史时，可自行显式设置 `WB_MAX_PAYLOAD_BYTES=52428800` 恢复 50 MiB，并评估并发请求的内存占用。
+- 国内版连登管家可自动补签、兑换和抽奖，补签或抽奖会消耗相应卡券/次数；沿用已有调度配置，升级前核对自己启用的任务。
+- 「剩余用量优先调度」默认关闭；开启会让接近用完的账号多接请求，可能更早撞限。
+- 客户端「一键配置」在 Docker、OpenWrt 等服务端部署中不可用；它用于网关本机的客户端配置。
+- 从 v1.6.19 补丁升级时，在新目录准备准确的官方 v1.6.20 后应用本包；保留旧镜像、配置和数据，不叠加覆盖旧源码。
+
 ## 效果与边界
 
-混合复读规则的离线验收覆盖匿名汇总的 132 个真实推理块，命中 3 个异常块，包括两个最长的反复块；10 类反例、100 次独立短工具回合和 12 组 focused 回归已通过。公开包不含真实会话原文、账号或凭据。详见 [验证范围](docs/VERIFICATION.md)。
+混合复读规则在此前 v1.6.19 组件验收中覆盖匿名汇总的 132 个真实推理块，命中 3 个异常块，包括两个最长的反复块；10 类反例、100 次独立短工具回合和 12 组 focused 回归通过。这些历史结果不能代替 v1.6.20 迁移验收；本次结果与连接池兼容范围见 [验证记录](docs/VERIFICATION.md)。公开包不含真实会话原文、账号或凭据。
 
 本补丁不能保证模型不再循环、所有 “Let me go.” 消失或所有任务都取得业务进展。检测针对一次上游生成；正常结束后客户端继续发起的多个工具回合，不会因为使用同一个工具而被一概熔断。出站历史处理不修改客户端会话数据库，也不能解决账号余额耗尽。
 

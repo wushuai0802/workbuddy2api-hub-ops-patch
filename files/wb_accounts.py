@@ -15,6 +15,7 @@ import wb_activity
 import wb_atrest
 import wb_identity
 import wb_settings
+import wb_upstream_pool
 import wb_webagent
 
 # ---------------------------------------------------------------------------
@@ -120,7 +121,20 @@ def opener_for_proxy(proxy):
 
 
 def urlopen(req, timeout=30, proxy=""):
-    """urlopen honouring an optional per-account proxy."""
+    """urlopen honouring an optional per-account proxy, over a keep-alive pool.
+
+    urllib 的 AbstractHTTPHandler.do_open 会写死 Connection: close，每个请求都得
+    重新 TCP+TLS 握手（真机实测 118.0ms，是请求路径上最大的一笔开销）。默认改走
+    wb_upstream_pool：按（目标, 代理串）分池复用连接。不能逐字节对齐 urllib 语义
+    的请求（非 http(s) 目标、非 HTTP 代理、需要跟随的 3xx 重定向）由 PoolBypass
+    回退到下面这条原来的路，行为与改动前一致；WB_UPSTREAM_KEEPALIVE=0 时整条
+    路径都与改动前相同。
+    """
+    if wb_upstream_pool.enabled():
+        try:
+            return wb_upstream_pool.urlopen(req, timeout=timeout, proxy=proxy)
+        except wb_upstream_pool.PoolBypass:
+            pass
     opener = opener_for_proxy(proxy)
     if opener is None:
         return urllib.request.urlopen(req, timeout=timeout)
@@ -239,6 +253,24 @@ def normalize_epoch(value):
 CN_REALM_MARKERS = ("copilot.tencent.com", "codebuddy.cn", "workbuddy.cn")
 INTL_REALM_MARKERS = ("workbuddy.ai", "codebuddy.ai")
 REALM_MARKERS = {"cn": CN_REALM_MARKERS, "intl": INTL_REALM_MARKERS}
+
+#: 「限额联动」只覆盖免费模型（用户口径，2026-10-10）：只有这些模型的 6004
+#: 撞线才做「记录 → 跨重启禁用」；付费模型不参与——它们的消耗按积分计费，
+#: 不在这套 24h 窗口配额里。键与 Account.realm 的取值一致（intl / cn），
+#: 国内版的 deepseek-v4.1-flash 是收费模型（x0.11），不在名单内。
+FREE_CAP_MODELS = {
+    "intl": frozenset({"hy4-preview-f", "hy3", "deepseek-v4.1-flash"}),
+    "cn": frozenset({"hy4-preview-f", "hy3"}),
+}
+
+
+def is_free_cap_model(realm, model):
+    """该「账号区域 × 模型」是否在限额联动的范围内。
+
+    未知区域或空模型一律不在：范围判断必须失败关闭，宁可漏记一次也不把
+    付费模型拉进持久化禁用。
+    """
+    return bool(model) and str(model) in FREE_CAP_MODELS.get(str(realm or ""), ())
 
 #: 上游用一个远超任何真实计费周期的抵扣截止时间表示「不会过期」。实测
 #: （2026-10-08，31 行真实包数据）Free Plan Subscription 与个人体验版的
@@ -512,6 +544,30 @@ class Account(object):
         self.credits = data.get("credits") or None
         self.last_checkin = data.get("lastCheckin") or None
         self.last_daily_chat = data.get("lastDailyChat") or None
+        # 国内版每天一次的「对话活跃上报」（点亮官方 growth 连登/热力墙）上次
+        # 成功的时刻；与 lastCheckin 同款：只按「今天成功过没有」做闸门。
+        self.last_activity_report = data.get("lastActivityReport") or None
+        # 上游「窗口额度用满」的记录（429 / code 6004）：model -> {"at": 撞线时刻,
+        # "reset": 上游给的恢复时刻}。**持久化**（与其它节流窗口不同）：重启后
+        # 仍然知道这个组合在恢复时间内，不用等下一次撞线才重新发现。
+        # 只有带重置时刻的 6004 才记——那才是「额度用满」的可判定证据；
+        # 其余 429（无重置时刻的软限流）不在这里。记录范围限免费模型
+        # （FREE_CAP_MODELS，见 note_model_cap）。
+        self.model_caps = {}
+        for mid, entry in (data.get("modelCaps") or {}).items():
+            if not isinstance(entry, dict):
+                continue
+            # 范围外的模型不得被记 cap：旧版本存下的（或手改的）范围外条目
+            # 在加载时就丢掉，免得 restore_model_caps() 把它们又挂成禁用。
+            if not is_free_cap_model(self.realm, mid):
+                continue
+            try:
+                at = float(entry.get("at") or 0)
+                reset = float(entry.get("reset") or 0)
+            except (TypeError, ValueError):
+                continue
+            if at > 0 and reset > 0:
+                self.model_caps[str(mid)] = {"at": at, "reset": reset}
         # Low-credit guard: once the balance reaches this level the account
         # stops being handed out, so it never drops to zero (a zero balance is
         # what makes the upstream start sending nagging SMS). Resolved from the
@@ -596,6 +652,9 @@ class Account(object):
             "credits": self.credits,
             "lastCheckin": self.last_checkin,
             "lastDailyChat": self.last_daily_chat,
+            "lastActivityReport": self.last_activity_report,
+            # 持久化：6004 的恢复时间是上游给的事实，重启后仍然成立（见 __init__）。
+            "modelCaps": {mid: dict(entry) for mid, entry in self.model_caps.items()},
         }
 
     def _throttle_snapshot(self, now):
@@ -607,7 +666,14 @@ class Account(object):
             active = [(model, until) for model, until in self.model_cooldowns.items()
                       if until > now]
         active.sort(key=lambda pair: (pair[1], pair[0]))
-        models = [{"model": model, "expiresAt": int(until)} for model, until in active]
+        models = []
+        for model, until in active:
+            entry = {"model": model, "expiresAt": int(until)}
+            # 撞线时间只在 cap 还在恢复期内时带上：它同时说明这次禁用是
+            # 「额度用满」（6004）而不是一次临时限流，面板据此显示两段时间。
+            if self.cap_until(model, now) > 0:
+                entry["cappedAt"] = int(self.model_caps[model]["at"])
+            models.append(entry)
         return error, deadline, models, detail
 
     def model_cooldowns_snapshot(self):
@@ -664,8 +730,10 @@ class Account(object):
                                  else None),
             "lastCheckin": self.last_checkin,
             "lastDailyChat": self.last_daily_chat,
-            "canCheckin": self.realm == "cn",
+            "lastActivityReport": self.last_activity_report,
+            "canCheckin": self.realm == "cn" and not self.is_enterprise(),
             "canDailyChat": self.realm == "intl",
+            "canReportActivity": self.realm == "cn" and not self.is_enterprise(),
             "machineId": derive_id(self.uid, "machine"),
             "sessionId": derive_id(self.uid, "session"),
         }
@@ -839,6 +907,82 @@ class Account(object):
         if not model or self.model_is_free(model):
             return False
         return self.credit_limit_reached()
+
+    def note_model_cap(self, model, reset_at, now=None):
+        """记下「这个模型的窗口额度被上游判定用满」（429 / code 6004）。
+
+        持久化：6004 带的重置时刻是上游给的事实，跨重启仍然成立——否则重启后
+        要等到下一次撞线才重新发现，而那个组合本来就在恢复时间内。返回是否新记
+        （重复撞同一个窗口不算新，避免每次都重写凭证档）。
+
+        只记免费模型（FREE_CAP_MODELS）：限额联动仅覆盖它们，范围外的模型
+        即使收到 6004 也不写 cap、不跨重启禁用，只保留调用方给的运行时冷却。
+        """
+        if not model or not reset_at:
+            return False
+        if not is_free_cap_model(self.realm, model):
+            return False
+        now = time.time() if now is None else now
+        try:
+            reset = float(reset_at)
+        except (TypeError, ValueError):
+            return False
+        with self._throttle_lock:
+            old = self.model_caps.get(model)
+            if old is not None and float(old.get("reset") or 0) == reset:
+                # 同一个窗口的重复撞线：不用重写凭证档，但冷却要重新挂上——
+                # 中间可能被换身分之类的清理顺手清掉过；挂不回来，这个窗口
+                # 就一直不会被禁用（真机实测）。
+                if self.model_cooldowns.get(model, 0.0) < reset:
+                    self.model_cooldowns[model] = reset
+                return False
+            self.model_caps[model] = {"at": now, "reset": reset}
+            # 恢复时间之前这个模型接不了单：挂上模型冷却，分派与账号行因此
+            # 立刻反映（重启后由 restore_model_caps() 重新挂）。
+            self.model_cooldowns[model] = max(self.model_cooldowns.get(model, 0.0), reset)
+        return True
+
+    def cap_until(self, model, now=None):
+        """这个模型处于「上游判定额度用满」状态的截止时刻；不在其中返回 0。"""
+        entry = self.model_caps.get(model)
+        if not isinstance(entry, dict):
+            return 0.0
+        now = time.time() if now is None else now
+        try:
+            reset = float(entry.get("reset") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+        return reset if reset > now else 0.0
+
+    def capped_model_names(self, now=None):
+        """此刻仍在恢复时间内的模型（上游判定额度用满）。"""
+        now = time.time() if now is None else now
+        return sorted(mid for mid in self.model_caps
+                      if self.cap_until(mid, now) > 0)
+
+    def restore_model_caps(self, now=None):
+        """重启后把仍在恢复时间内的 6004 重新挂成模型冷却。
+
+        6004 的恢复时间跨重启有效，而模型冷却是纯内存的——不挂回来的话，重启
+        会让这些组合重新接单，直到下一次撞 429 才又停。范围检查再过一道：
+        加载端已丢弃范围外的 cap，这里兜住直接写 model_caps 的调用方。
+        """
+        now = time.time() if now is None else now
+        restored = []
+        with self._throttle_lock:
+            for mid, entry in self.model_caps.items():
+                if not is_free_cap_model(self.realm, mid):
+                    continue
+                try:
+                    reset = float(entry.get("reset") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if reset <= now:
+                    continue
+                if self.model_cooldowns.get(mid, 0.0) < reset:
+                    self.model_cooldowns[mid] = reset
+                    restored.append(mid)
+        return sorted(restored)
 
     def model_token_limit_blocked(self, model=None):
         """True when `model` already burned its daily token budget today.
@@ -1047,7 +1191,9 @@ class Account(object):
             return False
         self.product = new
         try:
-            self.clear_error()
+            # 清的是限流状态；上游判定额度用满的禁用（仍在恢复期内的
+            # model_caps）跨身分成立，不能被这次切换顺手清掉。
+            self.clear_error(keep_caps=True)
         except Exception:
             pass
         return True
@@ -1128,6 +1274,8 @@ class Account(object):
     def can_checkin(self):
         if self.realm != "cn":
             return False
+        if self.is_enterprise():
+            return False
         if not self.last_checkin:
             return True
         today_str = time.strftime("%Y-%m-%d")
@@ -1140,6 +1288,17 @@ class Account(object):
             return True
         today_str = time.strftime("%Y-%m-%d")
         return not str(self.last_daily_chat).startswith(today_str)
+
+    def can_report_activity(self):
+        """国内版每天一次的对话活跃上报（点亮 growth 连登）是否还没做过。"""
+        if self.realm != "cn":
+            return False
+        if self.is_enterprise():
+            return False
+        if not self.last_activity_report:
+            return True
+        today_str = time.strftime("%Y-%m-%d")
+        return not str(self.last_activity_report).startswith(today_str)
 
     def web_headers(self):
         """网页版 app 的出站头：只有 bearer 与 X-User-Id，没有桌面端指纹。"""
@@ -1317,6 +1476,8 @@ class Account(object):
         """
         if self.realm != "cn":
             return {"ok": False, "error": "checkin is only available for CN realm accounts"}
+        if self.is_enterprise():
+            return {"ok": False, "error": "enterprise accounts do not support checkin"}
         res = self._checkin_upstream()
         wb_activity.record_attempt(self, wb_activity.TASK_CHECKIN, trigger, res)
         return res
@@ -1343,6 +1504,35 @@ class Account(object):
                 return {"ok": False, "error": "HTTP %d" % exc.code}
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
+
+    def report_activity(self):
+        """国内版对话活跃上报：一条 /v2/report 点亮官方 growth 连登。
+
+        这是客户端 chat_request_send 事件的复刻（事件形状见 wb_tasks.build_event），
+        上游口径：必须带 userId，否则服务端 200 但静默丢弃；每号每天一次即可，
+        不做多时点高频上报（风控口径）。成功后记 lastActivityReport 并落盘，再读
+        一次 /activity/growth/streak 把连登天数带回去——读失败不影响上报本身的
+        结论。只有国内版有这套成长体系，国际版直接拒绝。
+        """
+        if self.realm != "cn":
+            return {"ok": False, "error": "activity report is only for CN realm accounts"}
+        if self.is_enterprise():
+            return {"ok": False, "error": "enterprise accounts do not support activity report"}
+        import wb_tasks
+        event = wb_tasks.build_event(self, "chat")
+        if not wb_tasks.report_events(self, [event]):
+            return {"ok": False, "error": "活跃上报被上游拒绝（未返回 code=0）"}
+        self.last_activity_report = time.strftime("%Y-%m-%d %H:%M:%S")
+        if self.path and os.path.exists(os.path.dirname(self.path)):
+            self.save(os.path.dirname(self.path))
+        days = wb_tasks.fetch_streak_days(self)
+        if days is None:
+            return {"ok": True, "msg": "对话活跃上报成功（连登天数未知）"}
+        if days <= 0:
+            return {"ok": True, "streak_days": 0,
+                    "msg": "对话活跃上报成功，但连登仍是 0 天（可能被上游静默丢弃）"}
+        return {"ok": True, "streak_days": days,
+                "msg": "对话活跃上报成功（连续打卡 %d 天）" % days}
 
     def _parse_package_account(self, acc):
         pkg_name = acc.get("PackageName") or "Package"
@@ -1895,10 +2085,23 @@ self.balance_until - now, self.breaker_until - now, self.degrade_until - now)
                 wait = max(wait, max(0.0, self.model_cooldowns.get(model, 0.0) - now))
         return wait
 
-    def clear_error(self, model=None):
+    def clear_error(self, model=None, keep_caps=False):
+        """清掉限流状态；keep_caps 保留「上游判定额度用满」的禁用。
+
+        换身分/重试要清的是限流窗口，而 6004 的禁用是上游给的窗口事实（恢复
+        时刻之前这个组合就是不可用），不能顺手清掉——真机实测（2026-10-10）：
+        auto-switch 开着时它会把刚记下的 cap 冷却一起清掉，6004 之后账号立刻
+        又可用，禁用形同不存在。
+        """
         with self._throttle_lock:
             if model:
-                self.model_cooldowns.pop(model, None)
+                if not (keep_caps and self.cap_until(model) > 0):
+                    self.model_cooldowns.pop(model, None)
+            elif keep_caps:
+                now = time.time()
+                for mid in [m for m in self.model_cooldowns
+                            if self.cap_until(m, now) <= 0]:
+                    self.model_cooldowns.pop(mid, None)
             else:
                 self.model_cooldowns.clear()
             if (self.last_error or self.cooldown_until
@@ -1918,29 +2121,86 @@ def _human_delta(seconds):
     return "%d min" % int(seconds / 60)
 
 class SessionAffinity(object):
-    def __init__(self, ttl=7200, max_entries=5000):
+    """Which upstream account served a conversation, so the next turn can go
+    back to it.
+
+    Each conversation keeps a short most-recently-used list rather than a single
+    account. The front entry is what `get()` returns - the account the last turn
+    went to. The entries behind it are the accounts that served the conversation
+    before that, most recent first: when the front one is unusable (cooling,
+    parked, disabled) the next pick prefers an account this conversation has
+    already warmed upstream over a cold one, so the prompt cache survives the
+    move instead of being rebuilt from scratch. Every entry expires on its own
+    clock, so an account the conversation has not visited for a while drops out
+    by itself.
+
+    The history is small on purpose (`history`, 3): it is a list of accounts
+    that may still hold the conversation's prefix, not a load-balancing device.
+    """
+
+    def __init__(self, ttl=7200, max_entries=5000, history=3):
         self.ttl = ttl
         self.max_entries = max_entries
+        self.history = max(1, int(history))
         self.bindings = {}
         self._lock = threading.Lock()
+    def _live(self, key, now):
+        """The conversation's unexpired entries, dropping the rest in place."""
+        entries = self.bindings.get(key) or []
+        live = [entry for entry in entries if entry[1] > now]
+        if live:
+            self.bindings[key] = live
+        else:
+            self.bindings.pop(key, None)
+        return live
     def get(self, key):
+        """The account the last turn went to (slides its expiry), or None."""
         if not key: return None
         with self._lock:
-            entry = self.bindings.get(key)
-            if not entry: return None
-            uid, exp = entry
-            if time.time() > exp:
-                self.bindings.pop(key, None)
-                return None
-            self.bindings[key] = (uid, time.time() + self.ttl)
+            now = time.time()
+            live = self._live(key, now)
+            if not live: return None
+            uid, _exp = live[0]
+            live[0] = (uid, now + self.ttl)
             return uid
+    def recent(self, key):
+        """Every unexpired account of this conversation, most recent first."""
+        if not key: return []
+        with self._lock:
+            return [uid for uid, _exp in self._live(key, time.time())]
     def bind(self, key, uid):
+        """Make `uid` the front entry, deduped and capped at `history`."""
         if not key or not uid: return
+        now = time.time()
         with self._lock:
             if len(self.bindings) >= self.max_entries:
-                now = time.time()
-                self.bindings = {k: v for k, v in self.bindings.items() if v[1] > now}
-            self.bindings[key] = (uid, time.time() + self.ttl)
+                self.bindings = {k: v for k, v in self.bindings.items()
+                                 if v and v[0][1] > now}
+            entries = [entry for entry in (self.bindings.get(key) or [])
+                       if entry[0] != uid]
+            entries.insert(0, (uid, now + self.ttl))
+            self.bindings[key] = entries[:self.history]
+    def demote(self, key, uid=None):
+        """Drop one account from the conversation, keeping the others.
+
+        The failure paths use this instead of `unbind`: the account that just
+        failed (429 / 402 / 401 / 5xx / dropped connection) must not be handed
+        the next attempt, but the accounts before it may still hold this
+        conversation's prefix upstream - the next pick should try them before
+        falling back to a cold one. Dropping the front entry is the default;
+        pass `uid` to drop a specific one.
+        """
+        if not key: return
+        with self._lock:
+            entries = self.bindings.get(key) or []
+            if uid is None:
+                entries = entries[1:]
+            else:
+                entries = [entry for entry in entries if entry[0] != uid]
+            if entries:
+                self.bindings[key] = entries
+            else:
+                self.bindings.pop(key, None)
     def unbind(self, key):
         if not key: return
         with self._lock:
@@ -2116,6 +2376,18 @@ class AccountPool(object):
         # keyed by uid (see _weighted_pick). Runtime-only: a restart just
         # restarts the rotation.
         self._expiry_weights = {}
+        # 剩余用量优先调度：wb_proxy 每请求推来的 {(uid, model): 权重}（只有它
+        # 读得到剩余估算）。空表 = 不启用——开关关着、或没有任何组合接近估计
+        # 限额——选择就是原来的纯轮询。纯派生值，不落盘。
+        self._remaining_weights = {}
+        # 这条偏好自己的平滑加权轮询累计值，键是 (uid, model)：与临期的
+        # _expiry_weights 分开，两个偏好各自记各自的轮次。
+        self._remaining_pick_state = {}
+        # 页内轮转（超限对话）的每页游标，键是 (页号, 页大小)；整池轮转仍用
+        # _cursor，两条轮转互不挪动对方的位置。派生值，不落盘。
+        self._page_cursors = {}
+        # uid 排序表的缓存：池成员没变就直接复用，变了重建（见 _page_ranks）。
+        self._page_order_cache = None
         self.affinity = SessionAffinity()
 
     def load(self):
@@ -2135,7 +2407,24 @@ class AccountPool(object):
                     self.accounts.append(account)
             self.apply_reserve_credits()
             self.apply_expiring_window()
+            # 6004 的恢复时间跨重启有效：把还在恢复时间内的组合重新挂成模型
+            # 冷却，否则重启会把它们重新放出去，直到下次撞 429 才又停。
+            self.restore_model_caps()
             return self.accounts
+
+    def restore_model_caps(self, now=None):
+        """把仍在恢复时间内的 6004 挂回每个账号的模型冷却上。"""
+        now = time.time() if now is None else now
+        restored = {}
+        with self._lock:
+            for account in self.accounts:
+                mids = account.restore_model_caps(now)
+                if mids:
+                    restored[account.uid] = mids
+        for uid, mids in sorted(restored.items()):
+            self.log("account %s: 模型 %s 仍在额度恢复期内（至上游给定时刻）"
+                     % (uid[:8], ", ".join(mids)))
+        return restored
 
     def list_public(self, realm=None):
         with self._lock:
@@ -2332,6 +2621,28 @@ class AccountPool(object):
                 account.expiring_window_days = _realm_limit(values, account.realm)
         return values
 
+    def apply_remaining_weights(self, weights):
+        """换上 wb_proxy 算好的 (账号, 模型) 权重表（剩余用量优先调度）。
+
+        数据方向与 apply_daily_* 同款：只有 wb_proxy 读得到剩余估算（折叠、
+        预算与载荷都在那边），池不反向依赖它，只存派生值。None / 空表表示
+        「不启用」——开关关着，或这一刻没有组合接近估计限额——把上次的权重
+        清掉，选择立即回到纯轮询（开关关时行为与从前逐字节一致）。
+        权重 <= 1 的条目没有偏好意义，直接丢弃。返回存下来的表（测试用）。
+        """
+        table = {}
+        for pair, weight in (weights or {}).items():
+            try:
+                uid, model = pair
+                weight = int(weight)
+            except (TypeError, ValueError):
+                continue
+            if weight > 1:
+                table[(str(uid), str(model))] = weight
+        with self._lock:
+            self._remaining_weights = table
+        return table
+
     def apply_daily_token_limit(self, values=None, usage=None):
         """Re-resolve the daily token guard for every account.
 
@@ -2472,24 +2783,51 @@ class AccountPool(object):
             snapshot = [a for a in self.accounts if not realm or a.realm == realm]
         return sum(1 for a in snapshot if a.enabled and a.access_token and a.ready(model=model))
 
-    def pick_for_session(self, realm=None, session_key=None, exclude=None, model=None):
+    def pick_for_session(self, realm=None, session_key=None, exclude=None, model=None,
+                         page=None):
+        """Pick the account for one turn of a conversation.
+
+        Three shapes, in order of preference:
+
+        * A bound conversation (the normal case) keeps the account the last turn
+          went to.
+        * When that account is unusable right now (cooling, parked, disabled),
+          the conversation's other warm accounts are tried before the pool's own
+          preferences - they may still hold its prefix upstream (see
+          SessionAffinity). The account that serves the turn becomes the new
+          front entry, and the one it replaced stays behind it as a fallback.
+        * `page` marks a conversation that is past the affinity length cap: it
+          does not pin, it rotates over one page of the pool (an (index, size)
+          pair), so every account of the page keeps a warm copy without piling
+          every oversized body onto a single account.
+        """
         exclude = exclude or set()
-        if session_key:
-            bound_uid = self.affinity.get(session_key)
-            if bound_uid and bound_uid not in exclude:
-                account = self.get(bound_uid)
+        if session_key and page is None:
+            for uid in self.affinity.recent(session_key):
+                if uid in exclude:
+                    continue
+                account = self.get(uid)
                 if account and account.realm == realm and account.ready(model=model):
+                    self.affinity.bind(session_key, uid)
                     return account
-                self.affinity.unbind(session_key)
-        account = self.pick(realm=realm, exclude=exclude, model=model)
-        if account and session_key:
+        account = self.pick(realm=realm, exclude=exclude, model=model, page=page)
+        if account is None and page is not None:
+            # The page has nobody usable right now. Serving the conversation
+            # from outside it beats not serving it at all.
+            account = self.pick(realm=realm, exclude=exclude, model=model)
+        # A page conversation is not bound on purpose: its rotation is what keeps
+        # every account of the page warm, and a binding would pin it back to one
+        # (the state it was released from). The page cursor carries its rotation.
+        if account and session_key and page is None:
             self.affinity.bind(session_key, account.uid)
         return account
 
-    def pick(self, realm=None, exclude=None, model=None):
+    def pick(self, realm=None, exclude=None, model=None, page=None):
         exclude = exclude or set()
         with self._lock:
             snapshot = [a for a in self.accounts if not realm or a.realm == realm]
+        if page is not None:
+            snapshot = self._page_slice(snapshot, page)
         if not snapshot:
             return None
         # Expiring-credits preference: accounts whose soonest-expiring credit
@@ -2503,7 +2841,13 @@ class AccountPool(object):
         account = self._pick_expiring_first(snapshot, exclude, model)
         if account is not None:
             return account
-        return self._rotate_pick(snapshot, exclude, model)
+        # 剩余用量优先调度（开关默认关）：估计剩余接近耗尽的 (账号, 模型) 接着
+        # 被优先交出（见 _pick_remaining_first）。权重表为空时这条路径直接
+        # 返回 None，落到与从前完全相同的纯轮询上。
+        account = self._pick_remaining_first(snapshot, exclude, model)
+        if account is not None:
+            return account
+        return self._rotate_pick(snapshot, exclude, model, cursor_key=page)
 
     def _pick_expiring_first(self, snapshot, exclude, model):
         """Serve the in-window accounts first, or None when none can.
@@ -2541,13 +2885,64 @@ class AccountPool(object):
             return 1
         return max(1, int(round(window - days)) + 1)
 
-    def _weighted_pick(self, ready):
-        """Smooth weighted round-robin over the ready accounts.
+    def _pick_remaining_first(self, snapshot, exclude, model):
+        """剩余估算接近耗尽的 (账号, 模型) 优先接单，或 None（没有可交的）。
 
-        nginx's algorithm: every account accrues its weight each pick, the
+        与临期积分那条同款的两层结构：只有权重 > 1（快达到估计限额）的组合
+        进入这一层，它们之间按剩余多少平滑加权轮询——越接近耗尽分到的流量
+        越多，但同层之内没有谁独占。没有加权的可选项，或它们此刻都不可用
+        （冷却、限额、被排除）时落回纯轮询，一个快耗尽的组合不会把整个模型
+        卡死。剩余为 0 与没有预算样本的组合由 wb_proxy 侧就不进表：前者没有
+        「先用掉」的意义（冷却中的本来也不可用），后者没有可比较的尺度。
+        """
+        if not model:
+            return None
+        table = self._remaining_weights
+        if not table:
+            return None
+        ready = []
+        for account in snapshot:
+            if account.uid in exclude:
+                continue
+            weight = table.get((account.uid, model))
+            if weight is None or weight <= 1:
+                continue
+            if not account.ready(model=model):
+                continue
+            ready.append((account, weight))
+        if not ready:
+            return None
+        return self._smooth_weighted_pick(
+            [(account, (account.uid, model), weight) for account, weight in ready],
+            "_remaining_pick_state",
+            keep_uids=set(a.uid for a in snapshot))
+
+    def _weighted_pick(self, ready):
+        """临期积分那条的入口：在窗口内的账号之间平滑加权轮询。"""
+        return self._smooth_weighted_pick(
+            [(account, account.uid, self._expiry_weight(account))
+             for account in ready], "_expiry_weights")
+
+    def _smooth_weighted_pick(self, entries, state_name, keep_uids=None):
+        """Smooth weighted round-robin over (account, key, weight) triples.
+
+        nginx's algorithm: every entry accrues its weight each pick, the
         largest running total wins, and the winner pays back the whole round's
-        weight. Equal weights degenerate to a plain rotation, so the
-        same-day-expiry accounts keep alternating.
+        weight. Equal weights degenerate to a plain rotation, so same-weight
+        entries keep taking turns.
+
+        `key` is what the rotation state is kept under - a uid for the
+        expiring-credits window, a (uid, model) pair for the remaining-usage
+        preference - and `state_name` names the pool attribute holding that
+        state, so the two preferences never share a rotation.
+
+        Without `keep_uids` the state is pruned to exactly the entries taking
+        part this pick (the expiring window's behaviour). The remaining-usage
+        preference passes every account still in the pool instead: pruning by
+        the current pick alone would drop another model's (or another realm's)
+        rotation every time it is someone else's turn, and a rotation that
+        restarts every pick collapses the weights into "always the first
+        entry". Entries of accounts that really left the pool are dropped.
 
         The rotation state is shared by every request thread, so the
         read-modify-write runs under the pool lock. The `ready()` checks that
@@ -2555,31 +2950,86 @@ class AccountPool(object):
         holding the lock across one expiring credential would serialise every
         dispatch in the realm behind it.
         """
-        ready_uids = set(a.uid for a in ready)
-        weights = [(account, self._expiry_weight(account)) for account in ready]
+        keys = set(key for _account, key, _weight in entries)
         with self._lock:
-            state = dict((uid, value) for uid, value in self._expiry_weights.items()
-                         if uid in ready_uids)
+            stored = getattr(self, state_name)
+            if keep_uids is None:
+                state = dict((key, value) for key, value in stored.items()
+                             if key in keys)
+            else:
+                state = dict((key, value) for key, value in stored.items()
+                             if key[0] in keep_uids)
             total = 0
             chosen = None
-            for account, weight in weights:
-                state[account.uid] = state.get(account.uid, 0) + weight
+            for account, key, weight in entries:
+                state[key] = state.get(key, 0) + weight
                 total += weight
-                if chosen is None or state[account.uid] > state[chosen.uid]:
-                    chosen = account
+                if chosen is None or state[key] > state[chosen[1]]:
+                    chosen = (account, key)
             if chosen is None:
                 return None
-            state[chosen.uid] -= total
-            self._expiry_weights = state
-        return chosen
+            state[chosen[1]] -= total
+            setattr(self, state_name, state)
+        return chosen[0]
 
-    def _rotate_pick(self, group, exclude, model):
-        """Round-robin one group of accounts, advancing the shared cursor."""
+    def _page_slice(self, snapshot, page):
+        """The accounts on one page of the pool.
+
+        A page is a fixed slot: an account's rank among the realm's accounts
+        (sorted by uid) modulo the page size. Ranking inside the realm - not
+        across the whole pool, and not by load order or file name - is what
+        keeps a page the size it says it is: with a mixed-realm pool, ranking
+        globally would leave a page with one usable account for this realm and
+        pin its conversations, the state the length cap exists to leave. Uid
+        order also keeps a conversation's page stable across restarts and
+        reloads; adding or removing an account reshuffles at most one slot per
+        page.
+
+        A page cannot be larger than the realm: a size that covers every
+        account (or more) means the page is the realm's whole pool.
+        """
+        try:
+            index, size = int(page[0]), int(page[1])
+        except (TypeError, ValueError, IndexError):
+            return snapshot
+        ranks = self._page_ranks(snapshot)
+        if size <= 1 or size >= len(ranks):
+            return snapshot
+        out = []
+        for account in snapshot:
+            rank = ranks.get(account.uid)
+            if rank is not None and rank % size == index % size:
+                out.append(account)
+        return out
+
+    def _page_ranks(self, snapshot):
+        """uid -> rank among the snapshot's accounts, cached until it changes.
+
+        The snapshot is the realm-filtered pool (readiness is not part of it),
+        so the ranks - and therefore the pages - only move when an account is
+        added to or removed from that realm.
+        """
+        uids = tuple(sorted(a.uid for a in snapshot if a.uid))
+        cached = self._page_order_cache
+        if cached is not None and cached[0] == uids:
+            return cached[1]
+        ranks = dict((uid, rank) for rank, uid in enumerate(uids))
+        self._page_order_cache = (uids, ranks)
+        return ranks
+
+    def _rotate_pick(self, group, exclude, model, cursor_key=None):
+        """Round-robin one group of accounts, advancing its cursor.
+
+        The whole-pool rotation keeps the single `_cursor` it always had. A
+        page rotation keeps its own cursor per page, so page picks and plain
+        picks never move each other's position.
+        """
         total = len(group)
         if total == 0:
             return None
         with self._lock:
-            start = self._cursor
+            start = (self._page_cursors.get(cursor_key, 0) if cursor_key is not None
+                     else self._cursor)
         for offset in range(total):
             index = (start + offset) % total
             account = group[index]
@@ -2587,7 +3037,10 @@ class AccountPool(object):
                 continue
             if account.ready(model=model):
                 with self._lock:
-                    self._cursor = (index + 1) % total
+                    if cursor_key is not None:
+                        self._page_cursors[cursor_key] = (index + 1) % total
+                    else:
+                        self._cursor = (index + 1) % total
                 return account
         return None
 
@@ -2909,7 +3362,8 @@ EXPORT_VERSION = 1
 # Fields that describe live state rather than the credential itself. They are
 # exported for inspection but never trusted on import: a stale cooldown or a
 # disabled flag from another machine would silently cripple the target pool.
-VOLATILE_FIELDS = ("cooldownUntil", "lastError", "credits", "lastCheckin", "lastDailyChat")
+VOLATILE_FIELDS = ("cooldownUntil", "lastError", "credits", "lastCheckin",
+                   "lastDailyChat", "lastActivityReport", "modelCaps")
 
 # The subset of VOLATILE_FIELDS that must not round-trip through the local
 # credential file at all: they are not trusted on load and not written by save(),

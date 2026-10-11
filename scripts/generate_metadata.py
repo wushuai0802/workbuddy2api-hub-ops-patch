@@ -7,9 +7,9 @@ from pathlib import Path
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
-COMMIT = '55dbb9ebcac3d55b26442d9bbc8b2e11ece637da'
-TAG = 'v1.6.19'
-PATCH_ID = 'v1.6.19-ops.20261011.2'
+COMMIT = 'cb6a844588705ea01388be2b9df1f0cbbbcde357'
+TAG = 'v1.6.20'
+PATCH_ID = 'v1.6.20-ops.20261011.1'
 MODULES = ('wb_proxy.py', 'wb_webtools.py', 'wb_accounts.py', 'wb_ops.py', 'wb_stall.py')
 PUBLIC_DIRS = ('files', 'tests', 'docs', 'scripts', 'patches', '.github')
 PUBLIC_ROOT = ('README.md', 'README.en.md', 'LICENSE', 'NOTICE.md', 'CHANGELOG.md',

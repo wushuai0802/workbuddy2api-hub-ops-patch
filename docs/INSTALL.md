@@ -1,14 +1,14 @@
 # 安装与回滚
 
-本指南针对 **v1.6.19-ops.20261011.2**，只支持官方 v1.6.19 提交：
+本指南针对 **v1.6.20-ops.20261011.1**，只支持官方 v1.6.20 提交：
 
-`55dbb9ebcac3d55b26442d9bbc8b2e11ece637da`
+`cb6a844588705ea01388be2b9df1f0cbbbcde357`
 
 以下命令为 Linux/macOS 的 shell 示例。所有绝对路径、Compose 服务名、镜像名和访问地址都由你替换为自己的值。Windows 源码安装可用 Python 3.11+ 执行相同的安装器参数，并使用自己的完整路径。
 
 ## 1. 获取并核对补丁与官方源码
 
-可以使用 [Release ZIP](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.6.19-ops.20261011.2)，下载 ZIP 和 SHA256SUMS.txt 后，在两者所在目录执行：
+可以使用 [Release ZIP](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.6.20-ops.20261011.1)，下载 `workbuddy2api-hub-v1.6.20-ops-20261011-r1.zip` 和 SHA256SUMS.txt 后，在两者所在目录执行：
 
 ~~~sh
 sha256sum -c SHA256SUMS.txt
@@ -17,16 +17,16 @@ sha256sum -c SHA256SUMS.txt
 ZIP 顶层目录为 `workbuddy2api-hub-ops-patch/`；将 `PATCH_DIR` 设为解压后含 `apply.py` 的目录。也可以获取补丁仓库的固定 tag：
 
 ~~~sh
-git clone --depth 1 --branch v1.6.19-ops.20261011.2 https://github.com/wushuai0802/workbuddy2api-hub-ops-patch.git ops-patch-20261011
-git clone --depth 1 --branch v1.6.19 https://github.com/ardeyouxipianyi/workbuddy2api-hub.git workbuddy2api-hub-v1.6.19
-git -C workbuddy2api-hub-v1.6.19 rev-parse HEAD
+git clone --depth 1 --branch v1.6.20-ops.20261011.1 https://github.com/wushuai0802/workbuddy2api-hub-ops-patch.git ops-patch-v1620
+git clone --depth 1 --branch v1.6.20 https://github.com/ardeyouxipianyi/workbuddy2api-hub.git workbuddy2api-hub-v1.6.20
+git -C workbuddy2api-hub-v1.6.20 rev-parse HEAD
 ~~~
 
 核对输出的完整提交 SHA。工作目录内已经有同名文件时，先检查并换一个新目录，不覆盖旧部署。
 
 ~~~sh
-PATCH_DIR='/absolute/path/to/ops-patch-20261011'
-TARGET_DIR='/absolute/path/to/workbuddy2api-hub-v1.6.19'
+PATCH_DIR='/absolute/path/to/ops-patch-v1620'
+TARGET_DIR='/absolute/path/to/workbuddy2api-hub-v1.6.20'
 python3 -B "$PATCH_DIR/apply.py" --verify-package
 python3 -B "$PATCH_DIR/apply.py" --target "$TARGET_DIR" --dry-run
 ~~~
@@ -34,6 +34,8 @@ python3 -B "$PATCH_DIR/apply.py" --target "$TARGET_DIR" --dry-run
 两个检查成功后再继续。`--verify-package` 只核对包；`--dry-run` 核对目标基线但不写文件。基线依赖也会检查，不能只凭版本字符串判断兼容。
 
 如果目标已有旧补丁或本地改动，安装器可能拒绝。不要删除状态、修改校验清单或强行覆盖。保留旧源码、镜像和数据，在新目录准备准确的官方源码；本包不是旧补丁卸载器。
+
+从 v1.6.19 补丁升级也使用新目录的官方 v1.6.20，不能在已打旧补丁的目录上叠加本包。仍使用 v1.6.19 时，请查看[历史 r2 Release](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.6.19-ops.20261011.2)中的安装指南。
 
 ## 2. 保存自己的部署与数据
 
@@ -47,7 +49,7 @@ Docker Compose 用户先设定自己的值：
 COMPOSE_FILE='/absolute/path/to/your/compose.yml'
 SERVICE='your-hub-compose-service'
 BACKUP_DIR='/absolute/path/to/private-backups/pre-ops-20261011'
-PATCHED_IMAGE='your-local-name/workbuddy2api-hub:1.6.19-ops.20261011.2'
+PATCHED_IMAGE='your-local-name/workbuddy2api-hub:1.6.20-ops.20261011.1'
 ROLLBACK_IMAGE='your-local-name/workbuddy2api-hub:rollback-before-ops-20261011'
 
 docker compose -f "$COMPOSE_FILE" config --services
@@ -104,9 +106,9 @@ docker build -t "$PATCHED_IMAGE" "$TARGET_DIR"
 docker run --rm --network none --entrypoint python "$PATCHED_IMAGE" -B -c 'import wb_proxy; print(wb_proxy.retry_health_snapshot()["ops_patch_id"])'
 ~~~
 
-第二条命令应输出 `v1.6.19-ops.20261011.2`。它使用空的容器数据和禁用的网络，只验证代码可导入和补丁标记，不能证明实际账号或对话可用。
+第二条命令应输出 `v1.6.20-ops.20261011.1`。它使用空的容器数据和禁用的网络，只验证代码可导入和补丁标记，不能证明实际账号或对话可用。
 
-官方 v1.6.19 Dockerfile 会复制 `wb_*.py`，因此包含这五个模块。它不复制安装器、源码安装状态和代码备份，镜像部署应通过镜像切换回滚。
+官方 v1.6.20 Dockerfile 会复制 `wb_*.py`，因此包含这五个模块和上游新增的 `wb_upstream_pool.py` 连接池依赖。它不复制安装器、源码安装状态和代码备份，镜像部署应通过镜像切换回滚。
 
 在原 Compose 文件中，仅将目标 Hub 服务的 `image` 改成刚构建的固定镜像名。保留其余环境变量、Key、网络、端口、挂载、启动参数和重启策略。检查是否有旧源码 bind mount 遮住新镜像；如有，先按自己的源码部署方式处理，不能忽略。
 
@@ -118,9 +120,17 @@ docker compose -f "$COMPOSE_FILE" up -d --no-deps --no-build --pull never "$SERV
 
 不需要整栈 `down`，也不要使用未指定服务的 `up` 来更新依赖。非 Compose 部署应使用你核对过的原参数创建新容器；本指南不替你推断 `docker run` 配置。
 
+### v1.6.20 的配置兼容项
+
+本补丁保留上游 **16 MiB** 的默认请求体上限。若你的客户端确实发送超过该值的 JSON 历史，可在目标服务环境变量中显式添加 `WB_MAX_PAYLOAD_BYTES: "52428800"`（50 MiB），并评估并发大请求的内存使用。它不是公共补丁的全局默认值；不要因安装补丁而自动调高。
+
+保留原有调度配置，核对国内版连登管家的自动补签、兑换和抽奖行为；补签或抽奖会使用对应卡券/次数。「剩余用量优先调度」默认关闭，本补丁不代你开启。服务端 Docker/OpenWrt 看板的客户端「一键配置」不可用是上游 v1.6.20 的部署限制，并非安装失败。
+
+上游连接复用默认开启，首帧与生成期限保护仍启用。单独排查复用行为时，可在自己的目标服务设置 `WB_UPSTREAM_KEEPALIVE=0` 并记录对照结果。
+
 ## 5. 部署后的验收
 
-通过原有鉴权访问自己的 `/health/retry`，确认 `ops_patch_id` 为 `v1.6.19-ops.20261011.2`。该端点沿用现有 API-key 策略；未设置 Key 时没有额外鉴权。
+通过原有鉴权访问自己的 `/health/retry`，确认 `ops_patch_id` 为 `v1.6.20-ops.20261011.1`。该端点沿用现有 API-key 策略；未设置 Key 时没有额外鉴权。
 
 检查启动日志、账号状态、原控制台、端口和数据挂载，确认配置与用量历史仍存在。不要把日志中的 Key、账号信息或完整配置贴到 Issue。
 
@@ -139,7 +149,7 @@ python3 -B "$PATCH_DIR/apply.py" --target "$TARGET_DIR" --rollback --dry-run
 python3 -B "$PATCH_DIR/apply.py" --target "$TARGET_DIR" --rollback
 ~~~
 
-回滚恢复此次保存的官方 v1.6.19 代码，保留代码备份。它不恢复更旧补丁、不同版本或账号数据。若安装后的代码又被修改，安装器会拒绝覆盖；先检查修改，不能强制回退。
+回滚恢复此次保存的官方 v1.6.20 代码，保留代码备份。它不恢复更旧补丁、不同版本或账号数据。若安装后的代码又被修改，安装器会拒绝覆盖；先检查修改，不能强制回退。
 
 ### Docker 安装：切回旧镜像
 

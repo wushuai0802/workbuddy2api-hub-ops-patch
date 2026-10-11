@@ -1,19 +1,20 @@
 --- a/wb_proxy.py
 +++ b/wb_proxy.py
-@@ -14,9 +14,11 @@
- start-wb-proxy.command (or ./start-wb-proxy.sh) on macOS/Linux.
+@@ -15,10 +15,12 @@
  """
  import argparse
+ import bisect
 +import copy
  import hashlib
+ import ipaddress
 -from collections import deque
 +from collections import Counter, deque
  import re
 +import itertools
  import json
  import os
- MAX_PAYLOAD_BYTES = int(os.environ.get("WB_MAX_PAYLOAD_BYTES", 50 * 1024 * 1024))  # 50MB limit
-@@ -43,6 +45,7 @@
+ # 单请求体上限。默认值从 50MB 收紧到 16MB，是「内存护栏」：body 先整体读成 bytes、
+@@ -53,6 +55,7 @@
  import sys
  import threading
  import time
@@ -21,7 +22,7 @@
  import urllib.error
  import urllib.request
  import uuid
-@@ -54,6 +57,14 @@
+@@ -64,6 +67,14 @@
  import wb_pricing
  import wb_settings
  import wb_webtools
@@ -36,7 +37,7 @@
  import wb_identity
  import wb_prompt
  import wb_modelsdev
-@@ -179,7 +190,7 @@
+@@ -253,7 +264,7 @@
  # API from another origin. Management routes (accounts, settings, usage,
  # scheduler, panel) serve the dashboard, which is same-origin, so they get no
  # ACAO header - that keeps a stray page on the LAN from reading their replies.
@@ -45,7 +46,7 @@
  # Management paths that happen to live under /v1 must not be treated as API:
  # /v1/usage reports account-level spend and is gated by the panel session.
  MANAGEMENT_PATH_PREFIXES = ("/v1/usage", "/usage", "/accounts", "/settings",
-@@ -602,7 +613,7 @@
+@@ -759,7 +770,7 @@
  
  def record_error(model, status, message, elapsed_ms=None, account=None,
                   usage=None, stream=None, ttft_ms=None, gen_ms=None, fp=None,
@@ -54,7 +55,7 @@
      """Record one failed request as exactly one JSONL row.
  
      Passing the account uid records which account the request was bound to, so
-@@ -621,6 +632,9 @@
+@@ -778,6 +789,9 @@
      only way a rejected request can be attributed to a key, so failures on the
      key's model whitelist still land on the right row instead of vanishing
      into the unattributed bucket.
@@ -64,7 +65,7 @@
      """
      fields = _extract_usage(usage) or {}
      row = {
-@@ -647,6 +661,8 @@
+@@ -804,6 +818,8 @@
          acc = POOL.get(account) if POOL else None
          row["realm"] = acc.realm if acc else CURRENT_REALM
      row["key"] = key or ""
@@ -73,7 +74,7 @@
      with _lock:
          _usage["errors"] += 1
          if elapsed_ms is not None:
-@@ -5533,6 +5549,857 @@
+@@ -7242,6 +7258,881 @@
      if not line or line.startswith(":"):
          return ""
      return line
@@ -129,7 +130,7 @@
 +        limit = max(1, min(10000, int(limit)))
 +    except (ValueError, TypeError):
 +        limit = 200
-+    stats = {"retries": retry_snapshot(), "pid": os.getpid(), "ops_patch_id": "v1.6.19-ops.20261011.2",
++    stats = {"retries": retry_snapshot(), "pid": os.getpid(), "ops_patch_id": "v1.6.20-ops.20261011.1",
 +             "loops": loop_health_snapshot(),
 +             "process_started": _RETRY_STARTED_AT, "turns": 0,
 +             "reasoning_only": 0, "empty_output": 0, "failed": 0,
@@ -255,13 +256,33 @@
 +    return True
 +
 +
++def _stream_response(upstream):
++    return upstream.raw if isinstance(upstream, _ProbedStream) else upstream
++
++
 +def _stream_socket(upstream):
-+    fp = getattr(upstream, "fp", None)
++    response = _stream_response(upstream)
++    # A pooled response that naturally ended no longer owns its connection.
++    # Its old _pool_conn may already be serving a different request.
++    if getattr(response, "_released", False):
++        return None
++    fp = getattr(response, "fp", None)
 +    raw = getattr(fp, "raw", None)
-+    return getattr(raw, "_sock", None)
++    sock = getattr(raw, "_sock", None) or getattr(fp, "_sock", None)
++    if sock is None:
++        sock = getattr(getattr(response, "_pool_conn", None), "sock", None)
++    return sock
 +
 +
 +def _interrupt_upstream(upstream):
++    response = _stream_response(upstream)
++    if getattr(response, "_pool_conn", None) is not None:
++        if getattr(response, "_released", False):
++            return
++        # Mark the leased connection unusable before shutdown. HTTPResponse
++        # may reach a body terminator during interruption; even then its
++        # _PooledResponse._release must discard, never recycle, this socket.
++        response.will_close = True
 +    sock = _stream_socket(upstream)
 +    if sock is not None:
 +        try:
@@ -270,7 +291,7 @@
 +            pass
 +    else:
 +        try:
-+            upstream.close()
++            response.close()
 +        except Exception:
 +            pass
 +
@@ -828,6 +849,9 @@
 +                if not frame.get("choices"):
 +                    continue
 +                timer.cancel()
++                timer.join()
++                if time.monotonic() >= deadline_at:
++                    raise TimeoutError("first-frame deadline exceeded")
 +                if sock is not None:
 +                    sock.settimeout(upstream_timeouts()[1])
 +                return _ProbedStream(upstream, iterator, prefix), account
@@ -862,6 +886,7 @@
 +        finally:
 +            if timer is not None:
 +                timer.cancel()
++                timer.join()
 +    return None, None
 +
 +
@@ -919,7 +944,7 @@
 +                _loop_event("retry_hint_applied")
 +            else:
 +                _loop_event("retry_hint_skipped_shape")
-+        # Public v1.6.17 API returns effort as a third item. Recovery keeps
++        # The upstream API returns effort as a third item. Recovery keeps
 +        # the same request effort; its internal callback contract stays a pair.
 +        return open_upstream(request_body, session_key=session_key, target_realm=realm,
 +                             exclude_uids=excluded, deadline_at=deadline_at)[:2]
@@ -931,7 +956,7 @@
  def clean_chunk(raw):
      """Drop the empty noise fields the WorkBuddy gateway pads deltas with."""
      try:
-@@ -5552,11 +6419,16 @@
+@@ -7261,11 +8152,16 @@
          # PATCHED-BY-OPS: 原判断 `if not delta.get("function_call")` 对
          # {"name":"","arguments":""} 为假（非空 dict 是真值），空占位删不掉。
          # 改为显式检查：name 与 arguments 均空才视为占位噪音。
@@ -949,7 +974,7 @@
              else:
                  fc_empty = not fc
              if fc_empty:
-@@ -5577,7 +6449,7 @@
+@@ -7286,7 +8182,7 @@
      changed = False
      if isinstance(obj, dict):
          fc = obj.get("function_call")
@@ -958,7 +983,7 @@
              obj.pop("function_call", None)
              changed = True
          tc = obj.get("tool_calls")
-@@ -5735,7 +6607,10 @@
+@@ -7470,7 +8366,10 @@
              if "content" in item:
                  item["content"] = sanitize_content(item["content"])
              if isinstance(item.get("reasoning_content"), str):
@@ -970,7 +995,7 @@
              if "tool_calls" in item:
                  item["tool_calls"] = sanitize_tool_calls(item["tool_calls"])
              out.append(item)
-@@ -5747,6 +6622,118 @@
+@@ -7482,6 +8381,118 @@
  # ---------------------------------------------------------------------------
  # Tool-call pairing repair
  # ---------------------------------------------------------------------------
@@ -1089,7 +1114,7 @@
  def _empty_content(value):
      """True when an assistant message carries no content at all.
  
-@@ -6018,7 +7005,7 @@
+@@ -7753,7 +8764,7 @@
  # enough on its own: `reasoning` is mirrored with a non-empty value.
  def backfill_reasoning_content(messages, model, thinking_enabled=None):
      if not model or not str(model).lower().startswith("deepseek"):
@@ -1098,7 +1123,7 @@
      if thinking_enabled is None:
          thinking_enabled = False
      has_trace = False
-@@ -6038,17 +7025,28 @@
+@@ -7773,17 +8784,28 @@
      for m in messages:
          if isinstance(m, dict) and m.get("role") == "assistant":
              item = dict(m)
@@ -1128,7 +1153,7 @@
              if not (isinstance(existing, str) and existing):
                  item["reasoning"] = rc if rc else " "
              out.append(item)
-@@ -6423,6 +7421,11 @@
+@@ -8158,6 +9180,11 @@
      return cfg
  
  
@@ -1140,7 +1165,7 @@
  def apply_prompt_mode(messages):
      """Apply the configured prompt mode to one request's messages.
  
-@@ -6433,7 +7436,7 @@
+@@ -8168,7 +9195,7 @@
      """
      cfg = prompt_mode_config()
      mode = cfg.get("mode") or "passthrough"
@@ -1149,7 +1174,7 @@
      if mode in ("custom", "append"):
          try:
              text = wb_prompt.load_prompt(mode, cfg.get("file"))
-@@ -6468,6 +7471,7 @@
+@@ -8203,6 +9230,7 @@
      # one the upstream sees, with the client's fingerprint-y system text gone.
      messages = apply_prompt_mode(messages)
      messages = sanitize_messages(messages)
@@ -1157,7 +1182,7 @@
      messages = backfill_reasoning_content(
          messages, model, thinking_enabled=thinking_enabled
      )
-@@ -6491,7 +7495,10 @@
+@@ -8226,7 +9254,10 @@
      repaired, _merged = merge_adjacent_tool_calls(body["messages"])
      repaired, _repacked = repack_tool_result_blocks(repaired)
      repaired, _cleaned = cleanup_orphan_tool_calls(repaired)
@@ -1169,19 +1194,41 @@
      translate_max_completion_tokens(body)
      normalize_tool_choice(body)
      normalize_tools(body)
-@@ -7022,8 +8029,9 @@
+@@ -8727,8 +9758,8 @@
+ 
+     header covers connect/TLS/first byte; idle bounds each mid-stream
+     read, so active data keeps the connection alive while a silent
+-    stream fails out and releases its in-flight lease. There is no
+-    total-duration cap, matching the panel project's semantics.
++    stream fails out and releases its in-flight lease. The ops guard adds
++    a separate shared generation deadline across safe recovery attempts.
+     """
+     try:
+         cfg = wb_settings.upstream_config(ACCOUNTS_DIR)
+@@ -8762,11 +9793,7 @@
+         return False
+     if seconds <= 0:
+         return False
+-    fp = getattr(response, "fp", None)
+-    raw = getattr(fp, "raw", None)
+-    sock = getattr(raw, "_sock", None)
+-    if sock is None:
+-        sock = getattr(fp, "_sock", None)
++    sock = _stream_socket(response)
+     if sock is None:
+         return False
+     try:
+@@ -8776,7 +9803,8 @@
          return False
  
  
--def open_upstream(payload, session_key=None, target_realm=None):
--    # Refresh the daily guards before picking. The scan underneath is
+-def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=None):
 +def open_upstream(payload, session_key=None, target_realm=None,
-+                  exclude_uids=None, deadline_at=None):
-+    # Refresh the daily token guard before picking. The scan underneath is
++                  exclude_uids=None, deadline_at=None, prebuilt_body=None):
+     # Refresh the daily guards before picking. The scan underneath is
      # incremental and TTL-cached, so this is a stat() plus a cached dict on
      # the hot path, and an account parked by any of the guards is skipped
-     # like any other unusable one.
-@@ -7042,7 +8050,8 @@
+@@ -8810,7 +9838,8 @@
              log("affinity: derived %s for %d msgs"
                  % (session_key, len(upstream_body.get("messages") or [])))
      total = max(1, POOL.count_ready(realm, model=model)) if POOL else 1
@@ -1191,7 +1238,7 @@
      last_error = None
      last_uid = None
      last_429 = None
-@@ -7050,6 +8059,8 @@
+@@ -8818,6 +9847,8 @@
      last_403_detail = ""
      transient_hits = 0
      degraded_retried = False
@@ -1200,13 +1247,19 @@
      # Read once per request, not per attempt: this is a panel setting, and a
      # settings read on every retry would be pure overhead.
      auto_switch = auto_switch_product_enabled()
-@@ -7057,12 +8068,26 @@
+@@ -8825,16 +9856,30 @@
      # once per retry, so a settings read never lands in the retry loop.
      header_timeout, idle_timeout = upstream_timeouts()
      max_attempts = max(2, total) + 1 + (MAX_PRODUCT_SWITCHES if auto_switch else 0)
+-    # 每次失败都把【出错的那个账号】从这段对话的历史里降级（demote），而不是
+-    # 忘掉整段对话：重选时优先回到还留着这段前缀的暖号（见 SessionAffinity），
+-    # 一次大 prompt 的冷启动比重选一次账号贵得多。
 -    for _attempt in range(max_attempts):
 -        account = POOL.pick_for_session(realm=realm, session_key=session_key,
--                                        exclude=tried, model=model) if POOL else None
+-                                        exclude=tried, model=model,
+-                                        page=affinity_page) if POOL else None
++    # Demote only the failing account from the conversation affinity history,
++    # retaining other warm accounts when a retry selects its next candidate.
 +    _attempt = -1
 +    while _attempt + 1 < max_attempts:
 +        _attempt += 1
@@ -1217,13 +1270,15 @@
 +            # A refreshed account must still pass official quota/admission checks.
 +            only_retry = tried | {a.uid for a in POOL.accounts if a.uid != retry_uid}
 +            account = POOL.pick_for_session(realm=realm, session_key=session_key,
-+                                            exclude=only_retry, model=model)
++                                            exclude=only_retry, model=model,
++                                            page=affinity_page)
 +            if account is None:
 +                tried.add(retry_uid)
 +            retry_uid = None
 +        if account is None:
 +            account = POOL.pick_for_session(realm=realm, session_key=session_key,
-+                                            exclude=tried, model=model) if POOL else None
++                                            exclude=tried, model=model,
++                                            page=affinity_page) if POOL else None
          if account is None:
              if transient_hits and _attempt < max_attempts - 1:
 -                tried.clear()
@@ -1231,7 +1286,7 @@
                  time.sleep(min(1.5 * transient_hits, 3.0))
                  continue
              break
-@@ -7081,11 +8106,15 @@
+@@ -8853,11 +9898,15 @@
          else:
              attempt_body = upstream_body
          attempt_data = json.dumps(attempt_body, ensure_ascii=False).encode("utf-8")
@@ -1250,7 +1305,7 @@
              _apply_stream_idle_timeout(resp, idle_timeout)
              account.note_success(model=model)
              reset_switch_counter(account, model)
-@@ -7155,7 +8184,7 @@
+@@ -8946,7 +9995,7 @@
                  # mode is usually a system-prompt fingerprint false positive.
                  # Switch to the minimal neutral prompt until next 00:00 CST
                  # and retry this turn once; custom mode opted out.
@@ -1259,7 +1314,7 @@
                          and prompt_mode_config().get("mode") in ("passthrough", "append")):
                      PROMPT_DEGRADE.trigger()
                      degraded_retried = True
-@@ -7182,6 +8211,36 @@
+@@ -8973,6 +10022,36 @@
                  last_error = exc
                  continue
              if exc.code == 401:
@@ -1295,8 +1350,8 @@
 +                    retry_bump("auth_401_refresh_failed")
                  log("account %s rejected (HTTP 401), rotating" % account.uid[:8])
                  if session_key and POOL:
-                     POOL.affinity.unbind(session_key)
-@@ -7316,7 +8375,17 @@
+                     POOL.affinity.demote(session_key, account.uid)
+@@ -9112,7 +10191,17 @@
      other = len(text) - cjk
      return cjk + max(1, int(other / 3.6)) if text else 0
  
@@ -1315,7 +1370,7 @@
      """Fold an SSE stream into one non-streaming chat.completion object."""
      content, reasoning, finish = [], [], "stop"
      tool_calls_map = {}
-@@ -7324,6 +8393,9 @@
+@@ -9120,6 +10209,9 @@
      started = time.time()
      first_chunk_at = None
      saw_done = False
@@ -1325,7 +1380,7 @@
      for line in raw_iter:
          data = strip_data_prefix(line.decode("utf-8", "replace"))
          if not data or data == "[DONE]":
-@@ -7334,6 +8406,12 @@
+@@ -9130,6 +10222,12 @@
              chunk = json.loads(data)
          except Exception:
              continue
@@ -1338,7 +1393,7 @@
          if first_chunk_at is None:
              first_chunk_at = time.time()
          if chunk.get("id"):
-@@ -7349,7 +8427,9 @@
+@@ -9145,7 +10243,9 @@
              if delta.get("content"):
                  content.append(delta["content"])
              if delta.get("reasoning_content"):
@@ -1349,7 +1404,7 @@
              for tc in delta.get("tool_calls") or []:
                  idx = tc.get("index")
                  if idx is None:
-@@ -7380,7 +8460,8 @@
+@@ -9176,7 +10276,8 @@
              # 占位。原判断对空 dict 成立，会凭空生成 tool_call 并伪造 id，
              # 导致 finish_reason 被改成 "tool_calls"（参数全空）→ 严格客户端死等。
              # 故：只要 name 为空即视为无效占位直接跳过。
@@ -1359,7 +1414,7 @@
              if fc and isinstance(fc, dict) and not fc_is_empty:
                  idx = 0
                  if idx not in tool_calls_map:
-@@ -7400,7 +8481,27 @@
+@@ -9196,7 +10297,27 @@
                          entry["function"]["arguments"] += fc["arguments"]
              if choice.get("finish_reason"):
                  finish = choice["finish_reason"]
@@ -1388,7 +1443,7 @@
      if reasoning:
          message["reasoning_content"] = "".join(reasoning)
      # PATCH2-BY-OPS: 二次防御——剔除「无函数名且无参数」的空 tool_call。
-@@ -7419,6 +8520,8 @@
+@@ -9215,6 +10336,8 @@
              k: v for k, v in tool_calls_map.items()
              if not is_truncated_arguments((v.get("function") or {}).get("arguments"))
          }
@@ -1397,7 +1452,7 @@
      if tool_calls_map:
          ordered_tcs = [tool_calls_map[k] for k in sorted(tool_calls_map.keys())]
          message["tool_calls"] = ordered_tcs
-@@ -7450,6 +8553,8 @@
+@@ -9246,6 +10369,8 @@
      if usage:
          normalize_usage_cache_aliases(usage)
          out["usage"] = usage
@@ -1406,7 +1461,7 @@
      out["elapsed_ms"] = int((time.time() - started) * 1000)
      out["first_chunk_at"] = first_chunk_at
      return out
-@@ -7949,6 +9054,10 @@
+@@ -9745,6 +10870,10 @@
          })
      body["messages"] = convo
      body["stream"] = True
@@ -1417,7 +1472,7 @@
      return open_upstream(body, session_key=session_key,
                           target_realm=holder.get("realm"))
  
-@@ -8194,7 +9303,7 @@
+@@ -9990,7 +11119,7 @@
              else:
                  log("responses: WARNING unhandled input item type=%r keys=%s"
                      % (itype, sorted(item.keys())[:8]))
@@ -1426,7 +1481,7 @@
  
  
  def responses_to_chat(payload):
-@@ -8928,7 +10037,7 @@
+@@ -10724,7 +11853,7 @@
      choice = (chat_obj.get("choices") or [{}])[0]
      msg = choice.get("message") or {}
      text = msg.get("content") or ""
@@ -1435,7 +1490,7 @@
      output = []
      if reasoning:
          output.append({
-@@ -8973,6 +10082,8 @@
+@@ -10769,6 +11898,8 @@
                      "arguments": dc.get("arguments") or "{}",
                  })
              text = clean_t
@@ -1444,7 +1499,7 @@
      if text or not output:
          output.append({
              "id": _new_id("msg_"),
-@@ -9005,14 +10116,321 @@
+@@ -10801,14 +11932,321 @@
          obj["usage"] = u
      if finish == "length":
          obj["incomplete_details"] = {"reason": "max_output_tokens"}
@@ -1770,7 +1825,7 @@
      reason_index = None
      msg_index = None
      finish = "stop"
-@@ -9021,6 +10439,8 @@
+@@ -10817,6 +12255,8 @@
      text_buffer = ""
      dsml_tool_calls = []
      saw_done = False
@@ -1779,7 +1834,7 @@
      custom_names = set(holder.get("custom_names") or ())
      ns_map = holder.get("namespace_map") or {}
      # 由反代代跑的网路工具呼叫，收集起来不转发给客户端
-@@ -9039,13 +10459,13 @@
+@@ -10835,13 +12275,13 @@
              "status": status,
              "model": model,
              "output": [o for o in outputs if o],
@@ -1795,7 +1850,7 @@
          if u:
              obj["usage"] = u
          if ns_map:
-@@ -9054,6 +10474,11 @@
+@@ -10850,6 +12290,11 @@
      def ev(etype, payload):
          nonlocal seq
          seq += 1
@@ -1807,7 +1862,7 @@
          data = {"type": etype, "sequence_number": seq}
          data.update(payload)
          body = json.dumps(data, ensure_ascii=False)
-@@ -9079,10 +10504,30 @@
+@@ -10875,10 +12320,30 @@
              item["content"] = [{"type": "output_text", "text": "".join(text_parts),
                                "annotations": _annotations()}]
          return item
@@ -1838,7 +1893,7 @@
          if reason_index is not None and outputs[reason_index] is None:
              full_r = "".join(reason_parts)
              yield ev("response.reasoning_summary_text.done", {
-@@ -9096,7 +10541,8 @@
+@@ -10892,7 +12357,8 @@
              yield ev("response.output_item.done",
                       {"output_index": reason_index, "item": outputs[reason_index]})
          # 1. Emit completed structured tool calls
@@ -1848,7 +1903,7 @@
              entry = tool_calls_map[idx]
              if entry.get("custom"):
                  yield ev("response.custom_tool_call_input.done", {
-@@ -9140,6 +10586,8 @@
+@@ -10936,6 +12402,8 @@
              if calls_rem:
                  dsml_tool_calls.extend(calls_rem)
              if clean_rem:
@@ -1857,7 +1912,7 @@
                  text_parts.append(clean_rem)
                  if msg_index is not None:
                      yield ev("response.output_text.delta", {
-@@ -9155,7 +10603,9 @@
+@@ -10951,7 +12419,9 @@
              if extra_calls:
                  dsml_calls = extra_calls
                  full_text = clean_text
@@ -1868,7 +1923,7 @@
              for dc in dsml_calls:
                  # DSML 形状的网路工具呼叫一样由反代执行
                  if _own_web_tools and wb_webtools.is_internal_tool(dc.get("name")):
-@@ -9198,7 +10648,9 @@
+@@ -10994,7 +12464,9 @@
          # 这一轮如果有代跑的网路工具呼叫，就把完成事件留给下一轮，
          # 否则客户端会以为整个回合已经结束（旧版是在回合用尽时补一个合成的
          # resp_wrapup，那才是 issue #43 真正的病灶）。
@@ -1879,7 +1934,7 @@
              holder.setdefault("internal_calls", []).extend(
                  {"name": v["name"], "arguments": v["arguments"]}
                  for v in _internal_calls.values()
-@@ -9242,9 +10694,8 @@
+@@ -11038,9 +12510,8 @@
                  yield ev("response.web_search_call.completed", {
                      "output_index": _ws_idx, "item_id": _ws_id,
                  })
@@ -1891,7 +1946,7 @@
              if msg_index is None:
                  msg_index = len(outputs)
                  outputs.append(None)
-@@ -9273,7 +10724,8 @@
+@@ -11069,7 +12540,8 @@
              rs_txt = "".join(reason_parts)
              if out_txt or rs_txt:
                  comp = estimate_tokens(out_txt) + estimate_tokens(rs_txt)
@@ -1901,7 +1956,7 @@
                  usage = {
                      "prompt_tokens": prompt_est,
                      "completion_tokens": comp,
-@@ -9282,29 +10734,67 @@
+@@ -11078,29 +12550,67 @@
                      "prompt_tokens_details": {"cached_tokens": 0},
                  }
                  holder["usage"] = usage
@@ -1977,7 +2032,7 @@
          u = chunk.get("usage")
          if u:
              if usage is None or (u.get("total_tokens") or 0) >= (usage.get("total_tokens") or 0):
-@@ -9314,26 +10804,17 @@
+@@ -11110,26 +12620,17 @@
              delta = choice.get("delta") or {}
              piece = delta.get("reasoning_content")
              if piece:
@@ -2009,7 +2064,7 @@
                  # web_search / web_fetch 由反代执行，不转发给客户端
                  if idx in _internal_calls or (
                          _own_web_tools and fn_name
-@@ -9402,6 +10883,7 @@
+@@ -11198,6 +12699,7 @@
                              })
              piece = delta.get("content")
              if piece:
@@ -2017,7 +2072,7 @@
                  if msg_index is None:
                      if reason_index is not None:
                          full_r = "".join(reason_parts)
-@@ -9485,6 +10967,9 @@
+@@ -11281,6 +12783,9 @@
                              break
              if choice.get("finish_reason"):
                  finish = choice["finish_reason"]
@@ -2027,7 +2082,7 @@
      # Truncated streams (max_tokens, dropped connection) can leave tool-call
      # arguments as half-written JSON. Do not close those calls out as
      # completed: drop them before finalize so the client never receives a
-@@ -9989,7 +11474,7 @@
+@@ -11792,7 +13297,7 @@
          configured - both are real, and the usage log keeps them apart from
          rows written before the key field existed.
          """
@@ -2036,7 +2091,7 @@
      def _cross_realm_error(self, model, realm):
          """Explain a model/exit mismatch instead of letting upstream reject it.
          Sending gpt-6-astra to the domestic exit (or deepseek-v4-pro to the
-@@ -10119,6 +11604,10 @@
+@@ -11922,6 +13427,10 @@
              return self._get_panel_status()
          if path == "/health":
              return self._get_health()
@@ -2047,7 +2102,7 @@
          if path == "/realm":
              return self._get_realm()
          if path in ("/v1/models", "/models"):
-@@ -12054,8 +13543,15 @@
+@@ -13981,8 +15490,15 @@
              key_blocked = self._key_model_error(chat_req.get("model"))
              if key_blocked:
                  return self._error(400, key_blocked, "invalid_request_error")
@@ -2065,7 +2120,7 @@
          except ContentRejected as exc:
              record_error(model, 403, exc.detail[:200],
                           elapsed_ms=int((time.time() - t_start) * 1000),
-@@ -12098,6 +13594,19 @@
+@@ -14025,6 +15541,19 @@
                  effort=effort)
  
      def _responses_stream_response(self, upstream, model, custom_names, request_meta, fp, account, t_start, namespace_map=None, base_body=None, session_key=None, realm=None, effort=None):
@@ -2085,7 +2140,7 @@
          self.send_response(200)
          self.send_header("Content-Type", "text/event-stream; charset=utf-8")
          self.send_header("Cache-Control", "no-cache")
-@@ -12111,27 +13620,51 @@
+@@ -14038,27 +15567,51 @@
                    "base_body": base_body,
                    "base_messages": (base_body or {}).get("messages"),
                    "session_key": session_key,
@@ -2141,7 +2196,7 @@
                  rounds += 1
                  # 用完就收回工具，让模型自己收尾；这里不合成任何事件。
                  give_up = rounds > wb_webtools.MAX_WEB_ROUNDS
-@@ -12141,42 +13674,44 @@
+@@ -14068,42 +15621,44 @@
                      pass
                  upstream, account, _ = follow_up_with_tool_results(
                      internal, holder, model, session_key, t_start, drop_tools=give_up)
@@ -2212,7 +2267,7 @@
          return
  
      def _responses_nonstream_response(self, upstream, model, custom_names, request_meta, fp, account, t_start, namespace_map=None, base_body=None, session_key=None, realm=None, effort=None):
-@@ -12186,42 +13721,60 @@
+@@ -14113,42 +15668,60 @@
          # 一句 unsupported call。
          sources = []
          rounds = 0
@@ -2285,7 +2340,7 @@
          return self._json(200, result)
  
      def _handle_messages_count_tokens(self, payload):
-@@ -12319,17 +13872,30 @@
+@@ -14246,17 +15819,30 @@
      def _messages_nonstream_response(self, upstream, model, fp, account, t_start,
                                       base_body=None, session_key=None, realm=None,
                                       effort=None):
@@ -2319,7 +2374,7 @@
              return self._anthropic_error(502, "upstream stream error: %s" % exc)
          finally:
              try:
-@@ -12347,17 +13913,23 @@
+@@ -14274,17 +15860,23 @@
          if cors_origin_allowed(self.path):
              self.send_header("Access-Control-Allow-Origin", "*")
          self.end_headers()
@@ -2349,7 +2404,7 @@
                           ttft_ms=first_ms,
                           gen_ms=(wall - first_ms) if first_ms is not None else None,
                           fp=fp, account=account.uid,
-@@ -12365,11 +13937,12 @@
+@@ -14292,11 +15884,12 @@
              return
          except Exception as exc:
              wall = int((time.time() - t_start) * 1000)
@@ -2364,7 +2419,7 @@
              try:
                  self.wfile.write(anthropic_sse_frame("error", {
                      "error": {"type": "api_error", "message": str(exc)}}))
-@@ -12378,12 +13951,21 @@
+@@ -14305,12 +15898,21 @@
                  pass
              return
          finally:
@@ -2387,15 +2442,17 @@
                       ttft_ms=first_ms,
                       gen_ms=(wall - first_ms) if first_ms is not None else None,
                       fp=fp, account=account.uid, key=self._key_id(), effort=effort)
-@@ -12537,8 +14119,15 @@
+@@ -14470,9 +16072,16 @@
              key_blocked = self._key_model_error(payload.get("model"))
              if key_blocked:
                  return self._error(400, key_blocked, "invalid_request_error")
 -            upstream, account, effort = open_upstream(
--                payload, session_key=session_key, target_realm=req_realm)
+-                payload, session_key=session_key, target_realm=req_realm,
+-                prebuilt_body=forwarded)
 +            deadline_at = time.monotonic() + FIRST_FRAME_DEADLINE
 +            upstream, account, effort = open_upstream(payload, session_key=session_key,
-+                                              target_realm=req_realm, deadline_at=deadline_at)
++                                              target_realm=req_realm, deadline_at=deadline_at,
++                                              prebuilt_body=forwarded)
 +            upstream, replacement = probe_first_frame(
 +                upstream, retry_call=_make_retry_call(payload, session_key, req_realm),
 +                tried=[account.uid], deadline_at=deadline_at)
@@ -2405,7 +2462,7 @@
          except ContentRejected as exc:
              record_error(model, 403, exc.detail[:200],
                           elapsed_ms=int((time.time() - t_start) * 1000),
-@@ -12573,109 +14162,104 @@
+@@ -14507,109 +16116,104 @@
          with upstream:
              if want_stream:
                  return self._chat_stream_response(
@@ -2603,7 +2660,7 @@
                       elapsed_ms=wall, ttft_ms=first_ms,
                       gen_ms=(wall - first_ms) if first_ms is not None else None,
                       fp=fp, account=account.uid, key=self._key_id(), effort=effort)
-@@ -12974,6 +14558,7 @@
+@@ -14923,6 +16527,7 @@
          print("          %s" % launcher_hint(args.port + 1))
          print()
          raise SystemExit(1)
@@ -2800,7 +2857,7 @@
  def _guard_url(url):
 --- a/wb_accounts.py
 +++ b/wb_accounts.py
-@@ -1063,7 +1063,25 @@
+@@ -1209,7 +1209,25 @@
          with self._refresh_lock:
              return self._refresh_locked()
  
@@ -2827,7 +2884,7 @@
          if not self.refresh_token:
              self._set_last_error("no refresh token; sign in again")
              return False
-@@ -1086,7 +1104,7 @@
+@@ -1232,7 +1250,7 @@
          if self.enterprise_id:
              headers["X-Enterprise-Id"] = self.enterprise_id
          try:
