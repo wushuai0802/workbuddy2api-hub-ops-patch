@@ -1,0 +1,31 @@
+name: Offline patch tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  offline:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.11', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Fetch the pinned official baseline
+        run: |
+          git clone --no-checkout https://github.com/ardeyouxipianyi/workbuddy2api-hub.git ../workbuddy-upstream
+          git -C ../workbuddy-upstream checkout --detach 55dbb9ebcac3d55b26442d9bbc8b2e11ece637da
+      - name: Verify the package
+        run: python apply.py --verify-package
+      - name: Run synthetic offline tests
+        run: python scripts/test_offline.py --upstream ../workbuddy-upstream --output .work/verification

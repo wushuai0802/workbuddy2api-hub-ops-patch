@@ -1,0 +1,8 @@
+* text=auto eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.patch text eol=lf
+*.patch whitespace=-blank-at-eol
+*.sha256 text eol=lf
+*.zip -text
