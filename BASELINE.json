@@ -30,7 +30,7 @@
     },
     "wb_proxy.py": {
       "base_sha256": "7d68cac5e42f08dce70fc4b4f06b72c5d0f435352a3fc2e36499c4b802dbcd16",
-      "patched_sha256": "354bde70fd8c3a9288646ffd0622be6afd97a59a23564f57ee51d462acfa1b77"
+      "patched_sha256": "2dad77431bddd6571bbc7d3c54a175492b5d4f6b9155bd636c59073ee0b870dd"
     },
     "wb_stall.py": {
       "base_sha256": null,

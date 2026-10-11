@@ -6,6 +6,7 @@ DeepSeek v4.1 Flash 在工作中可能把 “Let me go.” / “Hmm.” 大量�
 - 下载：`workbuddy2api-hub-v1.6.19-ops-20261011-r2.zip` 与 `SHA256SUMS.txt`
 - 只替换 `wb_proxy.py` / `wb_webtools.py` / `wb_accounts.py`，新增 `wb_ops.py` / `wb_stall.py`；安装器不改账号数据、Key、配置、用量或路由。
 - 补齐 401 刷新所需的账号辅助方法及网页 deflate 解压、搜索 RSS 解析的标准库依赖。
+- 修复 Linux 首帧超时关闭连接后返回 EOF 时的成功误判。
 - 安装前先核对包与基线，备份自己的部署和数据，暂停目标服务；Docker 用户从准确的已补丁源码构建，并只重建自己的 Hub Compose 服务。
 
 [中文说明与快速入口](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/blob/v1.6.19-ops.20261011.2/README.md) · [English](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/blob/v1.6.19-ops.20261011.2/README.en.md) · [安装和回滚](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/blob/v1.6.19-ops.20261011.2/docs/INSTALL.md)

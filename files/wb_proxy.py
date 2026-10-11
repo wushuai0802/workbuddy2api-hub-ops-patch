@@ -6303,6 +6303,10 @@ def probe_first_frame(upstream, retry_call=None, tried=None, deadline_at=None, r
                 if sock is not None:
                     sock.settimeout(upstream_timeouts()[1])
                 return _ProbedStream(upstream, iterator, prefix), account
+            # Socket shutdown at the deadline may produce EOF rather than an
+            # OSError (notably on Linux). An expired probe is never successful.
+            if time.monotonic() >= deadline_at:
+                raise TimeoutError("first-frame deadline exceeded")
             if retry_call is None and not prefix and not require_frame:
                 return _ProbedStream(upstream, iterator, []), account
             raise ValueError("upstream closed without a response frame")
