@@ -8,13 +8,17 @@ DeepSeek v4.1 Flash can repeat “Let me go.” and “Hmm.” many times among 
 
 ## Release and compatibility
 
-- Release: **v1.6.20-ops.20261011.1**, dated 2026-10-11.
-- [Download the ZIP and SHA256SUMS.txt](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.6.20-ops.20261011.1).
-- Archive: `workbuddy2api-hub-v1.6.20-ops-20261011-r1.zip`.
+- Release: **v1.6.20-ops.20261012.1**, dated 2026-10-12.
+- [Download the ZIP and SHA256SUMS.txt](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.6.20-ops.20261012.1).
+- Archive: `workbuddy2api-hub-v1.6.20-wushuai0802-ops-20261012-r1.zip`.
 - Exact upstream baseline: **v1.6.20**, commit **`cb6a844588705ea01388be2b9df1f0cbbbcde357`**.
 - Python **3.11+** is required. Docker users must build an image from the patched exact upstream source.
 
 This is a patch bundle, not a complete gateway, account bundle, prebuilt image or arbitrary-version overlay. The installer rejects unknown patches and mismatched or mixed source trees.
+
+This release fixes the shared 401-refresh deadline, divergent reasoning aliases bypassing the history budget, and refusals incorrectly triggering empty-turn recovery. Mixed-stall detection now also covers an established leading-thinking content view. These adapters explicitly support `n=1`; other candidate counts fail before contacting upstream. Health diagnostics identify the patch source and runtime payload fingerprint.
+
+To upgrade an earlier v1.6.20 patch, apply this bundle to a separate clean pinned source tree and rebuild. Retain the [previous release](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.6.20-ops.20261011.1) and deployment rather than forcing an overlay.
 
 For upstream v1.6.19, use the [historical r2 release](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.6.19-ops.20261011.2) and the instructions at its tag. The bundles target different baselines and cannot be used interchangeably.
 
@@ -38,7 +42,7 @@ See [patch details](docs/PATCHES.md) for scope and configuration. Sign-in schedu
 Run in your own working directory:
 
 ~~~sh
-git clone --depth 1 --branch v1.6.20-ops.20261011.1 https://github.com/wushuai0802/workbuddy2api-hub-ops-patch.git ops-patch-v1620
+git clone --depth 1 --branch v1.6.20-ops.20261012.1 https://github.com/wushuai0802/workbuddy2api-hub-ops-patch.git ops-patch-v1620
 git clone --depth 1 --branch v1.6.20 https://github.com/ardeyouxipianyi/workbuddy2api-hub.git workbuddy2api-hub-v1.6.20
 git -C workbuddy2api-hub-v1.6.20 rev-parse HEAD
 python3 -B ops-patch-v1620/apply.py --verify-package

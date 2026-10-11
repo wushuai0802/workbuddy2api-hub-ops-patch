@@ -20,6 +20,8 @@ sys.path.insert(0, str(ROOT))
 from apply import Bundle
 
 PATCH_SUITES = ('test_installer.py', 'test_wb_stall.py', 'test_mixed_stall_proxy.py', 'test_keepalive_guard.py',
+                'test_auth_deadline.py', 'test_proxy_boundaries.py', 'test_leaked_mixed_stall.py',
+                'test_build_identity.py', 'test_dated_guards.py', 'test_observability.py',
                 '_test_401_refresh.py', '_test_deepseek_multimodal.py', '_test_deepseek_reasoning_compaction.py',
                 'test_integration.py', 'test_loop_recovery.py', 'test_reasoning_recovery.py',
                 'test_nullable_buffer.py', 'test_metadata_buffer.py', 'test_compact_buffer.py',
@@ -27,7 +29,9 @@ PATCH_SUITES = ('test_installer.py', 'test_wb_stall.py', 'test_mixed_stall_proxy
 UPSTREAM_SUITES = ('_test_upstream_repairs.py', '_test_namespace_tools.py', '_test_reasoning_backfill.py',
                    '_test_anthropic_messages.py', '_test_tool_choice_none.py',
                    '_test_upstream_pool.py', '_test_remaining_usage.py', '_test_streak_report.py',
-                   '_test_hotpath_savings.py')
+                   '_test_hotpath_savings.py', '_test_upstream_timeouts.py', '_test_growth_prereq.py',
+                   '_test_http_limits.py', '_test_local_web_tools.py', '_test_analytics_by_key.py',
+                   '_test_anthropic_http.py')
 
 
 def main():
@@ -55,6 +59,8 @@ def main():
                USAGE_DIR=str(state / 'usage'), WB_USAGE_DIR=str(state / 'usage'),
                API_KEY='', WB_PROXY_KEY='', WB_OPS_ALLOW_PROMPT_DEGRADE='0', WB_OPS_LOOP_RECOVERY_HINT='0')
     for name in ('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy'):
+        env.pop(name, None)
+    for name in ('WB_SEARCH_ENDPOINT', 'WB_OPS_BING_FALLBACK'):
         env.pop(name, None)
     env['NO_PROXY'] = '127.0.0.1,localhost,::1'
     env['PYTHONPATH'] = os.pathsep.join((str(ROOT / 'tests/safety'), str(gateway), str(ROOT / 'tests')))

@@ -8,14 +8,18 @@
 
 ## 下载与适用版本
 
-当前发布：**v1.6.20-ops.20261011.1**（2026-10-11）。
+当前发布：**v1.6.20-ops.20261012.1**（2026-10-12）。
 
-- [下载补丁 ZIP 与 SHA256SUMS.txt](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.6.20-ops.20261011.1)
-- ZIP 文件名：`workbuddy2api-hub-v1.6.20-ops-20261011-r1.zip`
+- [下载补丁 ZIP 与 SHA256SUMS.txt](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.6.20-ops.20261012.1)
+- ZIP 文件名：`workbuddy2api-hub-v1.6.20-wushuai0802-ops-20261012-r1.zip`
 - 仅支持官方 **v1.6.20**，提交 **`cb6a844588705ea01388be2b9df1f0cbbbcde357`**。
 - 需要 Python **3.11+**；Docker 安装需要从打过补丁的准确官方源码重新构建镜像。
 
 这是**非官方补丁包**，不是完整 Hub、账号包、现成 Docker 镜像或适用于任意版本的通用覆盖包。安装器检查源码基线与补丁校验和；已有其他补丁、混合源码或不匹配的版本会被拒绝。
+
+本次修复 401 刷新的共享期限、推理字段别名绕过预算、拒答误触发空答重试，并将混合复读检测扩展到确认的前置 thinking 正文。适配器明确支持单候选 `n=1`；请求更多候选会在上游调用前返回错误。健康诊断新增发布来源与运行源码指纹，避免与其他同名补丁混淆。
+
+从此前 v1.6.20 补丁升级，同样使用新目录中的准确官方源码重新应用、构建；保留[旧 Release](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.6.20-ops.20261011.1)及旧部署，不在旧补丁上强行叠加。
 
 仍使用官方 v1.6.19 的用户请使用[对应的历史 r2 Release](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.6.19-ops.20261011.2)及其 tag 内的说明。两个补丁包的基线不同，不能交叉安装。
 
@@ -39,7 +43,7 @@
 在你自己的工作目录中获取固定版本的两个仓库：
 
 ~~~sh
-git clone --depth 1 --branch v1.6.20-ops.20261011.1 https://github.com/wushuai0802/workbuddy2api-hub-ops-patch.git ops-patch-v1620
+git clone --depth 1 --branch v1.6.20-ops.20261012.1 https://github.com/wushuai0802/workbuddy2api-hub-ops-patch.git ops-patch-v1620
 git clone --depth 1 --branch v1.6.20 https://github.com/ardeyouxipianyi/workbuddy2api-hub.git workbuddy2api-hub-v1.6.20
 git -C workbuddy2api-hub-v1.6.20 rev-parse HEAD
 python3 -B ops-patch-v1620/apply.py --verify-package

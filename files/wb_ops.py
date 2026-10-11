@@ -589,16 +589,47 @@ class ReasoningLoopGuard:
 
 
 class LeakedThinkingGuard:
-    """Detect-only leading-tag view. Never changes content or permits replay."""
-    def __init__(self):
+    """Detect-only leading-tag view. Never changes content or permits replay.
+
+    The caller may inject an independent, bounded mixed-stall detector after
+    selecting its supported model/request shape. This module does not import
+    that optional detector or extend its scope to arbitrary answer content.
+    """
+    def __init__(self, mixed_stall=None):
         self.state = "probe"
         self.probe = ""
         self.pending = ""
         self.tag = None
         self.detected = False
         self.guard = ReasoningLoopGuard()
+        self.mixed_stall = mixed_stall
+        self.mixed_metrics = None
+
+    @property
+    def hit(self):
+        return self.guard.hit or self.mixed_metrics is not None
+
+    @property
+    def rule(self):
+        return self.guard.rule if self.guard.hit else ("mixed-stall" if self.mixed_metrics else "")
+
+    @property
+    def total_chars(self):
+        if self.mixed_metrics is not None and not self.guard.hit:
+            return self.mixed_stall.total_chars
+        return self.guard.total_chars
+
+    def _feed_view(self, text, final=False):
+        self.guard.feed(text)
+        if self.mixed_stall is not None:
+            metrics = self.mixed_stall.feed(text, final=final)
+            if metrics:
+                self.mixed_metrics = metrics
+        return self.hit
 
     def feed(self, text):
+        if self.hit:
+            return True
         for ch in text:
             if self.state == "done":
                 break
@@ -613,21 +644,33 @@ class LeakedThinkingGuard:
                     self.state = "done"
                 continue
             self.pending += ch
-            if self.pending.lower().endswith(self.tag) and self.guard.fence is None:
-                self.guard.feed(self.pending[:-len(self.tag)])
-                self.pending, self.state = "", "done"
-                return self.guard.hit
+            if self.pending.lower().endswith(self.tag):
+                # The bounded lookahead may still contain the newline that
+                # closes a preceding fence. Consume that prefix before asking
+                # whether this is the real thinking boundary, never the tag.
+                prefix = self.pending[:-len(self.tag)]
+                if prefix:
+                    self.pending = self.pending[-len(self.tag):]
+                    if self._feed_view(prefix):
+                        return True
+                if self.guard.fence is None:
+                    self._feed_view("", final=True)
+                    self.pending, self.state = "", "done"
+                    return self.hit
             if len(self.pending) > len(self.tag):
                 part, self.pending = self.pending[0], self.pending[1:]
-                if self.guard.feed(part):
+                if self._feed_view(part):
                     return True
-        return self.guard.hit
+        return self.hit
 
     def finish(self):
-        if self.state == "active":
-            self.guard.feed(self.pending)
+        if self.hit:
             self.pending = ""
-        return self.guard.hit
+            return True
+        if self.state == "active":
+            self._feed_view(self.pending, final=True)
+            self.pending = ""
+        return self.hit
 
 
 class LoopRetryCircuit:

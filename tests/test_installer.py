@@ -3,6 +3,7 @@
 from contextlib import contextmanager
 import importlib.util
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -231,6 +232,28 @@ class InstallerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "symlink/junction"):
             self.bundle.apply(linked)
 
+    def test_target_ancestor_junction_or_link_is_refused(self):
+        real = self.root / 'real'
+        real.mkdir()
+        self.target.rename(real / 'gateway')
+        self.target = real / 'gateway'
+        alias = self.root / 'alias'
+        if os.name == 'nt':
+            subprocess.run(['cmd', '/c', 'mklink', '/J', str(alias), str(real)],
+                           check=True, capture_output=True)
+        else:
+            alias.symlink_to(real, target_is_directory=True)
+        try:
+            before = self.snapshot()
+            with self.assertRaisesRegex(ValueError, 'symlink/junction'):
+                self.bundle.apply(alias / 'gateway', dry_run=True)
+            self.assertEqual(self.snapshot(), before)
+        finally:
+            if os.name == 'nt':
+                os.rmdir(alias)
+            else:
+                alias.unlink()
+
     def test_target_module_and_dangling_links_are_refused(self):
         path = self.target / "wb_proxy.py"
         outside = self.root / "outside.py"
@@ -410,6 +433,38 @@ class InstallerTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "patch state changed"):
                 self.bundle.rollback(self.target)
         self.assertEqual(self.bundle.status(self.target), dict.fromkeys(installer.FILES, "patched"))
+
+    def test_rollback_rejects_backup_corrupted_during_lock_acquisition(self):
+        self.bundle.apply(self.target)
+        before = self.snapshot(ignore_backups=True)
+        state = json.loads((self.target / installer.STATE).read_text())
+        real_lock = installer.target_lock
+
+        @contextmanager
+        def corrupting_lock(target):
+            with real_lock(target):
+                (target / state['backup'] / 'wb_proxy.py').write_bytes(b'# damaged backup\n')
+                yield
+
+        with mock.patch.object(installer, 'target_lock', corrupting_lock):
+            with self.assertRaisesRegex(ValueError, 'backup checksum mismatch'):
+                self.bundle.rollback(self.target)
+        self.assertEqual(self.snapshot(ignore_backups=True), before)
+
+    def test_external_edit_immediately_before_commit_is_preserved(self):
+        real_commit = self.bundle.commit
+        edited = b'# external edit before commit\n'
+
+        def intervening(target, replacement, before, modes):
+            (target / 'wb_proxy.py').write_bytes(edited)
+            return real_commit(target, replacement, before, modes)
+
+        with mock.patch.object(self.bundle, 'commit', side_effect=intervening):
+            with self.assertRaisesRegex(RuntimeError, 'changed externally'):
+                self.bundle.apply(self.target)
+        self.assertEqual((self.target / 'wb_proxy.py').read_bytes(), edited)
+        self.assertFalse((self.target / installer.STATE).exists())
+        self.assertTrue(all(not (self.target / name).exists() for name in installer.NEW_FILES))
 
     def test_transaction_cannot_write_outside_patch_scope(self):
         before = self.snapshot()

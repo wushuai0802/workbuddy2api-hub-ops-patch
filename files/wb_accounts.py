@@ -1,7 +1,9 @@
 import re
 import base64
+import http.client
 import json
 import os
+import socket
 import ssl
 import sys
 import threading
@@ -141,14 +143,203 @@ def urlopen(req, timeout=30, proxy=""):
     return opener.open(req, timeout=timeout)
 
 
+_AUTH_REFRESH_MAX_BYTES = 1024 * 1024
+
+
+class _RefreshDeadline:
+    """Own a fresh socket until the bounded refresh finishes.
+
+    These sockets never enter the keep-alive pool. In particular, natural
+    response EOF cannot hand a socket to another request while the deadline
+    callback has already selected it for shutdown.
+    """
+    def __init__(self, deadline_at):
+        self.deadline_at = deadline_at
+        self.lock = threading.Lock()
+        self.sock = None
+        self.expired = False
+
+    def remaining(self):
+        remaining = self.deadline_at - time.monotonic()
+        if self.expired or remaining <= 0:
+            raise TimeoutError("401 refresh deadline exceeded")
+        return remaining
+
+    def attach(self, sock):
+        with self.lock:
+            self.remaining()
+            self.sock = sock
+            sock.settimeout(self.remaining())
+
+    def abort(self):
+        with self.lock:
+            self.expired = True
+            sock = self.sock
+        if sock is not None:
+            try:
+                # urllib closes the socket object after getresponse while its
+                # makefile still owns the descriptor. Interrupt it with the
+                # base operation, retaining the SSL reader's state while it
+                # unwinds the in-flight read.
+                socket.socket.shutdown(sock, socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+    def connect(self, address, timeout=None, source_address=None):
+        # getaddrinfo itself is an OS call with no cancellable stdlib timeout.
+        # A late lookup must never initiate a connection or send credentials.
+        self.remaining()
+        entries = socket.getaddrinfo(address[0], address[1], 0, socket.SOCK_STREAM)
+        last = None
+        for family, socktype, proto, _canonname, sockaddr in entries:
+            self.remaining()
+            sock = socket.socket(family, socktype, proto)
+            try:
+                self.attach(sock)
+                if source_address:
+                    sock.bind(source_address)
+                sock.connect(sockaddr)
+                self.remaining()
+                return sock
+            except OSError as exc:
+                sock.close()
+                last = exc
+                self.remaining()
+        if last is not None:
+            raise last
+        raise OSError("getaddrinfo returns an empty list")
+
+
+class _DeadlineConnectionMixin:
+    def send(self, data):
+        self._refresh_deadline.remaining()
+        if self.sock is None:
+            if not self.auto_open:
+                raise http.client.NotConnected()
+            self.connect()
+        # HTTPConnection.send would auto-connect and immediately send. Check
+        # again after connect/tunnel/TLS before handing it credential bytes.
+        remaining = self._refresh_deadline.remaining()
+        self.sock.settimeout(remaining)
+        result = super().send(data)
+        self._refresh_deadline.remaining()
+        return result
+
+    def getresponse(self):
+        self.sock.settimeout(self._refresh_deadline.remaining())
+        response = super().getresponse()
+        self._refresh_deadline.remaining()
+        return response
+
+
+class _DeadlineHTTPConnection(_DeadlineConnectionMixin, http.client.HTTPConnection):
+    pass
+
+
+class _DeadlineHTTPSConnection(_DeadlineConnectionMixin, http.client.HTTPSConnection):
+    def connect(self):
+        # Publish the TLS socket before its handshake, so a trickling proxy or
+        # peer cannot extend the original deadline by resetting idle timeouts.
+        http.client.HTTPConnection.connect(self)
+        self.sock.settimeout(self._refresh_deadline.remaining())
+        host = self._tunnel_host or self.host
+        self.sock = self._context.wrap_socket(
+            self.sock, server_hostname=host, do_handshake_on_connect=False)
+        try:
+            self._refresh_deadline.attach(self.sock)
+            self.sock.do_handshake()
+            self._refresh_deadline.remaining()
+        except Exception:
+            self.sock.close()
+            raise
+
+
+def _deadline_json(url, data, method, headers, deadline_at, proxy):
+    """One non-pooled HTTP attempt, with a shared deadline and 1MiB body cap."""
+    owner = _RefreshDeadline(deadline_at)
+
+    def factory(cls):
+        def new_connection(*args, **kwargs):
+            owner.remaining()
+            connection = cls(*args, **kwargs)
+            connection._refresh_deadline = owner
+            connection._create_connection = owner.connect
+            return connection
+        return new_connection
+
+    class HTTPHandler(urllib.request.HTTPHandler):
+        def http_open(self, req):
+            return self.do_open(factory(_DeadlineHTTPConnection), req)
+
+    class HTTPSHandler(urllib.request.HTTPSHandler):
+        def https_open(self, req):
+            return self.do_open(factory(_DeadlineHTTPSConnection), req, context=self._context)
+
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *args, **kwargs):
+            # A refresh token may rotate: do not replay POSTs or follow an
+            # unexpected redirect with the refresh credential headers.
+            return None
+
+    proxy = str(proxy or "").strip()
+    if proxy:
+        proxies = urllib.request.ProxyHandler({"http": proxy, "https": proxy})
+    elif wb_upstream_pool.enabled():
+        # The active keep-alive transport treats an empty account proxy as
+        # direct. A 401 must retain that exit even if process proxies exist.
+        proxies = urllib.request.ProxyHandler({})
+    else:
+        proxies = urllib.request.ProxyHandler()
+    opener = urllib.request.build_opener(proxies, HTTPHandler(), HTTPSHandler(), NoRedirect())
+    req = urllib.request.Request(url, data=data, method=method or ("POST" if data is not None else "GET"),
+                                 headers=headers or {})
+    timer = threading.Timer(owner.remaining(), owner.abort)
+    timer.daemon = True
+    timer.start()
+    response = None
+    try:
+        try:
+            response = opener.open(req, timeout=owner.remaining())
+        except urllib.error.HTTPError as exc:
+            exc.close()
+            raise
+        owner.remaining()
+        length = response.headers.get("Content-Length")
+        if length and length.isdigit() and int(length) > _AUTH_REFRESH_MAX_BYTES:
+            raise ValueError("401 refresh response exceeds 1MiB")
+        chunks, size = [], 0
+        while True:
+            owner.remaining()
+            chunk = response.read(min(16384, _AUTH_REFRESH_MAX_BYTES + 1 - size))
+            owner.remaining()
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > _AUTH_REFRESH_MAX_BYTES:
+                raise ValueError("401 refresh response exceeds 1MiB")
+            chunks.append(chunk)
+        payload = json.loads(b"".join(chunks).decode("utf-8"))
+        owner.remaining()
+        return payload
+    finally:
+        timer.cancel()
+        timer.join()
+        if response is not None:
+            response.close()
+
+
 def http_json(url, data=None, method=None, headers=None, timeout=30,
-              retries=3, backoff=1.0, log=None, proxy=""):
+              retries=3, backoff=1.0, log=None, proxy="", deadline_at=None):
     """urlopen + json decode with retries.
 
     Chinese networks and CDN edges routinely drop a TLS handshake with
     "SSL: UNEXPECTED_EOF_WHILE_READING"; a single retry almost always
     succeeds, so every upstream call goes through here.
     """
+    if deadline_at is not None:
+        # Only request-triggered 401 recovery supplies this absolute deadline;
+        # normal background refreshes keep their existing retries and pool.
+        return _deadline_json(url, data, method, headers, deadline_at, proxy)
     attempts = max(1, int(retries or 1))
     last = None
     for attempt in range(1, attempts + 1):
@@ -1209,25 +1400,28 @@ class Account(object):
         with self._refresh_lock:
             return self._refresh_locked()
 
-    def refresh_after_401(self, rejected_access_token, timeout=30):
+    def refresh_after_401(self, rejected_access_token, timeout=30, deadline_at=None):
         """Reuse a concurrent refresh, or refresh within this request's budget."""
-        deadline = time.monotonic() + max(0.0, timeout)
-        if not self._refresh_lock.acquire(timeout=max(0.0, timeout)):
+        now = time.monotonic()
+        budget = min(30.0, max(0.0, float(timeout)))
+        deadline = min(now + budget, deadline_at) if deadline_at is not None else now + budget
+        remaining = deadline - now
+        if remaining <= 0 or not self._refresh_lock.acquire(timeout=remaining):
             return False
         try:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
             if rejected_access_token and self.access_token != rejected_access_token:
                 with self._throttle_lock:
                     self.last_error = ""
                     self.cooldown_until = 0
                 return True
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return False
-            return self._refresh_locked(timeout=remaining)
+            return self._refresh_locked(timeout=remaining, deadline_at=deadline)
         finally:
             self._refresh_lock.release()
 
-    def _refresh_locked(self, timeout=30):
+    def _refresh_locked(self, timeout=30, deadline_at=None):
         if not self.refresh_token:
             self._set_last_error("no refresh token; sign in again")
             return False
@@ -1250,8 +1444,12 @@ class Account(object):
         if self.enterprise_id:
             headers["X-Enterprise-Id"] = self.enterprise_id
         try:
-            payload = http_json(url, data=b"{}", method="POST", headers=headers, timeout=timeout,
-                                proxy=self.proxy)
+            kwargs = {"timeout": timeout, "proxy": self.proxy}
+            if deadline_at is not None:
+                kwargs.update(retries=1, deadline_at=deadline_at)
+            payload = http_json(url, data=b"{}", method="POST", headers=headers, **kwargs)
+            if deadline_at is not None and time.monotonic() >= deadline_at:
+                raise TimeoutError("401 refresh deadline exceeded")
         except Exception as exc:
             self._set_last_error("refresh failed: %s" % exc)
             return False

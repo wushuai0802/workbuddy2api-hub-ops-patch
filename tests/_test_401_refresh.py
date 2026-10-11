@@ -30,7 +30,7 @@ class Account:
     def headers(self, purpose="chat"):
         return {"Authorization": "Bearer " + self.access_token}
 
-    def refresh_after_401(self, rejected_access_token, timeout=30):
+    def refresh_after_401(self, rejected_access_token, timeout=30, deadline_at=None):
         self.refreshes += 1
         self.budgets.append(timeout)
         self.on_refresh()
@@ -259,7 +259,8 @@ class AuthRefreshTests(unittest.TestCase):
                 self.released = True
 
         lock = account._refresh_lock = Lock()
-        with patch.object(accounts_mod.time, "monotonic", side_effect=[100, 100.25]), \
+        clock = iter([100, 100.25])
+        with patch.object(accounts_mod.time, "monotonic", side_effect=lambda: next(clock, 100.25)), \
                 patch.object(accounts_mod, "http_json", return_value={
                     "data": {"accessToken": "new-real"}}) as refresh:
             self.assertTrue(account.refresh_after_401("old-real", timeout=1))

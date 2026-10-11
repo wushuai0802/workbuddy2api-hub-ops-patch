@@ -1,5 +1,20 @@
 # Changelog
 
+## v1.6.20-ops.20261012.1 — 2026-10-12
+
+修复准确官方 v1.6.20 基线上的边界问题，保留上次版本和 Release。
+
+- 请求触发的 HTTP401 刷新共享绝对期限、仅一次网络尝试和 1 MiB 响应上限；独立刷新连接避免 watchdog 中止已归池连接的新请求，普通后台刷新保留原策略。
+- 修复独立 `reasoning` 字段绕过旧推理预算，统一出站别名处理，保留原客户端历史、正文与工具配对。
+- 非空 `refusal` 作为有效输出保留，禁止空答/循环重放；补齐三协议流式/非流式的拒答语义。
+- Responses流在length/content_filter结束时发送与incomplete状态一致的终结事件，不误发response.completed。
+- 明确单候选 `n=1` 支持范围；在请求发出前拒绝不支持的候选数，收到多候选/异常索引时明确失败。
+- 对确认的前置 thinking 正文复用混合复读守卫，保留代码/引用排除、普通正文和正文后禁止重放。
+- 补入此前漏跑的 dated guards 与 observability；增加真实刷新期限/竞态、历史别名、拒答、候选边界及实际 Windows junction 回归，并扩大相关上游兼容测试。
+- Linux/Python3.11、3.12 和 Windows/Python3.11 运行同一离线检查；发布包使用独立来源文件名，诊断提供来源与源码指纹。
+
+不包含 NAS 部署、模型调用或通用跨工具回合的业务进展熔断。详细验证见 [VERIFICATION.md](docs/VERIFICATION.md)。
+
 ## v1.6.20-ops.20261011.1 — 2026-10-11
 
 迁移到官方 v1.6.20 的准确基线 `cb6a844588705ea01388be2b9df1f0cbbbcde357`；不再用当前包安装 v1.6.19。历史 v1.6.19 r2 的 [Release](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.6.19-ops.20261011.2) 与 tag 文档继续保留。

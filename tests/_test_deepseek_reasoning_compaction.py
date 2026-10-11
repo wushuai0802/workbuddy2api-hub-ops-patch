@@ -50,4 +50,34 @@ check(
     proxy.compact_deepseek_reasoning_history(other, "gpt-6-astra") == other,
 )
 
+for label, primary in (("empty", ""), ("placeholder", " "), ("short", "short")):
+    divergent = [{"role": "assistant", "content": "answer", "reasoning_content": primary,
+                  "reasoning": long, "tool_calls": [{"id": "c1"}]},
+                 {"role": "tool", "tool_call_id": "c1", "content": "result"}]
+    original = copy.deepcopy(divergent)
+    compacted = proxy.compact_deepseek_reasoning_history(divergent, "deepseek-v4.1-flash")
+    check(label + " primary cannot hide oversized alias",
+          compacted[0]["reasoning"] == " " and compacted[0]["reasoning_content"] == " ")
+    check(label + " divergence leaves source untouched", divergent == original)
+    check(label + " divergence preserves visible content and pairs",
+          compacted[0]["content"] == "answer" and
+          compacted[0]["tool_calls"] == original[0]["tool_calls"] and compacted[1] == original[1])
+
+alias_only = [{"role": "assistant", "content": "answer", "reasoning": long}]
+check("alias-only traces are bounded",
+      proxy.compact_deepseek_reasoning_history(alias_only, "deepseek-v4.1-flash")[0]["reasoning"] == " ")
+duplicates = [{"role": "assistant", "reasoning_content": "r" * 60000, "reasoning": "r" * 60000}]
+check("equal aliases consume one logical trace budget",
+      proxy.compact_deepseek_reasoning_history(duplicates, "deepseek-v4.1-flash") == duplicates)
+divergent = [{"role": "assistant", "reasoning_content": "a" * 40000, "reasoning": "b" * 40000}]
+check("different aliases consume separate trace budget",
+      proxy.compact_deepseek_reasoning_history(divergent, "deepseek-v4.1-flash")[0]["reasoning"] == " ")
+forwarded = proxy.build_upstream_body({"model": "deepseek-v4.1-flash", "messages": [
+    {"role": "user", "content": "test"},
+    {"role": "assistant", "content": "answer", "reasoning_content": " ", "reasoning": long},
+    {"role": "user", "content": "continue"},
+]})
+assistant = next(m for m in forwarded["messages"] if m.get("role") == "assistant")
+check("full outgoing build bounds the legacy alias", assistant["reasoning"] == " ")
+
 print("deepseek reasoning compaction checks passed")

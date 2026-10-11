@@ -9,7 +9,8 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[1]
 COMMIT = 'cb6a844588705ea01388be2b9df1f0cbbbcde357'
 TAG = 'v1.6.20'
-PATCH_ID = 'v1.6.20-ops.20261011.1'
+PATCH_ID = 'v1.6.20-ops.20261012.1'
+PATCH_SOURCE = 'wushuai0802/workbuddy2api-hub-ops-patch'
 MODULES = ('wb_proxy.py', 'wb_webtools.py', 'wb_accounts.py', 'wb_ops.py', 'wb_stall.py')
 PUBLIC_DIRS = ('files', 'tests', 'docs', 'scripts', 'patches', '.github')
 PUBLIC_ROOT = ('README.md', 'README.en.md', 'LICENSE', 'NOTICE.md', 'CHANGELOG.md',
@@ -57,7 +58,11 @@ def main():
             fromfile='a/' + name if base is not None else '/dev/null', tofile='b/' + name))
     dependencies = sorted([path.name for path in upstream.glob('wb_*.py') if path.name not in MODULES]
                           + ['dashboard.html'])
+    payload_identity = hashlib.sha256(''.join(
+        name + ':' + files[name]['patched_sha256'] + '\n' for name in sorted(files)
+    ).encode('ascii')).hexdigest()
     metadata = {'schema_version': 1, 'patch_id': PATCH_ID, 'base_tag': TAG,
+                'patch_source': PATCH_SOURCE, 'payload_fingerprint': payload_identity,
                 'repository': 'https://github.com/ardeyouxipianyi/workbuddy2api-hub',
                 'upstream_commit': COMMIT, 'python_requires': '>=3.11', 'files': files,
                 'compatibility': {name: digest(normalize(upstream / name)) for name in dependencies}}

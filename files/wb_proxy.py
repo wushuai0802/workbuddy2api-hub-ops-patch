@@ -7305,12 +7305,34 @@ def retry_snapshot():
         return dict(_RETRY_COUNTS)
 
 
+def _patch_payload_fingerprint():
+    """Identify this source payload without reading any account or settings."""
+    directory = os.path.dirname(__file__)
+    names = ('wb_accounts.py', 'wb_ops.py', 'wb_proxy.py', 'wb_stall.py', 'wb_webtools.py')
+    records = []
+    try:
+        for name in names:
+            with open(os.path.join(directory, name), 'rb') as source:
+                data = source.read().replace(b'\r\n', b'\n')
+            records.append(name + ':' + hashlib.sha256(data).hexdigest() + '\n')
+    except OSError:
+        return None
+    return hashlib.sha256(''.join(records).encode('ascii')).hexdigest()
+
+
+# Freeze the identity when this source is imported. Replacing files underneath
+# a running interpreter must not claim that interpreter loaded the new code.
+_OPS_PATCH_FINGERPRINT = _patch_payload_fingerprint()
+
+
 def retry_health_snapshot(limit=200):
     try:
         limit = max(1, min(10000, int(limit)))
     except (ValueError, TypeError):
         limit = 200
-    stats = {"retries": retry_snapshot(), "pid": os.getpid(), "ops_patch_id": "v1.6.20-ops.20261011.1",
+    stats = {"retries": retry_snapshot(), "pid": os.getpid(), "ops_patch_id": "v1.6.20-ops.20261012.1",
+             "ops_patch_source": "wushuai0802/workbuddy2api-hub-ops-patch",
+             "ops_patch_fingerprint": _OPS_PATCH_FINGERPRINT,
              "loops": loop_health_snapshot(),
              "process_started": _RETRY_STARTED_AT, "turns": 0,
              "reasoning_only": 0, "empty_output": 0, "failed": 0,
@@ -7483,7 +7505,35 @@ def _close_upstream(upstream):
         pass
 
 
-_STREAM_GUARD_CODES = {"reasoning_loop_detected", "content_loop_detected", "generation_timeout"}
+_STREAM_GUARD_CODES = {"reasoning_loop_detected", "content_loop_detected", "generation_timeout",
+                       "upstream_choices_unsupported"}
+
+
+def _single_candidate_error(payload):
+    """The gateway's aggregation/Responses/Messages lifecycles are singular."""
+    if "n" not in payload:
+        return None
+    value = payload["n"]
+    if type(value) is int and value == 1:
+        return None
+    return "Only n=1 is supported by this gateway; omit n or send the integer 1."
+
+
+def _unsupported_stream_choices(frame):
+    if not isinstance(frame, dict):
+        return False
+    choices = frame.get("choices")
+    if choices is None:
+        return False
+    if not isinstance(choices, list) or len(choices) > 1:
+        return True
+    for choice in choices:
+        if not isinstance(choice, dict):
+            return True
+        index = choice.get("index", 0)
+        if type(index) is not int or index != 0:
+            return True
+    return False
 
 
 def _generation_deadline(holder):
@@ -7613,17 +7663,20 @@ class _GuardedStream:
         self.timer = None
         self.closed = False
         self.reason = ReasoningLoopGuard()
-        self.mixed_stall = (MixedStallGuard() if
-                            str(holder.get("model") or "").strip().lower().rsplit("/", 1)[-1] == DEEPSEEK_V41_MODEL
-                            and (holder.get("base_body") or {}).get("n", 1) == 1
-                            and os.environ.get("WB_OPS_LOOP_GUARD", "1").lower() not in ("0", "false", "off")
-                            and os.environ.get("WB_OPS_MIXED_STALL_GUARD", "1").lower()
-                            not in ("0", "false", "off") else None)
+        mixed_enabled = (str(holder.get("model") or "").strip().lower().rsplit("/", 1)[-1] == DEEPSEEK_V41_MODEL
+                         and (holder.get("base_body") or {}).get("n", 1) == 1
+                         and os.environ.get("WB_OPS_LOOP_GUARD", "1").lower() not in ("0", "false", "off")
+                         and os.environ.get("WB_OPS_MIXED_STALL_GUARD", "1").lower()
+                         not in ("0", "false", "off"))
+        self.mixed_stall = MixedStallGuard() if mixed_enabled else None
         self.stall_buffer_signal = False
         self.stall_observer = (StallObserver() if str(holder.get("model") or "").lower().startswith("deepseek-")
                                and os.environ.get("WB_OPS_STALL_OBSERVE", "1").lower() not in ("0", "false", "off") else None)
         self.content = ReasoningLoopGuard(conservative=True)
-        self.leak = LeakedThinkingGuard()
+        self.leak = LeakedThinkingGuard(mixed_stall=MixedStallGuard() if mixed_enabled else None)
+        self.leak_enabled = (str(holder.get("model") or "").lower().startswith("deepseek-") and
+                             os.environ.get("WB_OPS_LEAKED_THINKING_GUARD", "1").lower()
+                             not in ("0", "false", "off"))
         self.leak_reported = False
         self.received_chars = 0
         self.reason_chars = 0
@@ -7846,6 +7899,12 @@ class _GuardedStream:
                 self._observe_stall(final=True)
                 if self._timed_out():
                     yield self._failure("generation_timeout")
+                elif self.leak_enabled and self.leak.finish():
+                    self.holder["loop_evidence"] = {"rule": self.leak.rule, "chars": self.leak.total_chars}
+                    _loop_event("leaked_thinking_loop_detected")
+                    _loop_event("content_loop_detected", self.leak.rule, self.leak.total_chars,
+                                metrics=self.leak.mixed_metrics)
+                    yield self._failure("content_loop_detected")
                 elif self.mixed_stall is not None:
                     metrics = self.mixed_stall.feed("", final=True)
                     if metrics:
@@ -7867,6 +7926,14 @@ class _GuardedStream:
                 frame = json.loads(data)
             except (ValueError, TypeError):
                 frame = {}
+            if _unsupported_stream_choices(frame):
+                # Never combine independent candidates into loop evidence or
+                # collapse them into one output. Replay cannot repair protocol.
+                self.recovery.block()
+                self.holder["ops_tool_seen"] = True
+                _loop_event("upstream_choices_unsupported")
+                yield self._failure("upstream_choices_unsupported")
+                return
             choices = (frame.get("choices") or []) if isinstance(frame, dict) else []
             if isinstance(frame, dict) and frame.get("usage"):
                 self.received_usage = frame["usage"]
@@ -7876,7 +7943,7 @@ class _GuardedStream:
                 self.holder["ops_tool_seen"] = True  # uncertain protocol: no replay
             for choice in choices:
                 delta = choice.get("delta") or {}
-                for field in ("content", "reasoning_content"):
+                for field in ("content", "reasoning_content", "refusal"):
                     value = str(delta.get(field) or "")
                     cjk = sum(1 for c in value if '\u4e00' <= c <= '\u9fff' or '\u3400' <= c <= '\u4dbf')
                     self.received_chars += len(value)
@@ -7894,6 +7961,10 @@ class _GuardedStream:
                 self.protocol_tail = protocol[-32:]
                 if str(delta.get("content") or "").strip():
                     self.holder["ops_output_seen"] = True
+                if delta.get("refusal") not in (None, ""):
+                    self.holder["ops_output_seen"] = True
+                    self.holder["ops_refusal_seen"] = True
+                    self.recovery.block()
                 if (any(c.get("id") or (c.get("function") or {}).get("name") or
                         (c.get("function") or {}).get("arguments") for c in calls) or
                         (isinstance(legacy, dict) and (legacy.get("name") or legacy.get("arguments")))):
@@ -7908,8 +7979,7 @@ class _GuardedStream:
                 content = self.content_scrubber.feed(delta.get("content") or "")
                 self._observe_stall(reason, final=bool(choice.get("finish_reason")))
                 leaked_loop = False
-                if (str(self.holder.get("model") or "").lower().startswith("deepseek-") and
-                        os.environ.get("WB_OPS_LEAKED_THINKING_GUARD", "1").lower() not in ("0", "false", "off")):
+                if self.leak_enabled:
                     leaked_loop = self.leak.feed(content)
                     if choice.get("finish_reason"):
                         leaked_loop = self.leak.finish() or leaked_loop
@@ -7921,12 +7991,13 @@ class _GuardedStream:
                 code = ("reasoning_loop_detected" if self.reason.feed(reason) or mixed_metrics else
                         "content_loop_detected" if self.content.feed(content) or leaked_loop else None)
                 if code:
-                    detector = self.reason if code == "reasoning_loop_detected" else (self.leak.guard if leaked_loop else self.content)
+                    detector = self.reason if code == "reasoning_loop_detected" else (self.leak if leaked_loop else self.content)
                     if leaked_loop:
                         _loop_event("leaked_thinking_loop_detected")
                     rule = "mixed-stall" if mixed_metrics and not self.reason.hit else detector.rule
                     self.holder["loop_evidence"] = {"rule": rule, "chars": detector.total_chars}
-                    _loop_event(code, rule, detector.total_chars, metrics=mixed_metrics)
+                    _loop_event(code, rule, detector.total_chars,
+                                metrics=self.leak.mixed_metrics if leaked_loop else mixed_metrics)
                     yield self._failure(code)
                     return
                 if choice.get("finish_reason") and choice["finish_reason"] != "stop":
@@ -7954,7 +8025,7 @@ class _GuardedStream:
             _loop_event("thinking_content_summary",
                         metrics={"content_chars": self.received_chars-self.reason_chars,
                                  "closed_boundary": int(self.leak.state == "done"),
-                                 "loop_hit": int(self.leak.guard.hit or self.content.hit)})
+                                 "loop_hit": int(self.leak.hit or self.content.hit)})
         if self.timer is not None:
             self.timer.cancel()
             self.timer.join()
@@ -8457,7 +8528,14 @@ def clean_deepseek_stalled_history(messages, model):
 
 
 def compact_deepseek_reasoning_history(messages, model):
-    """Retain the previously verified NAS V4.1 old-reasoning budget."""
+    """Bound all outgoing V4.1 reasoning aliases, newest messages first.
+
+    Equal aliases represent one trace and consume the budget once. Divergent
+    aliases both count: neither field is allowed to hide a longer trace behind
+    an empty/placeholder primary field. Keep a message's traces together, or
+    replace both with compatibility placeholders; never modify client history,
+    visible content or tool pairs. Placeholders carry no reasoning budget.
+    """
     model_id = str(model or "").strip().lower().rsplit("/", 1)[-1]
     if model_id != DEEPSEEK_V41_MODEL or not isinstance(messages, list):
         return messages
@@ -8465,12 +8543,15 @@ def compact_deepseek_reasoning_history(messages, model):
         budget = max(0, int(DEEPSEEK_REASONING_HISTORY_LIMIT))
     except (TypeError, ValueError):
         budget = 65536
-    total = sum(
-        len(m.get("reasoning_content") or "")
-        for m in messages
-        if isinstance(m, dict) and m.get("role") == "assistant"
-        and isinstance(m.get("reasoning_content"), str)
-    )
+    def trace_cost(message):
+        return sum(len(trace) for trace in {
+            message.get(field) for field in ("reasoning_content", "reasoning")
+            if isinstance(message.get(field), str) and message.get(field)
+            and message.get(field) != DEEPSEEK_REASONING_PLACEHOLDER
+        })
+
+    total = sum(trace_cost(m) for m in messages
+                if isinstance(m, dict) and m.get("role") == "assistant")
     if total <= budget:
         return messages
     out = list(messages)
@@ -8479,11 +8560,11 @@ def compact_deepseek_reasoning_history(messages, model):
         message = out[index]
         if not isinstance(message, dict) or message.get("role") != "assistant":
             continue
-        trace = message.get("reasoning_content")
-        if not isinstance(trace, str) or not trace:
+        cost = trace_cost(message)
+        if not cost:
             continue
-        if kept + len(trace) <= budget:
-            kept += len(trace)
+        if kept + cost <= budget:
+            kept += cost
             continue
         item = dict(message)
         item["reasoning_content"] = DEEPSEEK_REASONING_PLACEHOLDER
@@ -9805,6 +9886,9 @@ def _apply_stream_idle_timeout(response, seconds):
 
 def open_upstream(payload, session_key=None, target_realm=None,
                   exclude_uids=None, deadline_at=None, prebuilt_body=None):
+    candidate_error = _single_candidate_error(payload)
+    if candidate_error:
+        raise ValueError(candidate_error)
     # Refresh the daily guards before picking. The scan underneath is
     # incremental and TTL-cached, so this is a stat() plus a cached dict on
     # the hot path, and an account parked by any of the guards is skipped
@@ -10027,6 +10111,7 @@ def open_upstream(payload, session_key=None, target_realm=None,
                 except Exception:
                     pass
                 refreshed = False
+                refresh_attempted = False
                 if (account.uid not in auth_refreshed and len(auth_refreshed) < total
                         and getattr(account, "refresh_token", "")):
                     auth_refreshed.add(account.uid)
@@ -10036,12 +10121,16 @@ def open_upstream(payload, session_key=None, target_realm=None,
                         if budget <= 0:
                             raise TimeoutError("upstream connection deadline exceeded")
                     try:
-                        refreshed = account.refresh_after_401(sent_access_token, timeout=budget)
+                        refresh_attempted = True
+                        retry_bump("auth_refresh_attempt")
+                        refreshed = account.refresh_after_401(sent_access_token, timeout=budget,
+                                                              deadline_at=deadline_at)
                     except Exception as refresh_exc:
                         log("account %s refresh after 401 failed (%s)"
                             % (account.uid[:8], type(refresh_exc).__name__),
                             level="WARN", tag="auth")
                 if refreshed:
+                    retry_bump("auth_refresh_ready")
                     retry_bump("auth_401_refresh_success")
                     tried.discard(account.uid)
                     retry_uid = account.uid
@@ -10050,7 +10139,8 @@ def open_upstream(payload, session_key=None, target_realm=None,
                     log("account %s refreshed after HTTP 401; retrying request"
                         % account.uid[:8], level="INFO", tag="auth")
                     continue
-                if account.uid in auth_refreshed:
+                if refresh_attempted:
+                    retry_bump("auth_refresh_failed")
                     retry_bump("auth_401_refresh_failed")
                 log("account %s rejected (HTTP 401), rotating" % account.uid[:8])
                 if session_key and POOL:
@@ -10203,7 +10293,7 @@ def aggregate_stream(raw_iter, model, resp_id, holder=None):
 
 def _aggregate_stream_impl(raw_iter, model, resp_id):
     """Fold an SSE stream into one non-streaming chat.completion object."""
-    content, reasoning, finish = [], [], "stop"
+    content, reasoning, refusal, finish = [], [], [], "stop"
     tool_calls_map = {}
     usage = None
     started = time.time()
@@ -10242,6 +10332,8 @@ def _aggregate_stream_impl(raw_iter, model, resp_id):
             delta = choice.get("delta") or {}
             if delta.get("content"):
                 content.append(delta["content"])
+            if isinstance(delta.get("refusal"), str) and delta["refusal"]:
+                refusal.append(delta["refusal"])
             if delta.get("reasoning_content"):
                 safe = scrubber.feed(delta["reasoning_content"])
                 if safe:
@@ -10320,6 +10412,8 @@ def _aggregate_stream_impl(raw_iter, model, resp_id):
     message = {"role": "assistant", "content": clean_text}
     if reasoning:
         message["reasoning_content"] = "".join(reasoning)
+    if refusal:
+        message["refusal"] = "".join(refusal)
     # PATCH2-BY-OPS: 二次防御——剔除「无函数名且无参数」的空 tool_call。
     # 即使上游以 tool_calls 数组形式发空占位，也不会泄漏给客户端。
     if tool_calls_map:
@@ -10349,8 +10443,9 @@ def _aggregate_stream_impl(raw_iter, model, resp_id):
     if usage is None or (usage.get("total_tokens") or 0) == 0:
         full_c = "".join(content)
         full_r = "".join(reasoning)
-        if full_c or full_r:
-            comp = estimate_tokens(full_c) + estimate_tokens(full_r)
+        full_refusal = "".join(refusal)
+        if full_c or full_r or full_refusal:
+            comp = estimate_tokens(full_c) + estimate_tokens(full_r) + estimate_tokens(full_refusal)
             prompt_est = max(1, comp // 2)
             usage = {
                 "prompt_tokens": prompt_est,
@@ -11618,6 +11713,11 @@ def chat_to_messages(obj):
     text = _anthropic_text(text)
     if text:
         content.append({"type": "text", "text": text})
+    refusal = _anthropic_text(message.get("refusal"))
+    if refusal:
+        # Messages has no dedicated refusal block: preserve its text and mark
+        # the terminal as refusal even when Chat ended with ordinary stop.
+        content.append({"type": "text", "text": refusal})
     tool_calls = message.get("tool_calls")
     if isinstance(tool_calls, list):
         for call in tool_calls:
@@ -11636,7 +11736,7 @@ def chat_to_messages(obj):
         "role": "assistant",
         "model": _anthropic_text(obj.get("model")),
         "content": content,
-        "stop_reason": _anthropic_stop_reason(finish),
+        "stop_reason": "refusal" if refusal else _anthropic_stop_reason(finish),
         "stop_sequence": None,
         "usage": _anthropic_usage(obj.get("usage")),
     }
@@ -11672,6 +11772,7 @@ def stream_messages_events(raw_iter, model, holder=None):
         "tools": {},
         "tool_order": [],
         "usage": None,
+        "refusal": False,
     }
 
     def usage_payload():
@@ -11752,6 +11853,16 @@ def stream_messages_events(raw_iter, model, holder=None):
                 "index": state["text_idx"],
                 "delta": {"type": "text_delta", "text": text},
             })
+        refusal = delta.get("refusal")
+        if isinstance(refusal, str) and refusal:
+            state["refusal"] = True
+            frame = ensure_text()
+            if frame:
+                yield frame
+            yield anthropic_sse_frame("content_block_delta", {
+                "index": state["text_idx"],
+                "delta": {"type": "text_delta", "text": refusal},
+            })
         for call in delta.get("tool_calls") or []:
             if not isinstance(call, dict):
                 continue
@@ -11795,7 +11906,7 @@ def stream_messages_events(raw_iter, model, holder=None):
                 })
         finish = choice.get("finish_reason")
         if finish:
-            state["stop"] = _anthropic_stop_reason(finish)
+            state["stop"] = "refusal" if state["refusal"] else _anthropic_stop_reason(finish)
     if state["failed"]:
         return
     if not state["started"]:
@@ -11853,6 +11964,7 @@ def chat_to_response(chat_obj, model, custom_names=None, request_meta=None, name
     choice = (chat_obj.get("choices") or [{}])[0]
     msg = choice.get("message") or {}
     text = msg.get("content") or ""
+    refusal = msg.get("refusal") or ""
     reasoning = dsml_safe_prefix(msg.get("reasoning_content") or "", final=True)[0]
     output = []
     if reasoning:
@@ -11900,21 +12012,24 @@ def chat_to_response(chat_obj, model, custom_names=None, request_meta=None, name
             text = clean_t
     if re.search(TAG_START, text):
         text, _ = quarantine_dsml_text(text)
-    if text or not output:
+    if text or refusal or not output:
+        parts = ([{"type": "output_text", "text": text,
+                   "annotations": build_citations(text, sources)}] if text else [])
+        if refusal:
+            parts.append({"type": "refusal", "refusal": refusal})
         output.append({
             "id": _new_id("msg_"),
             "type": "message",
             "status": "completed",
             "role": "assistant",
-            "content": [{"type": "output_text", "text": text,
-                         "annotations": build_citations(text, sources)}] if text else [],
+            "content": parts,
         })
     finish = choice.get("finish_reason") or "stop"
     obj = {
         "id": _new_id("resp_"),
         "object": "response",
         "created_at": int(time.time()),
-        "status": "completed" if finish != "length" else "incomplete",
+        "status": "incomplete" if finish in ("length", "content_filter") else "completed",
         "model": model,
         "output": output,
         "output_text": text,
@@ -11932,6 +12047,8 @@ def chat_to_response(chat_obj, model, custom_names=None, request_meta=None, name
         obj["usage"] = u
     if finish == "length":
         obj["incomplete_details"] = {"reason": "max_output_tokens"}
+    elif finish == "content_filter":
+        obj["incomplete_details"] = {"reason": "content_filter"}
     if chat_obj.get("_ops_failure"):
         obj["status"] = "failed"
         obj["error"] = {"code": chat_obj["_ops_failure"],
@@ -11991,7 +12108,7 @@ def _stream_chat_events(upstream, model, holder):
     try:
         while True:
             current = _GuardedStream(current, holder)
-            text, reason = [], []
+            text, reason, refusal = [], [], []
             holder["text_parts"], holder["reason_parts"] = text, reason
             holder["usage_this_round"] = None
             holder["round_accounted"] = False
@@ -12033,6 +12150,9 @@ def _stream_chat_events(upstream, model, holder):
                         text.append(delta["content"])
                         if str(delta["content"]).strip():
                             holder["client_content_seen"] = True
+                    if isinstance(delta.get("refusal"), str) and delta["refusal"]:
+                        refusal.append(delta["refusal"])
+                        holder["client_refusal_seen"] = True
                     calls = delta.get("tool_calls") or []
                     legacy = delta.get("function_call") or {}
                     if any(c.get("id") or (c.get("function") or {}).get("name") or
@@ -12061,7 +12181,7 @@ def _stream_chat_events(upstream, model, holder):
                 holder["incomplete_reason"] = "upstream_truncated"
             usage = holder.get("usage_this_round")
             if not usage or not usage.get("total_tokens"):
-                completion = estimate_tokens("".join(text + reason))
+                completion = estimate_tokens("".join(text + reason + refusal))
                 prompt = max(1, estimate_tokens(str((holder.get("base_body") or {}).get("messages") or "")))
                 usage = {"prompt_tokens": prompt, "completion_tokens": completion,
                          "total_tokens": prompt + completion,
@@ -12076,7 +12196,7 @@ def _stream_chat_events(upstream, model, holder):
                 ledger[uid] = sum_usage(ledger.get(uid), usage)
             gate = reasoning_only_turn(text, holder.get("client_tool_calls_seen"), finish,
                                        holder.get("incomplete_reason"))
-            gate = gate and not holder.get("client_content_seen")
+            gate = gate and not holder.get("client_content_seen") and not holder.get("client_refusal_seen")
             holder["thinking_only"] = bool(gate)
             _close_upstream(current)
             if _try_loop_continuation(holder, model, holder.get("incomplete_reason"),
@@ -12094,7 +12214,8 @@ def _stream_chat_events(upstream, model, holder):
                 holder["incomplete_reason"] = holder.get("continuation_failure_code") or (
                     "reasoning_only_turn" if reason else "empty_output_turn")
             _finish_loop_retry(holder, not holder.get("incomplete_reason") and finish != "length" and
-                               bool(holder.get("client_content_seen") or holder.get("client_tool_calls_seen")))
+                               bool(holder.get("client_content_seen") or holder.get("client_tool_calls_seen") or
+                                    holder.get("client_refusal_seen")))
             if holder.get("incomplete_reason"):
                 yield from _chat_error_frames(holder, holder["incomplete_reason"])
             else:
@@ -12107,6 +12228,11 @@ def _stream_chat_events(upstream, model, holder):
 
 
 def _start_empty_continuation(holder, kind="thinking_only"):
+    if ((holder.get("base_body") or {}).get("n", 1) != 1 or
+            holder.get("ops_output_seen") or holder.get("ops_tool_seen") or
+            holder.get("client_content_seen") or holder.get("client_tool_calls_seen") or
+            holder.get("client_refusal_seen")):
+        return False
     callback = holder.get("retry_call")
     if not callback or holder.get("retried") or holder.get("continuation_attempts", 0) >= CONTINUATION_MAX_ATTEMPTS:
         return False
@@ -12187,6 +12313,7 @@ def _aggregate_with_recovery(upstream, model, account, holder):
             finish = ((obj.get("choices") or [{}])[0].get("finish_reason") or "stop")
             failure = obj.get("_ops_failure")
             gate = reasoning_only_turn(message.get("content"), message.get("tool_calls"), finish, failure)
+            gate = gate and not message.get("refusal") and not holder.get("ops_refusal_seen")
             _close_upstream(current)
             if _try_loop_continuation(holder, model, failure, message.get("reasoning_content", ""),
                                       (message.get("content") or "").strip(), message.get("tool_calls")):
@@ -12205,7 +12332,7 @@ def _aggregate_with_recovery(upstream, model, account, holder):
             if failure == "reasoning_loop_detected" and holder.get("continuation_failure_code"):
                 obj["_ops_failure"] = holder["continuation_failure_code"]
             _finish_loop_retry(holder, not obj.get("_ops_failure") and finish != "length" and
-                               bool(message.get("content") or message.get("tool_calls")))
+                               bool(message.get("content") or message.get("tool_calls") or message.get("refusal")))
             return obj, account
     finally:
         _close_upstream(current)
@@ -12244,11 +12371,12 @@ def _stream_responses_impl(upstream, model, holder):
     created = holder.setdefault("created", int(time.time()))
     msg_id, rs_id = _new_id("msg_"), _new_id("rs_")
     seq = holder.get("sequence_number", 0)
-    text_parts, reason_parts = [], []
+    text_parts, reason_parts, refusal_parts = [], [], []
     holder["text_parts"], holder["reason_parts"] = text_parts, reason_parts
     outputs = holder.setdefault("response_outputs", [])
     reason_index = None
     msg_index = None
+    content_indexes = {}
     finish = "stop"
     usage = None
     tool_calls_map = {}
@@ -12293,6 +12421,8 @@ def _stream_responses_impl(upstream, model, holder):
         holder["sequence_number"] = seq
         if etype == "response.output_text.delta" and str(payload.get("delta") or "").strip():
             holder["client_content_seen"] = True
+        if etype == "response.refusal.delta" and payload.get("delta"):
+            holder["client_refusal_seen"] = True
         if etype == "response.output_item.added" and (payload.get("item") or {}).get("type") in ("function_call", "custom_tool_call"):
             holder["client_tool_calls_seen"] = True
         data = {"type": etype, "sequence_number": seq}
@@ -12316,9 +12446,10 @@ def _stream_responses_impl(upstream, model, holder):
     def msg_item(status):
         item = {"id": msg_id, "type": "message", "status": status,
                 "role": "assistant", "content": []}
-        if text_parts:
-            item["content"] = [{"type": "output_text", "text": "".join(text_parts),
-                              "annotations": _annotations()}]
+        for kind in content_indexes:
+            item["content"].append(
+                {"type": "refusal", "refusal": "".join(refusal_parts)} if kind == "refusal" else
+                {"type": "output_text", "text": "".join(text_parts), "annotations": _annotations()})
         return item
     def emit_reason(piece):
         nonlocal reason_index
@@ -12338,6 +12469,37 @@ def _stream_responses_impl(upstream, model, holder):
             "item_id": rs_id, "output_index": reason_index,
             "summary_index": 0, "delta": piece,
         })
+
+    def ensure_message_part(kind):
+        nonlocal msg_index
+        if msg_index is None:
+            if reason_index is not None and outputs[reason_index] is None:
+                full_r = "".join(reason_parts)
+                yield ev("response.reasoning_summary_text.done", {
+                    "item_id": rs_id, "output_index": reason_index, "summary_index": 0, "text": full_r,
+                })
+                yield ev("response.reasoning_summary_part.done", {
+                    "item_id": rs_id, "output_index": reason_index, "summary_index": 0,
+                    "part": {"type": "summary_text", "text": full_r},
+                })
+                outputs[reason_index] = reason_item("completed")
+                yield ev("response.output_item.done",
+                         {"output_index": reason_index, "item": outputs[reason_index]})
+            msg_index = len(outputs)
+            outputs.append(None)
+            yield ev("response.output_item.added", {
+                "output_index": msg_index,
+                "item": {"id": msg_id, "type": "message", "status": "in_progress",
+                         "role": "assistant", "content": []},
+            })
+        if kind not in content_indexes:
+            content_indexes[kind] = len(content_indexes)
+            part = ({"type": "refusal", "refusal": ""} if kind == "refusal" else
+                    {"type": "output_text", "text": "", "annotations": _annotations()})
+            yield ev("response.content_part.added", {
+                "item_id": msg_id, "output_index": msg_index,
+                "content_index": content_indexes[kind], "part": part,
+            })
 
     def _finalize():
         # Close out the stream: reasoning item, structured tool calls,
@@ -12408,7 +12570,7 @@ def _stream_responses_impl(upstream, model, holder):
                 if msg_index is not None:
                     yield ev("response.output_text.delta", {
                         "item_id": msg_id, "output_index": msg_index,
-                        "content_index": 0, "delta": clean_rem,
+                        "content_index": content_indexes.get("output_text", 0), "delta": clean_rem,
                     })
             text_buffer = ""
         # 2. DSML fallback: emit buffered/parsed DSML tool calls if no structured tool_calls were emitted
@@ -12511,35 +12673,35 @@ def _stream_responses_impl(upstream, model, holder):
                     "output_index": _ws_idx, "item_id": _ws_id,
                 })
         # Empty attempts must not leave a phantom message in the final response.
-        if msg_index is not None or full_text:
+        if msg_index is not None or full_text or refusal_parts:
             if msg_index is None:
-                msg_index = len(outputs)
-                outputs.append(None)
-                yield ev("response.output_item.added", {
-                    "output_index": msg_index,
-                    "item": {"id": msg_id, "type": "message", "status": "in_progress",
-                             "role": "assistant", "content": []},
+                yield from ensure_message_part("output_text")
+            for kind, content_index in content_indexes.items():
+                if kind == "refusal":
+                    part = {"type": "refusal", "refusal": "".join(refusal_parts)}
+                    yield ev("response.refusal.done", {
+                        "item_id": msg_id, "output_index": msg_index, "content_index": content_index,
+                        "refusal": part["refusal"],
+                    })
+                else:
+                    part = {"type": "output_text", "text": full_text, "annotations": _annotations()}
+                    yield ev("response.output_text.done", {
+                        "item_id": msg_id, "output_index": msg_index, "content_index": content_index,
+                        "text": full_text,
+                    })
+                yield ev("response.content_part.done", {
+                    "item_id": msg_id, "output_index": msg_index, "content_index": content_index,
+                    "part": part,
                 })
-                yield ev("response.content_part.added", {
-                    "item_id": msg_id, "output_index": msg_index, "content_index": 0,
-                    "part": {"type": "output_text", "text": "", "annotations": _annotations()},
-                })
-            yield ev("response.output_text.done", {
-                "item_id": msg_id, "output_index": msg_index, "content_index": 0, "text": full_text,
-            })
-            yield ev("response.content_part.done", {
-                "item_id": msg_id, "output_index": msg_index, "content_index": 0,
-                "part": {"type": "output_text", "text": full_text,
-                         "annotations": _annotations()},
-            })
             outputs[msg_index] = msg_item("completed")
             yield ev("response.output_item.done", {"output_index": msg_index, "item": outputs[msg_index]})
         nonlocal usage
         if usage is None or (usage.get("total_tokens") or 0) == 0:
             out_txt = "".join(text_parts)
             rs_txt = "".join(reason_parts)
-            if out_txt or rs_txt:
-                comp = estimate_tokens(out_txt) + estimate_tokens(rs_txt)
+            refusal_txt = "".join(refusal_parts)
+            if out_txt or rs_txt or refusal_txt:
+                comp = estimate_tokens(out_txt) + estimate_tokens(rs_txt) + estimate_tokens(refusal_txt)
                 hint = holder.get("retry_body") or holder.get("base_body") or {}
                 prompt_est = max(1, estimate_tokens(str(hint.get("messages") or meta.get("input") or "")))
                 usage = {
@@ -12556,7 +12718,8 @@ def _stream_responses_impl(upstream, model, holder):
             failure = "upstream_truncated"
         gate = reasoning_only_turn(text_parts, tool_calls_map or dsml_calls or _internal_calls,
                                    finish, failure)
-        gate = gate and not holder.get("client_content_seen") and not holder.get("client_tool_calls_seen")
+        gate = (gate and not refusal_parts and not holder.get("client_content_seen") and
+                not holder.get("client_tool_calls_seen") and not holder.get("client_refusal_seen"))
         holder["thinking_only"], holder["gate_ok"] = bool(gate), bool(gate)
         if failure == "reasoning_loop_detected":
             _close_upstream(upstream)
@@ -12571,13 +12734,15 @@ def _stream_responses_impl(upstream, model, holder):
                 failure = holder.get("continuation_failure_code") or (
                     "reasoning_only_turn" if reason_parts else "empty_output_turn")
         holder["incomplete_reason"] = failure
-        status = "completed" if finish != "length" and not dropped_truncated else "incomplete"
+        status = "incomplete" if finish in ("length", "content_filter") or dropped_truncated else "completed"
         final = resp_obj(status)
         if finish == "length":
             final["incomplete_details"] = {"reason": "max_output_tokens"}
+        elif finish == "content_filter":
+            final["incomplete_details"] = {"reason": "content_filter"}
         if not holder.get("suppress_completion") and not holder.get("will_continue"):
             _finish_loop_retry(holder, not failure and finish != "length" and
-                               bool(text_parts or tool_calls_map or dsml_calls or _internal_calls))
+                               bool(text_parts or refusal_parts or tool_calls_map or dsml_calls or _internal_calls))
             holder["terminal_sent"] = True
             if failure:
                 final["status"] = "failed"
@@ -12585,7 +12750,7 @@ def _stream_responses_impl(upstream, model, holder):
                 final.pop("incomplete_details", None)
                 yield ev("response.failed", {"response": final})
             else:
-                yield ev("response.completed", {"response": final})
+                yield ev("response.incomplete" if status == "incomplete" else "response.completed", {"response": final})
         holder["prior_text_parts"] = holder.get("prior_text_parts", []) + text_parts
         holder["prior_usage"] = sum_usage(holder.get("prior_usage"), usage)
 
@@ -12700,31 +12865,7 @@ def _stream_responses_impl(upstream, model, holder):
             piece = delta.get("content")
             if piece:
                 yield from emit_reason(scrubber.feed(final=True))
-                if msg_index is None:
-                    if reason_index is not None:
-                        full_r = "".join(reason_parts)
-                        yield ev("response.reasoning_summary_text.done", {
-                            "item_id": rs_id, "output_index": reason_index,
-                            "summary_index": 0, "text": full_r,
-                        })
-                        yield ev("response.reasoning_summary_part.done", {
-                            "item_id": rs_id, "output_index": reason_index, "summary_index": 0,
-                            "part": {"type": "summary_text", "text": full_r},
-                        })
-                        outputs[reason_index] = reason_item("completed")
-                        yield ev("response.output_item.done",
-                                 {"output_index": reason_index, "item": outputs[reason_index]})
-                    msg_index = len(outputs)
-                    outputs.append(None)
-                    yield ev("response.output_item.added", {
-                        "output_index": msg_index,
-                        "item": {"id": msg_id, "type": "message", "status": "in_progress",
-                                 "role": "assistant", "content": []},
-                    })
-                    yield ev("response.content_part.added", {
-                        "item_id": msg_id, "output_index": msg_index, "content_index": 0,
-                        "part": {"type": "output_text", "text": "", "annotations": _annotations()},
-                    })
+                yield from ensure_message_part("output_text")
                 # DSML tool call buffering: do not stream raw DSML tags to client
                 text_buffer += piece
                 while text_buffer:
@@ -12733,7 +12874,7 @@ def _stream_responses_impl(upstream, model, holder):
                         text_parts.append(text_buffer)
                         yield ev("response.output_text.delta", {
                             "item_id": msg_id, "output_index": msg_index,
-                            "content_index": 0, "delta": text_buffer,
+                            "content_index": content_indexes["output_text"], "delta": text_buffer,
                         })
                         text_buffer = ""
                         break
@@ -12744,7 +12885,7 @@ def _stream_responses_impl(upstream, model, holder):
                             text_parts.append(lead)
                             yield ev("response.output_text.delta", {
                                 "item_id": msg_id, "output_index": msg_index,
-                                "content_index": 0, "delta": lead,
+                                "content_index": content_indexes["output_text"], "delta": lead,
                             })
                         calls_found, _ = parse_dsml_tool_calls(m.group(0))
                         if calls_found:
@@ -12758,7 +12899,7 @@ def _stream_responses_impl(upstream, model, holder):
                         text_parts.append(lead)
                         yield ev("response.output_text.delta", {
                             "item_id": msg_id, "output_index": msg_index,
-                            "content_index": 0, "delta": lead,
+                            "content_index": content_indexes["output_text"], "delta": lead,
                         })
                         text_buffer = text_buffer[idx:]
                         break
@@ -12770,17 +12911,26 @@ def _stream_responses_impl(upstream, model, holder):
                             text_parts.append(lead)
                             yield ev("response.output_text.delta", {
                                 "item_id": msg_id, "output_index": msg_index,
-                                "content_index": 0, "delta": lead,
+                                "content_index": content_indexes["output_text"], "delta": lead,
                             })
                             text_buffer = text_buffer[flush_len:]
                         else:
                             text_parts.append(text_buffer)
                             yield ev("response.output_text.delta", {
                                 "item_id": msg_id, "output_index": msg_index,
-                                "content_index": 0, "delta": text_buffer,
+                                "content_index": content_indexes["output_text"], "delta": text_buffer,
                             })
                             text_buffer = ""
                             break
+            refusal = delta.get("refusal")
+            if isinstance(refusal, str) and refusal:
+                yield from emit_reason(scrubber.feed(final=True))
+                yield from ensure_message_part("refusal")
+                refusal_parts.append(refusal)
+                yield ev("response.refusal.delta", {
+                    "item_id": msg_id, "output_index": msg_index,
+                    "content_index": content_indexes["refusal"], "delta": refusal,
+                })
             if choice.get("finish_reason"):
                 finish = choice["finish_reason"]
                 saw_finish = True
@@ -15446,6 +15596,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle_responses(self, payload):
         """Serve /v1/responses by translating to chat completions upstream."""
+        candidate_error = _single_candidate_error(payload)
+        if candidate_error:
+            return self._error(400, candidate_error, "invalid_request_error")
         # The gateway is stateless: it keeps no store of previous responses,
         # so it cannot replay a prior turn. Silently ignoring the field would
         # answer a follow-up as if it were a fresh conversation - the client
@@ -15740,6 +15893,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle_messages(self, payload):
         """Serve an Anthropic Messages request through the chat pipeline."""
+        candidate_error = _single_candidate_error(payload)
+        if candidate_error:
+            return self._anthropic_error(400, candidate_error, "invalid_request_error")
         try:
             chat_req = messages_to_chat(payload)
         except ValueError as exc:
@@ -16027,6 +16183,9 @@ class Handler(BaseHTTPRequestHandler):
             _chat_slots.release()
 
     def _dispatch_chat_post(self, path, payload):
+        candidate_error = _single_candidate_error(payload)
+        if candidate_error:
+            return self._error(400, candidate_error, "invalid_request_error")
         # 先挡背景请求：Codex 自己发的（记忆整理／环境建议／自动复核）
         # 不算「使用者实际使用」，一律本地拒绝，不碰上游。
         if BLOCK_BACKGROUND_REQUESTS:
