@@ -18,17 +18,17 @@ import uuid
 STATE = ".ops-patch-state.json"
 BACKUPS = ".ops-patch-backups"
 LOCK = ".ops-patch.lock"
-FILES = {"wb_proxy.py", "wb_webtools.py", "wb_accounts.py", "wb_ops.py", "wb_stall.py"}
+FILES = {"wb_proxy.py", "wb_webtools.py", "wb_accounts.py", "wb_ops.py", "wb_stall.py", "wb_upstream_pool.py"}
 NEW_FILES = {"wb_ops.py", "wb_stall.py"}
 DEPENDENCIES = {
     "dashboard.html", "wb_activity.py", "wb_agents.py",
-    "wb_atrest.py", "wb_catalog.py", "wb_fingerprint.py", "wb_identity.py",
+    "wb_atrest.py", "wb_catalog.py", "wb_egress.py", "wb_fingerprint.py", "wb_identity.py",
     "wb_ipintel.py", "wb_modelsdev.py", "wb_pricing.py", "wb_probes.py",
     "wb_prompt.py", "wb_scheduler.py", "wb_settings.py", "wb_tasks.py",
-    "wb_updates.py", "wb_upstream_pool.py", "wb_webagent.py",
+    "wb_updates.py", "wb_webagent.py",
 }
-BASE_TAG = "v1.6.20"
-UPSTREAM_COMMIT = "cb6a844588705ea01388be2b9df1f0cbbbcde357"
+BASE_TAG = "v1.7.3"
+UPSTREAM_COMMIT = "c7dad8fe32316d47ce4f0ff260bb7ac7802b8a94"
 
 
 def digest(data):
@@ -149,7 +149,7 @@ class Bundle:
         if not all(is_digest(value) for value in self.dependencies.values()):
             raise ValueError("invalid dependency checksums")
         if {name for name in listed if name.startswith("files/")} != {"files/" + name for name in FILES}:
-            raise ValueError("payload scope must contain exactly the five patch modules")
+            raise ValueError("payload scope must contain exactly the six patch modules")
         self.payload = {}
         for name, entry in self.files.items():
             if (not isinstance(entry, dict) or not is_digest(entry.get("patched_sha256"))

@@ -81,7 +81,9 @@ class BoundaryTests(unittest.TestCase):
                 self.assertEqual([e["delta"]["stop_reason"] for e in events if e["type"] == "message_delta"], ["refusal"])
                 self.assertFalse(any(e["type"] == "error" for e in events))
             else:
-                self.assertEqual(handler.json_body["content"], [{"type": "text", "text": REFUSAL}])
+                parts = handler.json_body["content"]
+                self.assertEqual([p for p in parts if p["type"] == "text"], [{"type": "text", "text": REFUSAL}])
+                self.assertTrue(all(p["type"] in ("text", "thinking") for p in parts))
                 self.assertEqual(handler.json_body["stop_reason"], "refusal")
 
     def test_refusal_stop_and_content_filter_all_six_paths(self):

@@ -197,7 +197,7 @@ class InstallerTests(unittest.TestCase):
                 self.assertEqual(self.snapshot(), before)
 
     def test_changed_dependency_is_not_modified(self):
-        for name in ("wb_updates.py", "wb_upstream_pool.py"):
+        for name in ("wb_updates.py", "wb_egress.py"):
             with self.subTest(name=name):
                 path = self.target / name
                 original = path.read_bytes()

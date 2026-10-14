@@ -3,8 +3,8 @@ import base64
 import http.client
 import json
 import os
-import socket
 import ssl
+import socket
 import sys
 import threading
 import time
@@ -143,16 +143,10 @@ def urlopen(req, timeout=30, proxy=""):
     return opener.open(req, timeout=timeout)
 
 
-_AUTH_REFRESH_MAX_BYTES = 1024 * 1024
-
-
+# Adapted from wushuai0802/workbuddy2api-hub-ops-patch, MIT,
+# v1.6.20-ops.20261012.1. See THIRD-PARTY-zh.md in the patch distribution.
 class _RefreshDeadline:
-    """Own a fresh socket until the bounded refresh finishes.
-
-    These sockets never enter the keep-alive pool. In particular, natural
-    response EOF cannot hand a socket to another request while the deadline
-    callback has already selected it for shutdown.
-    """
+    """Own fresh sockets until refresh ends; none enter the keep-alive pool."""
     def __init__(self, deadline_at):
         self.deadline_at = deadline_at
         self.lock = threading.Lock()
@@ -177,17 +171,15 @@ class _RefreshDeadline:
             sock = self.sock
         if sock is not None:
             try:
-                # urllib closes the socket object after getresponse while its
-                # makefile still owns the descriptor. Interrupt it with the
-                # base operation, retaining the SSL reader's state while it
-                # unwinds the in-flight read.
+                # urllib may close the object while its makefile retains the
+                # descriptor. Keep SSL reader state intact while interrupting.
                 socket.socket.shutdown(sock, socket.SHUT_RDWR)
             except OSError:
                 pass
 
     def connect(self, address, timeout=None, source_address=None):
-        # getaddrinfo itself is an OS call with no cancellable stdlib timeout.
-        # A late lookup must never initiate a connection or send credentials.
+        # OS DNS resolution cannot be cancelled by stdlib. A late lookup must
+        # never open a connection or send credentials after the deadline.
         self.remaining()
         entries = socket.getaddrinfo(address[0], address[1], 0, socket.SOCK_STREAM)
         last = None
@@ -217,10 +209,7 @@ class _DeadlineConnectionMixin:
             if not self.auto_open:
                 raise http.client.NotConnected()
             self.connect()
-        # HTTPConnection.send would auto-connect and immediately send. Check
-        # again after connect/tunnel/TLS before handing it credential bytes.
-        remaining = self._refresh_deadline.remaining()
-        self.sock.settimeout(remaining)
+        self.sock.settimeout(self._refresh_deadline.remaining())
         result = super().send(data)
         self._refresh_deadline.remaining()
         return result
@@ -238,8 +227,6 @@ class _DeadlineHTTPConnection(_DeadlineConnectionMixin, http.client.HTTPConnecti
 
 class _DeadlineHTTPSConnection(_DeadlineConnectionMixin, http.client.HTTPSConnection):
     def connect(self):
-        # Publish the TLS socket before its handshake, so a trickling proxy or
-        # peer cannot extend the original deadline by resetting idle timeouts.
         http.client.HTTPConnection.connect(self)
         self.sock.settimeout(self._refresh_deadline.remaining())
         host = self._tunnel_host or self.host
@@ -255,9 +242,8 @@ class _DeadlineHTTPSConnection(_DeadlineConnectionMixin, http.client.HTTPSConnec
 
 
 def _deadline_json(url, data, method, headers, deadline_at, proxy):
-    """One non-pooled HTTP attempt, with a shared deadline and 1MiB body cap."""
+    """Bound connect/tunnel/TLS/header/body phases without reusing sockets."""
     owner = _RefreshDeadline(deadline_at)
-
     def factory(cls):
         def new_connection(*args, **kwargs):
             owner.remaining()
@@ -266,27 +252,19 @@ def _deadline_json(url, data, method, headers, deadline_at, proxy):
             connection._create_connection = owner.connect
             return connection
         return new_connection
-
     class HTTPHandler(urllib.request.HTTPHandler):
         def http_open(self, req):
             return self.do_open(factory(_DeadlineHTTPConnection), req)
-
     class HTTPSHandler(urllib.request.HTTPSHandler):
         def https_open(self, req):
             return self.do_open(factory(_DeadlineHTTPSConnection), req, context=self._context)
-
     class NoRedirect(urllib.request.HTTPRedirectHandler):
         def redirect_request(self, *args, **kwargs):
-            # A refresh token may rotate: do not replay POSTs or follow an
-            # unexpected redirect with the refresh credential headers.
             return None
-
     proxy = str(proxy or "").strip()
     if proxy:
         proxies = urllib.request.ProxyHandler({"http": proxy, "https": proxy})
     elif wb_upstream_pool.enabled():
-        # The active keep-alive transport treats an empty account proxy as
-        # direct. A 401 must retain that exit even if process proxies exist.
         proxies = urllib.request.ProxyHandler({})
     else:
         proxies = urllib.request.ProxyHandler()
@@ -305,27 +283,35 @@ def _deadline_json(url, data, method, headers, deadline_at, proxy):
             raise
         owner.remaining()
         length = response.headers.get("Content-Length")
-        if length and length.isdigit() and int(length) > _AUTH_REFRESH_MAX_BYTES:
+        if length and length.isdigit() and int(length) > 1048576:
             raise ValueError("401 refresh response exceeds 1MiB")
         chunks, size = [], 0
         while True:
             owner.remaining()
-            chunk = response.read(min(16384, _AUTH_REFRESH_MAX_BYTES + 1 - size))
+            block = response.read(min(16384, 1048577 - size))
             owner.remaining()
-            if not chunk:
+            if not block:
                 break
-            size += len(chunk)
-            if size > _AUTH_REFRESH_MAX_BYTES:
+            size += len(block)
+            if size > 1048576:
                 raise ValueError("401 refresh response exceeds 1MiB")
-            chunks.append(chunk)
+            chunks.append(block)
         payload = json.loads(b"".join(chunks).decode("utf-8"))
         owner.remaining()
         return payload
+    except Exception as error:
+        # Python versions report socket shutdown during CONNECT/header reads
+        # differently (including BadStatusLine). Expiry is still a timeout.
+        if owner.expired or time.monotonic() >= deadline_at:
+            raise TimeoutError("401 refresh deadline exceeded") from error
+        raise
     finally:
         timer.cancel()
         timer.join()
         if response is not None:
             response.close()
+        if owner.sock is not None:
+            owner.sock.close()
 
 
 def http_json(url, data=None, method=None, headers=None, timeout=30,
@@ -336,13 +322,12 @@ def http_json(url, data=None, method=None, headers=None, timeout=30,
     "SSL: UNEXPECTED_EOF_WHILE_READING"; a single retry almost always
     succeeds, so every upstream call goes through here.
     """
-    if deadline_at is not None:
-        # Only request-triggered 401 recovery supplies this absolute deadline;
-        # normal background refreshes keep their existing retries and pool.
-        return _deadline_json(url, data, method, headers, deadline_at, proxy)
     attempts = max(1, int(retries or 1))
     last = None
     for attempt in range(1, attempts + 1):
+        remaining = timeout if deadline_at is None else deadline_at - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("refresh deadline exceeded")
         req = urllib.request.Request(
             url,
             data=data,
@@ -350,7 +335,9 @@ def http_json(url, data=None, method=None, headers=None, timeout=30,
             headers=headers or {},
         )
         try:
-            with urlopen(req, timeout=timeout, proxy=proxy) as resp:
+            if deadline_at is not None:
+                return _deadline_json(url, data, method, headers, deadline_at, proxy)
+            with urlopen(req, timeout=min(timeout, remaining), proxy=proxy) as resp:
                 return json.loads(resp.read().decode("utf-8"))
         except Exception as exc:
             last = exc
@@ -358,7 +345,10 @@ def http_json(url, data=None, method=None, headers=None, timeout=30,
                 break
             if log:
                 log("network retry %d/%d after %s" % (attempt, attempts, exc))
-            time.sleep(backoff * attempt)
+            delay = backoff * attempt
+            if deadline_at is not None and time.monotonic() + delay >= deadline_at:
+                raise TimeoutError("refresh retry exceeds deadline") from exc
+            time.sleep(delay)
     raise last
 
 REALM_CONFIGS = {
@@ -697,6 +687,18 @@ class Account(object):
         # Runtime-resolved value; recomputed by AccountPool.apply_proxy_slots().
         self.proxy = self.proxy_legacy
         self.enabled = data.get("enabled", True)
+        # 手动调度权重（面板按账号设置，1 = 不干预）。随凭证档持久化：这是
+        # 用户的明确分派意图，不该在重启后悄悄回到默认。非法值一律回落 1，
+        # 坏数据不至于让账号加载失败。
+        try:
+            self.weight = max(1, min(100, int(data.get("weight") or 1)))
+        except (TypeError, ValueError):
+            self.weight = 1
+        # 账号备注（面板自填，比如「批量」/「自用」）：随凭证档持久化，导出
+        # 与导入照常携带。只做展示，不参与任何调度判断；非字符串一律视为没
+        # 写过，超长截断，别让一条长备注把账号行撑爆。
+        raw_note = data.get("note")
+        self.note = (raw_note if isinstance(raw_note, str) else "").strip()[:200]
         # Live error state, never restored from the credential file: the label
         # describes the last upstream answer, not the credential. It used to be
         # persisted and read back, so a 429 that had long since recovered came
@@ -838,6 +840,8 @@ class Account(object):
             "proxySlot": self.proxy_slot,
             "proxy": self.proxy_legacy,
             "enabled": self.enabled,
+            "weight": self.weight,
+            "note": self.note,
             "lastError": self.last_error,
             "cooldownUntil": self.cooldown_until,
             "credits": self.credits,
@@ -884,6 +888,8 @@ class Account(object):
             "product": self.product,
             "enterpriseId": self.enterprise_id,
             "enabled": bool(self.enabled),
+            "weight": int(self.weight),
+            "note": self.note,
             "source": self.source,
             "proxySlot": self.proxy_slot,
             "proxy": self.proxy,
@@ -1421,7 +1427,7 @@ class Account(object):
         finally:
             self._refresh_lock.release()
 
-    def _refresh_locked(self, timeout=30, deadline_at=None):
+    def _refresh_locked(self, deadline_at=None, timeout=30):
         if not self.refresh_token:
             self._set_last_error("no refresh token; sign in again")
             return False
@@ -1444,10 +1450,9 @@ class Account(object):
         if self.enterprise_id:
             headers["X-Enterprise-Id"] = self.enterprise_id
         try:
-            kwargs = {"timeout": timeout, "proxy": self.proxy}
-            if deadline_at is not None:
-                kwargs.update(retries=1, deadline_at=deadline_at)
-            payload = http_json(url, data=b"{}", method="POST", headers=headers, **kwargs)
+            options = {} if deadline_at is None else {"retries": 1, "deadline_at": deadline_at}
+            payload = http_json(url, data=b"{}", method="POST", headers=headers, timeout=timeout,
+                                proxy=self.proxy, **options)
             if deadline_at is not None and time.monotonic() >= deadline_at:
                 raise TimeoutError("401 refresh deadline exceeded")
         except Exception as exc:
@@ -1510,6 +1515,19 @@ class Account(object):
             "User-Agent": WEB_USER_AGENT,
         }
 
+    def daily_chat_model(self):
+        """Which model this account's daily activity runs on.
+
+        The panel's setting wins when set; otherwise the built-in free id. Both
+        legs (the desktop-identity completion and the web conversation) read
+        this, so one setting moves the whole activity.
+        """
+        if self.path:
+            picked = wb_settings.daily_chat_model(os.path.dirname(self.path))
+            if picked:
+                return picked
+        return DAILY_CHAT_MODEL
+
     def daily_chat_web(self, prompt=None, trigger="unknown"):
         """网页通道的每日活跃会话（issue #75 / #59 / #90）。
 
@@ -1532,9 +1550,10 @@ class Account(object):
 
     def _daily_chat_web_upstream(self, prompt=None):
         """网页通道的实际流程；返回形状见 daily_chat_web。"""
+        model = self.daily_chat_model()
         body = {
             "prompt": prompt or DAILY_CHAT_WEB_PROMPT,
-            "model": DAILY_CHAT_MODEL,
+            "model": model,
             # 网页端建会话时固定带上这两项（抓包所得），保持请求形态一致。
             "conversationOrigin": "workbuddy-app",
             "plugins": [{"name": "weixinpay", "marketplace": "codebuddy-builtin"}],
@@ -1579,7 +1598,8 @@ class Account(object):
             link, token, session_id, cwd, prompt or DAILY_CHAT_WEB_PROMPT,
             WEB_USER_AGENT,
             poll_status=lambda: self._web_conversation_status(conversation),
-            wait_seconds=WEB_TURN_TIMEOUT, proxy=self.proxy)
+            wait_seconds=WEB_TURN_TIMEOUT, proxy=self.proxy,
+            model=model)
         result["conversation"] = conversation
         if result.get("ok"):
             result["msg"] = "网页通道会话跑完：%d 段输出，%d ms" % (
@@ -1610,7 +1630,8 @@ class Account(object):
         settings.json 里的 daily_chat_web 决定，True/False 可显式指定。
 
         trigger 只用于活动历史的来源标注；整次尝试记一行，网页通道那一步的结果
-        并进同一行的说明里，不再多记一行。
+        并进同一行的说明里，不再多记一行。ok 以真正计入积分的网页腿为准：网页腿
+        开着且失败时整次算失败（桌面腿跑过也不算数）。
         """
         if self.realm != "intl":
             return {"ok": False, "error": "daily chat is only for international accounts"}
@@ -1624,7 +1645,7 @@ class Account(object):
         url = self.chat_base_url() + wb_proxy.CHAT_PATH
         headers = self.headers("chat")
         body = {
-            "model": DAILY_CHAT_MODEL,
+            "model": self.daily_chat_model(),
             "messages": [{"role": "user", "content": "Hi"}],
             "stream": True,
             "max_tokens": 10,
@@ -1636,26 +1657,36 @@ class Account(object):
         try:
             with urlopen(req, timeout=20, proxy=self.proxy) as resp:
                 _ = resp.read()
-            self.last_daily_chat = time.strftime("%Y-%m-%d %H:%M:%S")
-            if self.path and os.path.exists(os.path.dirname(self.path)):
-                self.save(os.path.dirname(self.path))
             try:
                 self.fetch_credits()
             except Exception:
                 pass
             result = {"ok": True, "msg": "每日活跃对话成功完成"}
+            web_ok = True
             if web is None:
                 web = bool(self.path) and wb_settings.daily_chat_web(os.path.dirname(self.path))
             if web:
                 res = self.daily_chat_web(trigger=None)
                 result["web"] = res
-                if res.get("ok"):
+                web_ok = bool(res.get("ok"))
+                if web_ok:
                     result["msg"] = ("每日活跃对话成功完成（网页通道 %s：%d 段输出，%d ms）"
                                      % (res.get("status") or "completed",
                                         res.get("chunks") or 0, res.get("elapsed_ms") or 0))
                 else:
-                    result["msg"] = ("每日活跃对话成功完成（网页通道失败：%s）"
-                                     % res.get("error"))
+                    # 桌面腿成功不等于当天打卡完成：计入官方「每日活跃」的只有网页腿
+                    # （#75/#59/#90）。面板与活动历史按 ok 画成功/失败，网页腿失败却
+                    # 报成功的话，「今天这 30/50 积分没到账」在界面上一直看不见。
+                    result["ok"] = False
+                    result["error"] = "网页通道失败：%s" % res.get("error")
+                    result["msg"] = "每日活跃对话未完成（网页通道失败：%s）" % res.get("error")
+            # 只有真正计入官方「每日活跃」的网页通道成功了才算今天做过：网页腿失败时
+            # 若照写 lastDailyChat，当天后续巡检会直接跳过该账号，那天的 30/50 积分静默
+            # 丢掉且不再重试。web=False（没开网页通道）时维持原语义：桌面腿成功即算完成。
+            if web_ok:
+                self.last_daily_chat = time.strftime("%Y-%m-%d %H:%M:%S")
+                if self.path and os.path.exists(os.path.dirname(self.path)):
+                    self.save(os.path.dirname(self.path))
             return result
         except urllib.error.HTTPError as exc:
             try:
@@ -1696,8 +1727,18 @@ class Account(object):
             return {"ok": (code == 0 or code == 10001), "code": code, "msg": msg, "data": payload.get("data")}
         except urllib.error.HTTPError as exc:
             try:
-                body = json.loads(exc.read().decode("utf-8") or "{}")
-                return {"ok": False, "error": body.get("msg") or ("HTTP %d" % exc.code)}
+                raw_b = exc.read().decode("utf-8") or "{}"
+                body = json.loads(raw_b)
+                code = body.get("code")
+                msg = body.get("msg") or ("HTTP %d" % exc.code)
+                # 上游如果在今日已签到时返回 HTTP 400 且 code 为 10001 / "今天已签到"
+                # 这说明今日事实上已经处于签到完成状态，按成功处理，并记录最后签到时间
+                if code == 10001 or "今天已签到" in msg or "已签到" in msg:
+                    self.last_checkin = time.strftime("%Y-%m-%d %H:%M:%S")
+                    if self.path and os.path.exists(os.path.dirname(self.path)):
+                        self.save(os.path.dirname(self.path))
+                    return {"ok": True, "code": code, "msg": msg, "data": body.get("data")}
+                return {"ok": False, "error": msg}
             except Exception:
                 return {"ok": False, "error": "HTTP %d" % exc.code}
         except Exception as exc:
@@ -2581,6 +2622,9 @@ class AccountPool(object):
         # 这条偏好自己的平滑加权轮询累计值，键是 (uid, model)：与临期的
         # _expiry_weights 分开，两个偏好各自记各自的轮次。
         self._remaining_pick_state = {}
+        # 手动权重优先（面板按账号设置，weight > 1 才生效）的平滑加权轮询
+        # 累计值，键是 uid：与前两条偏好各自的轮次分开。派生值，不落盘。
+        self._manual_weights = {}
         # 页内轮转（超限对话）的每页游标，键是 (页号, 页大小)；整池轮转仍用
         # _cursor，两条轮转互不挪动对方的位置。派生值，不落盘。
         self._page_cursors = {}
@@ -2752,6 +2796,30 @@ class AccountPool(object):
             account.clear_error()
         account.save(self.dir)
         self.apply_proxy_slots()
+        return account.public()
+
+    def set_weight(self, uid, weight):
+        """设置账号的手动调度权重（1-100，1 = 不干预），落盘并回公共视图。"""
+        account = self.get(uid)
+        if account is None:
+            return None
+        try:
+            account.weight = max(1, min(100, int(weight)))
+        except (TypeError, ValueError):
+            return None
+        account.save(self.dir)
+        return account.public()
+
+    def set_note(self, uid, note):
+        """设置账号备注（面板标记「批量」/「自用」等），落盘并回公共视图。
+
+        空串 = 清除备注；与调度无关，纯展示。
+        """
+        account = self.get(uid)
+        if account is None:
+            return None
+        account.note = str(note or "").strip()[:200]
+        account.save(self.dir)
         return account.public()
 
     def set_proxy(self, uid, proxy):
@@ -3036,6 +3104,14 @@ class AccountPool(object):
         # covers is unavailable right now - the pool falls back to the plain
         # round-robin it always had, so a single lapsed account can never wedge
         # the realm.
+        # 手动权重优先：面板给账号设了 >1 的权重时，这些账号先于一切自动
+        # 偏好接单，彼此之间按权重平滑加权轮询——权重高的先被选中、分到的
+        # 流量也多，但同层之内仍有轮转，谁也不独占。它们此刻都不可用（冷却、
+        # 限额、被排除）时照旧落回下面的自动偏好与轮询，一条偏好卡不住池子。
+        # 全部权重都是 1（默认）时这一层直接返回 None，分派与从前完全一致。
+        account = self._pick_weighted_first(snapshot, exclude, model)
+        if account is not None:
+            return account
         account = self._pick_expiring_first(snapshot, exclude, model)
         if account is not None:
             return account
@@ -3046,6 +3122,29 @@ class AccountPool(object):
         if account is not None:
             return account
         return self._rotate_pick(snapshot, exclude, model, cursor_key=page)
+
+    def _pick_weighted_first(self, snapshot, exclude, model):
+        """手动权重 > 1 的账号优先接单，或 None（没有可交的）。
+
+        与临期积分那条同款的两层结构，只是这层的权重来自用户在面板上的明确
+        设置，优先级也最高：权重是「我就想让这个号多用」的直接表达，不该被
+        自动偏好覆盖。同层之间按权重平滑加权轮询——两个高权重账号按权重比
+        分流量，它们与权重 1 的账号之间则是「先用完我再轮别人」。权重 1 的
+        账号完全不进这一层：临期积分、剩余用量这些自动子权重照旧在它们身上
+        生效，一行都不变。
+        """
+        ready = []
+        for account in snapshot:
+            if account.uid in exclude:
+                continue
+            if int(getattr(account, "weight", 1) or 1) <= 1:
+                continue
+            if not account.ready(model=model):
+                continue
+            ready.append((account, account.uid, int(account.weight)))
+        if not ready:
+            return None
+        return self._smooth_weighted_pick(ready, "_manual_weights")
 
     def _pick_expiring_first(self, snapshot, exclude, model):
         """Serve the in-window accounts first, or None when none can.

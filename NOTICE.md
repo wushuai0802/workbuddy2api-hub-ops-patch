@@ -1,26 +1,13 @@
 # Attribution
 
-This unofficial patch bundle derives from
-[WorkBuddy2API-Hub](https://github.com/ardeyouxipianyi/workbuddy2api-hub),
-distributed under the MIT License. Its original copyright notice is preserved
-in [LICENSE](LICENSE).
+This unofficial bundle derives from [WorkBuddy2API-Hub](https://github.com/ardeyouxipianyi/workbuddy2api-hub), distributed under MIT. Original notice is preserved in [LICENSE](LICENSE).
 
-Supported upstream release: v1.6.20.
-Pinned upstream commit: `cb6a844588705ea01388be2b9df1f0cbbbcde357`.
+Supported upstream: v1.7.3, commit `c7dad8fe32316d47ce4f0ff260bb7ac7802b8a94`.
 
-The historical v1.6.19 bundle remains available at the
-[v1.6.19-ops.20261011.2 release](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.6.19-ops.20261011.2).
-Use its pinned tag and documentation for that baseline.
+The user-supplied `workbuddy2api-hub-v1.7.2-ops-20261012-r1.zip` provided a reference migration and DSML boundary fixes. Its credential-deadline and refusal work credits this repository's earlier `v1.6.20-ops.20261012.1`. We retained relevant reference changes while preserving our additional guard/history/image behavior. See [THIRD-PARTY-zh.md](THIRD-PARTY-zh.md).
 
-The modified gateway, account and web-tool files include upstream code. `wb_ops.py`
-contains retained operations safeguards, and `wb_stall.py` adds bounded mixed
-reasoning-stall detection. This repository is maintained independently and is
-not an official upstream release.
+The four modified upstream modules retain upstream attribution. `wb_ops.py` holds retained operations safeguards; `wb_stall.py` adds bounded mixed-stall detection. This repository is independently maintained.
 
-Upstream v1.6.20's connection pool, dashboard, sign-in/streak manager,
-remaining-usage estimation, account-limit handling and performance changes
-retain their upstream attribution. They are not claimed as original patch work.
+Block SSE reading/writing, shared TLS, additional/custom namespace tools, Anthropic thinking, egress/account governance, sign-in scheduling, panel and usage improvements are upstream features. The guarded lease deferral, usage preservation and retained operations protections are documented separately.
 
-The unified patch under `patches/` makes the changes against the pinned
-upstream source reviewable. Test inputs are synthetic and contain no account
-records or private conversations.
+Historical releases and their exact-baseline documentation remain available through their tags. Public tests contain synthetic inputs only, with no account records or private conversations.

@@ -21,6 +21,7 @@ from apply import Bundle
 
 PATCH_SUITES = ('test_installer.py', 'test_wb_stall.py', 'test_mixed_stall_proxy.py', 'test_keepalive_guard.py',
                 'test_auth_deadline.py', 'test_proxy_boundaries.py', 'test_leaked_mixed_stall.py',
+                'test_guarded_sse_batching.py', 'test_v1617.py', 'test_v172.py',
                 'test_build_identity.py', 'test_dated_guards.py', 'test_observability.py',
                 '_test_401_refresh.py', '_test_deepseek_multimodal.py', '_test_deepseek_reasoning_compaction.py',
                 'test_integration.py', 'test_loop_recovery.py', 'test_reasoning_recovery.py',
@@ -31,7 +32,12 @@ UPSTREAM_SUITES = ('_test_upstream_repairs.py', '_test_namespace_tools.py', '_te
                    '_test_upstream_pool.py', '_test_remaining_usage.py', '_test_streak_report.py',
                    '_test_hotpath_savings.py', '_test_upstream_timeouts.py', '_test_growth_prereq.py',
                    '_test_http_limits.py', '_test_local_web_tools.py', '_test_analytics_by_key.py',
-                   '_test_anthropic_http.py')
+                   '_test_anthropic_http.py', '_test_sse_read_batching.py', '_test_shared_ssl_context.py',
+                   '_test_dsml_chat_fallback.py', '_test_custom_tools.py',
+                   '_test_stop_normalization.py', '_test_pool_backoff.py', '_test_egress_backoff.py',
+                   '_test_manual_weight.py', '_test_account_note.py', '_test_daily_chat.py',
+                   '_test_closed_window_buckets.py', '_test_cold_window_scan.py',
+                   '_test_pricing_used_fingerprint.py', '_test_usage_bytes_prefilter.py', '_test_recent_index.py')
 
 
 def main():

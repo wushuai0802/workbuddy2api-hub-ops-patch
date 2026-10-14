@@ -17,6 +17,7 @@ import argparse
 import bisect
 import copy
 import hashlib
+import heapq
 import ipaddress
 from collections import Counter, deque
 import re
@@ -63,11 +64,12 @@ import wb_accounts
 import wb_activity
 import wb_atrest
 import wb_catalog
+import wb_egress
 import wb_ipintel
 import wb_pricing
 import wb_settings
+import wb_upstream_pool
 import wb_webtools
-from wb_stall import MixedStallGuard, clean_stalled_reasoning
 from wb_ops import (
     CONTINUATION_MAX_ATTEMPTS, FIRST_FRAME_DEADLINE, FIRST_FRAME_MAX_ATTEMPTS,
     REASON_DSML_MAX_HOLD, REASON_LOOP_TAIL, UPSTREAM_IDLE_TIMEOUT,
@@ -75,6 +77,7 @@ from wb_ops import (
     dsml_safe_prefix, finish_reason_of, quarantine_dsml_text,
     reasoning_only_turn, strip_dsml_from_text, StallObserver, CompactSSEBuffer,
 )
+from wb_stall import MixedStallGuard, clean_stalled_reasoning
 import wb_identity
 import wb_prompt
 import wb_modelsdev
@@ -455,7 +458,10 @@ def _empty_stats():
             "ttft_ms_sum": 0, "ttft_samples": 0,
             "gen_ms_sum": 0, "gen_samples": 0,
             "wall_ms_sum": 0, "wall_samples": 0}
-_usage = _empty_stats()
+# 进程启动时刻。快照的 "started"/"since" 从这里取（_usage_snapshot_uncached
+# 是它唯一的读者）；requests/ttft/by_model 那些累计字段没有任何读者——每个
+# 聚合都重读 usage.jsonl——所以请求路径不再维护它们。
+_usage = {"started": time.time()}
 def normalize_usage_cache_aliases(usage):
     """Write the best cache-hit value into every alias.
 
@@ -547,6 +553,18 @@ def _local_midnight(ts=None, days_back=0):
     """
     lt = time.localtime(ts if ts is not None else time.time())
     return time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday - days_back, 0, 0, 0, 0, 0, -1))
+
+
+def _local_hour_start(ts):
+    """ts 所属的本地整点（分/秒归零）的 epoch。
+
+    与 _local_midnight 同一套构造：mktime 把本地墙上时间换算回 epoch，
+    分/秒归零就是「本地整点」。夏令时切换小时里的时间会被 mktime 规整到
+    相邻的真实时刻，所以调用方还要比对返回值是否等于原值——只有能原样
+    还原的 ts 才是真的落在整点上（见 _hour_window_key）。
+    """
+    lt = time.localtime(ts)
+    return time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, lt.tm_hour, 0, 0, 0, 0, -1))
 
 
 def _epoch_or_none(value):
@@ -720,25 +738,6 @@ def record_usage(model, usage, stream=None, elapsed_ms=None, ttft_ms=None, gen_m
     if fields.get("prompt_tokens", 0) > 0:
         row["cache_hit_pct"] = round(fields.get("cached_tokens", 0) * 100.0
                                      / fields["prompt_tokens"], 1)
-    with _lock:
-        _usage["requests"] += 1
-        for k in USAGE_FIELDS:
-            if k in fields:
-                _usage[k] += fields[k]
-        if ttft_ms is not None:
-            _usage["ttft_ms_sum"] += ttft_ms
-            _usage["ttft_samples"] += 1
-        if gen_ms is not None:
-            _usage["gen_ms_sum"] += gen_ms
-            _usage["gen_samples"] += 1
-        if elapsed_ms is not None:
-            _usage["wall_ms_sum"] += elapsed_ms
-            _usage["wall_samples"] += 1
-        per = _usage["by_model"].setdefault(model, {"requests": 0, **{k: 0 for k in USAGE_FIELDS}})
-        per["requests"] += 1
-        for k in USAGE_FIELDS:
-            if k in fields:
-                per[k] += fields[k]
     _persist_usage(row, "usage persist failed")
     try:
         t_tokens = fields.get("total_tokens", 0)
@@ -820,11 +819,6 @@ def record_error(model, status, message, elapsed_ms=None, account=None,
     row["key"] = key or ""
     if effort:
         row["reasoning_effort"] = effort
-    with _lock:
-        _usage["errors"] += 1
-        if elapsed_ms is not None:
-            _usage["wall_ms_sum"] += elapsed_ms
-            _usage["wall_samples"] += 1
     _persist_usage(row, "error persist failed")
     dur = f" {elapsed_ms:.0f}ms" if elapsed_ms is not None else ""
     log(f"request error: model={model}{dur} status={status} msg={str(message)[:180]}", level="ERROR", tag="chat")
@@ -836,6 +830,33 @@ def _pct(values, q):
     ordered = sorted(values)
     idx = int(round((q / 100.0) * (len(ordered) - 1)))
     return ordered[max(0, min(len(ordered) - 1, idx))]
+
+
+def _perf_block(vals):
+    """One metric's summary block, straight from the raw samples.
+
+    D6 要求分位永远从原始样本算（不许聚合近似），所以这里收的是一串原始数值
+    ——list 或 deque 都行（增量样本用 deque 做并入/滑出）。排序一次喂三个分位；
+    avg 与 max 仍读原序列，于是浮点求和的顺序、以及 avg 的最后一位，与逐次
+    排序的旧写法逐位相同。
+    """
+    if not vals:
+        return None
+    ordered = sorted(vals)
+    count = len(ordered)
+
+    def rank(q):
+        idx = int(round((q / 100.0) * (count - 1)))
+        return ordered[max(0, min(count - 1, idx))]
+
+    return {
+        "avg": round(sum(vals) / count, 1),
+        "p50": rank(50),
+        "p90": rank(90),
+        "p99": rank(99),
+        "max": max(vals),
+        "samples": count,
+    }
 _perf_cache = {}
 _perf_lock = threading.Lock()
 
@@ -866,7 +887,9 @@ def perf_stats(sample=5000, realm=None, ttl=None, range=None, since=None, until=
     dashboard polls this endpoint every few seconds.
 
     Rebuilds under the lock so a burst of pollers cannot each start their own
-    scan of the log."""
+    scan of the log. The rebuild itself is incremental: _perf_stats_incremental
+    keeps a ring of the last `sample` rows per (sample, realm, window) key and
+    only folds the bytes appended since the last rebuild (see there)."""
     ttl = _STATS_TTL if ttl is None else ttl
     r, lo, hi, key = _perf_stats_scope(sample, realm, range, since, until)
     now = time.time()
@@ -874,7 +897,7 @@ def perf_stats(sample=5000, realm=None, ttl=None, range=None, since=None, until=
         hit = _perf_cache.get(key)
         if hit is not None and (now - hit[0]) < ttl:
             return hit[1]
-        data = _perf_stats_uncached(sample, r, since=lo, until=hi)
+        data = _perf_stats_incremental(key, key[0], r, lo, hi)
         _perf_cache[key] = (time.time(), data)
     return data
 
@@ -1008,17 +1031,7 @@ def _perf_stats_uncached(sample=5000, realm=None, since=None, until=None):
             hits.append(r["cache_hit_pct"])
             for b in (mb, rb, ab):
                 b["hits"].append(r["cache_hit_pct"])
-    def block(vals):
-        if not vals:
-            return None
-        return {
-            "avg": round(sum(vals) / len(vals), 1),
-            "p50": _pct(vals, 50),
-            "p90": _pct(vals, 90),
-            "p99": _pct(vals, 99),
-            "max": max(vals),
-            "samples": len(vals),
-        }
+    block = _perf_block
     return {
         "sampled": total,
         # Where the sampled slice starts and whether it was cut short, so a
@@ -1087,6 +1100,543 @@ def _perf_stats_uncached(sample=5000, realm=None, since=None, until=None):
             } for mid, realms in ma_buckets.items()
         }
     }
+
+
+# ---------------------------------------------------------------------------
+# perf 的增量样本（T2）
+#
+# perf_stats 每次重建都要重读日志末尾 sample 行、逐行 json.loads、把每一行的
+# 五个数值往全局与三层模型桶各 append 一次，最后每个桶排序求分位。真机
+# 558ms/次，TTL 15 秒——面板开着就是每 15 秒付一次。
+#
+# 这里按 (sample, realm, 窗口) 各记一份**环形样本状态**：
+#   ring     最近 sample 条非空行各自的折叠结果（含尾部半行，deque，手工淘汰）
+#   agg      这些行对聚合的贡献：全局计数 + 五个数值双端队列 + 三层模型桶
+#   offset   已经折到日志的哪个字节；key/tail 是那条前缀的身份证明
+# 于是 TTL 过期后的重建只把 offset 之后的新行并进来、把滑出样本的行撤出去，
+# 不再重读也不再重新解析；位置校验不过（截断 / 换文件 / 同尺寸重写）才从
+# 日志尾部的样本重建一次。
+#
+# 口径一个都没动：sample 仍是"最近 sample 行"（不是时间窗）、sample_capped
+# 仍表示 tail 被截断、realm/窗口预过滤与分位口径照旧（分位始终从原始样本算，
+# D6）；三层桶的存在与顺序、成功率的算法、sample_from 的取值规则全部照抄
+# _perf_stats_uncached。这份状态**不落盘**（清单 §1.5：重启付一次冷扫即可，
+# 落盘会让 checkpoint 涨几百 KB）。
+_perf_state = {}
+# 面板实际用到的键就两三个（`?realm=` 一个、带窗口的一个），多出来的按最近
+# 使用淘汰，免得用户来回切 range 时状态无限堆积。单份状态的内存与 sample 成
+# 正比（本机实测：sample=5000 的环+聚合 ≈ 3.4MB，20000 ≈ 13MB），所以上限压
+# 到 4 份——面板的键数装得下，最坏内存 ~14MB；淘汰只是下次重建一次，不影响
+# 任何输出。
+_PERF_STATE_MAX = 4
+# ring 条目的形状，见 _perf_line_entry：短元组 = 不贡献聚合的行。
+_PERF_REC_LEN = 10
+
+
+def _perf_new_bucket():
+    return {"total": 0, "ok": 0, "err": 0, "aborted": 0,
+            "ttfts": deque(), "gens": deque(), "walls": deque(),
+            "tok_rates": deque(), "hits": deque()}
+
+
+def _perf_new_agg():
+    return {"total": 0, "ok": 0, "err": 0, "aborted": 0,
+            "ttfts": deque(), "gens": deque(), "walls": deque(),
+            "tok_rates": deque(), "hits": deque(),
+            "m": {}, "mr": {}, "ma": {}}
+
+
+def _perf_put(vals, value, add, front):
+    """一个数值贡献：并入 append，撤销时从对应的那一头弹出。
+
+    环里的行严格按日志顺序进出：滑出样本的是最旧的一行（front），上一轮末尾
+    的半行被重折时摘掉的是最新的一行（back）。同一张表的每一头都只对应同一
+    行——这正是撤销能 O(1) 做完的原因。
+    """
+    if add > 0:
+        vals.append(value)
+    elif front:
+        vals.popleft()
+    else:
+        vals.pop()
+
+
+def _perf_apply(state, entry, add, front):
+    """并入（add=1）或撤销（add=-1）一行对聚合的贡献。
+
+    撤销只做并入做过的那些事：计数减回去、数值表从并进的那一头弹出、桶的
+    total 归零就把桶删掉——重建时一个桶存在与否只看样本里还有没有它的行，
+    所以"删空桶"正是重建的输出形状；删掉的桶后来再有行进来会重新建在末尾，
+    位置与重建时的"第一次出现"一致（旧行都滑出去了，新行就是它现在最早的
+    一行）。判定条件与 _perf_stats_uncached 的逐行循环逐句对应：
+    elapsed 走真值判断、ttft/cache_hit 走 is not None、tokens_per_sec 走真值。
+    """
+    if entry is None or len(entry) < _PERF_REC_LEN:
+        return
+    _at, m_id, r_realm, acct, outcome, elapsed, ttft, gen, tps, hit = entry
+    agg = state["agg"]
+    if add > 0:
+        mb = agg["m"].get(m_id)
+        if mb is None:
+            mb = agg["m"][m_id] = _perf_new_bucket()
+        realms = agg["mr"].get(m_id)
+        if realms is None:
+            realms = agg["mr"][m_id] = {}
+        rb = realms.get(r_realm)
+        if rb is None:
+            rb = realms[r_realm] = _perf_new_bucket()
+        accts = agg["ma"].get(m_id)
+        if accts is None:
+            accts = agg["ma"][m_id] = {}
+        by_realm = accts.get(r_realm)
+        if by_realm is None:
+            by_realm = accts[r_realm] = {}
+        ab = by_realm.get(acct)
+        if ab is None:
+            ab = by_realm[acct] = _perf_new_bucket()
+    else:
+        mb = agg["m"][m_id]
+        rb = agg["mr"][m_id][r_realm]
+        ab = agg["ma"][m_id][r_realm][acct]
+    agg["total"] += add
+    for b in (mb, rb, ab):
+        b["total"] += add
+    # A client that walks away is not a gateway failure: it gets its own
+    # bucket instead of dragging the success rate down (same split as the
+    # full-scan path).
+    if outcome == "client_aborted":
+        agg["aborted"] += add
+        for b in (mb, rb, ab):
+            b["aborted"] += add
+            if elapsed:
+                _perf_put(b["walls"], elapsed, add, front)
+        if elapsed:
+            _perf_put(agg["walls"], elapsed, add, front)
+    elif outcome != "completed":
+        agg["err"] += add
+        for b in (mb, rb, ab):
+            b["err"] += add
+            if elapsed:
+                _perf_put(b["walls"], elapsed, add, front)
+        if elapsed:
+            _perf_put(agg["walls"], elapsed, add, front)
+    else:
+        agg["ok"] += add
+        for b in (mb, rb, ab):
+            b["ok"] += add
+        if ttft is not None:
+            _perf_put(agg["ttfts"], ttft, add, front)
+            for b in (mb, rb, ab):
+                _perf_put(b["ttfts"], ttft, add, front)
+        if gen is not None:
+            _perf_put(agg["gens"], gen, add, front)
+            for b in (mb, rb, ab):
+                _perf_put(b["gens"], gen, add, front)
+        if elapsed is not None:
+            _perf_put(agg["walls"], elapsed, add, front)
+            for b in (mb, rb, ab):
+                _perf_put(b["walls"], elapsed, add, front)
+        if tps:
+            _perf_put(agg["tok_rates"], tps, add, front)
+            for b in (mb, rb, ab):
+                _perf_put(b["tok_rates"], tps, add, front)
+        if hit is not None:
+            _perf_put(agg["hits"], hit, add, front)
+            for b in (mb, rb, ab):
+                _perf_put(b["hits"], hit, add, front)
+    if add < 0:
+        if not mb["total"]:
+            del agg["m"][m_id]
+        if not rb["total"]:
+            del agg["mr"][m_id][r_realm]
+            if not agg["mr"][m_id]:
+                del agg["mr"][m_id]
+        if not ab["total"]:
+            del agg["ma"][m_id][r_realm][acct]
+            if not agg["ma"][m_id][r_realm]:
+                del agg["ma"][m_id][r_realm]
+            if not agg["ma"][m_id]:
+                del agg["ma"][m_id]
+
+
+def _perf_at_token(line):
+    """预过滤认可的写法里 at 的浮点值（读不到就 None）。
+
+    _line_outside_window 判定为"窗外"的行，其形状已经被它逐条核过：以
+    `{"at": ` 开头、值以逗号收尾、值是浮点字面量、后面没有第二个 "at" 键。
+    所以这里读到的值与 json.loads 会给的值相同（json 对带小数点/指数的记号
+    也走 float()）。只给窗口预过滤跳过的行记 sample_from 用——那些行不解析，
+    但旧实现里"样本最老的那一行"会被解析，它的 at 就是 sample_from。
+    """
+    if not line.startswith(_AT_PREFIX):
+        return None
+    end = line.find(",", len(_AT_PREFIX))
+    if end < 0:
+        return None
+    token = line[len(_AT_PREFIX):end]
+    if "." not in token and "e" not in token and "E" not in token:
+        return None
+    try:
+        return float(token)
+    except ValueError:
+        return None
+
+
+def _perf_line_entry(state, line):
+    """把一行日志折成 ring 条目（与 _perf_stats_uncached 的逐行循环逐句对应）。
+
+    返回：
+      None      这一行没有可用的行数据（坏 JSON，或被窗口预过滤掉且读不出 at）
+      (at,)     解析成功但被 realm / 窗口过滤掉——或被窗口预过滤跳过（at 取自
+                它自己声明的值）：不贡献聚合，但仍决定 sample_from。旧实现里
+                样本最老的那一行无论窗口如何都会被解析，所以被预过滤掉的行也
+                要留下 at。
+      (at, model, realm, account, outcome, elapsed, ttft, gen, tps, hit)
+                通过全部过滤，计入聚合（10 元组，_PERF_REC_LEN）
+    """
+    since = state["since"]
+    until = state["until"]
+    realm = state["realm"]
+    # 与旧实现同一道廉价预过滤：它只丢"下面的窗口判断本来也会丢"的行。
+    # 旧实现的开关是 sample_from is not None（= 样本里已经有一行的 at 非空），
+    # 这里用环里 at 非空的行数 n_at 表达同一件事。
+    #
+    # 多一道 line.endswith("}")：预过滤跳过的行也要记下它声明的 at（供
+    # sample_from 用），但一条写了一半的行（尾部没换行、JSON 也没写完）不该
+    # 因此报出一个旧实现给不出的 sample_from——完整行才走跳过分支，其余照旧
+    # 落到 json.loads 上（坏 JSON 仍然是 None）。完整对象行总是以 } 收尾，
+    # 所以这道判断不改变任何合法行省下的解析。
+    if (since or until) and state["n_at"] and line.endswith("}") and \
+            _line_outside_window(line, since or None, until or None):
+        return (_perf_at_token(line),)
+    try:
+        r = json.loads(line)
+    except Exception:
+        return None
+    at = r.get("at")
+    if realm and not row_matches_realm(r, realm):
+        return (at,)
+    at_value = at or 0
+    if since and at_value < since:
+        return (at,)
+    if until and at_value > until:
+        return (at,)
+    return (at, r.get("model") or "unknown", row_realm(r),
+            r.get("account") or "(unattributed)", row_outcome(r),
+            r.get("elapsed_ms"), r.get("ttft_ms"), r.get("gen_ms"),
+            r.get("tokens_per_sec"), r.get("cache_hit_pct"))
+
+
+def _perf_drop_oldest(state):
+    """滑出环里最旧的一行（含它对聚合的贡献）。"""
+    old = state["ring"].popleft()
+    if old is not None and old[0] is not None:
+        state["n_at"] -= 1
+    _perf_apply(state, old, -1, True)
+
+
+def _perf_push(state, line):
+    """把一行并进环：先腾位置，再折行、并入。
+
+    腾位置放在折行之前——旧实现的窗口预过滤开关是"当前样本里已经有行的 at
+    非空"，滑出样本的行不再算数。若先折行再淘汰，新行就可能被预过滤掉一行
+    "在旧样本里不算、在新样本里却是第一行"的数据，sample_from 会跟着变。
+    """
+    sample = state["sample"]
+    if sample <= 0:
+        return
+    ring = state["ring"]
+    while len(ring) >= sample:
+        _perf_drop_oldest(state)
+    entry = _perf_line_entry(state, line)
+    if entry is not None and entry[0] is not None:
+        state["n_at"] += 1
+    _perf_apply(state, entry, 1, False)
+    ring.append(entry)
+
+
+def _perf_pop_last(state):
+    """摘掉环尾的条目（上一轮的半行，重折前先撤掉它的贡献）。"""
+    ring = state["ring"]
+    if not ring:
+        return
+    old = ring.pop()
+    if old is not None and old[0] is not None:
+        state["n_at"] -= 1
+    _perf_apply(state, old, -1, False)
+
+
+def _perf_fold(state):
+    """把日志 offset 之后的新行并进状态；尾部半行作为样本的最后一行并进去。
+
+    字节纪律与 _count_usage_scan 一致：整行推进、半行不推进 offset（内容随时
+    可能被写完整，下次从同一位置按完整内容重折）。但半行在**样本**里算一行
+    ——_tail_lines 就是这么数的（它把末尾没有换行的残余当一行）——所以它进环，
+    只是每次重折前先摘掉上一轮那一份。
+
+    返回"样本变没变"：没变时渲染可以整段跳过（0 新字节的 TTL 重算就是这条路）。
+    """
+    ring = state["ring"]
+    if state["pending"]:
+        _perf_pop_last(state)
+        state["pending"] = False
+    offset = state["offset"]
+    pending_raw = None
+    try:
+        with open(USAGE_LOG, "rb") as fh:
+            fh.seek(offset)
+            while True:
+                raw = fh.readline()
+                if not raw:
+                    break
+                if not raw.endswith(b"\n"):
+                    pending_raw = raw
+                    break
+                line = raw.decode("utf-8", "replace").strip()
+                if line:
+                    _perf_push(state, line)
+                offset += len(raw)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        log("perf incremental read failed: %s" % exc)
+    changed = offset != state["offset"] or pending_raw != state["pending_raw"]
+    state["offset"] = offset
+    state["pending_raw"] = pending_raw
+    if pending_raw is not None and pending_raw.strip() and state["sample"] > 0:
+        line = pending_raw.decode("utf-8", "replace").strip()
+        if line:
+            _perf_push(state, line)
+            state["pending"] = True
+    return changed
+
+
+def _perf_payload(state):
+    """把环形样本的聚合渲染成载荷（键序与字段与旧实现逐字一致）。
+
+    输出里三层桶的顺序 = 各桶在样本里**第一次出现**的顺序（整段重扫时天然
+    如此）。增量维护这个顺序要在每次淘汰时重排，比这里一趟扫描还贵；所以
+    渲染时扫一遍环把顺序还原出来——只读环、不解析，而且桶都见齐就停。
+    """
+    agg = state["agg"]
+    order = {}          # model -> realm -> account（插入序 = 第一次出现序）
+    sample_from = None
+    want = len(agg["m"])
+    for realms in agg["mr"].values():
+        want += len(realms)
+    for realms in agg["ma"].values():
+        for accts in realms.values():
+            want += len(accts)
+    seen = 0
+    for entry in state["ring"]:
+        if entry is None:
+            continue
+        if sample_from is None and entry[0] is not None:
+            sample_from = entry[0]
+        if len(entry) < _PERF_REC_LEN:
+            continue
+        realms = order.get(entry[1])
+        if realms is None:
+            realms = order[entry[1]] = {}
+            seen += 1
+        accts = realms.get(entry[2])
+        if accts is None:
+            accts = realms[entry[2]] = {}
+            seen += 1
+        if entry[3] not in accts:
+            accts[entry[3]] = None
+            seen += 1
+        if seen >= want:
+            break
+    by_model = {}
+    by_model_realm = {}
+    by_model_acct = {}
+    for mid, realms in order.items():
+        mb = agg["m"][mid]
+        by_model[mid] = {
+            "requests": mb["total"],
+            "errors": mb["err"],
+            "client_aborted": mb["aborted"],
+            "success_rate_pct": round(mb["ok"] * 100.0 / (mb["ok"] + mb["err"]), 1)
+                                 if (mb["ok"] + mb["err"]) else None,
+            "ttft_ms": _perf_block(mb["ttfts"]),
+            "generation_ms": _perf_block(mb["gens"]),
+            "wall_ms": _perf_block(mb["walls"]),
+            "tokens_per_sec": _perf_block(mb["tok_rates"]),
+            "cache_hit_pct": _perf_block(mb["hits"]),
+        }
+        realm_out = {}
+        acct_out = {}
+        for realm, accts in realms.items():
+            rb = agg["mr"][mid][realm]
+            realm_out[realm] = {
+                "requests": rb["total"],
+                "errors": rb["err"],
+                "client_aborted": rb["aborted"],
+                "success_rate_pct": round(rb["ok"] * 100.0 / (rb["ok"] + rb["err"]), 1)
+                                     if (rb["ok"] + rb["err"]) else None,
+                "ttft_ms": _perf_block(rb["ttfts"]),
+                "generation_ms": _perf_block(rb["gens"]),
+                "wall_ms": _perf_block(rb["walls"]),
+                "tokens_per_sec": _perf_block(rb["tok_rates"]),
+                "cache_hit_pct": _perf_block(rb["hits"]),
+            }
+            accts_out = {}
+            for acct in accts:
+                ab = agg["ma"][mid][realm][acct]
+                accts_out[acct] = {
+                    "requests": ab["total"],
+                    "errors": ab["err"],
+                    "client_aborted": ab["aborted"],
+                    "success_rate_pct": round(ab["ok"] * 100.0 / (ab["ok"] + ab["err"]), 1)
+                                         if (ab["ok"] + ab["err"]) else None,
+                    "ttft_ms": _perf_block(ab["ttfts"]),
+                    "generation_ms": _perf_block(ab["gens"]),
+                    "wall_ms": _perf_block(ab["walls"]),
+                    "tokens_per_sec": _perf_block(ab["tok_rates"]),
+                    "cache_hit_pct": _perf_block(ab["hits"]),
+                }
+            acct_out[realm] = accts_out
+        by_model_realm[mid] = realm_out
+        by_model_acct[mid] = acct_out
+    return {
+        "sampled": agg["total"],
+        # Where the sampled slice starts and whether it was cut short, so a
+        # week/month view can admit that its latency columns do not reach back
+        # to the window's own start.
+        "sample_from": sample_from,
+        "sample_capped": len(state["ring"]) >= state["sample"],
+        "success": agg["ok"],
+        "errors": agg["err"],
+        "client_aborted": agg["aborted"],
+        # Success rate is measured against requests the gateway actually
+        # finished; client cancellations are reported separately rather than
+        # being counted as failures.
+        "success_rate_pct": round(agg["ok"] * 100.0 / (agg["ok"] + agg["err"]), 1)
+                             if (agg["ok"] + agg["err"]) else None,
+        "ttft_ms": _perf_block(agg["ttfts"]),
+        "generation_ms": _perf_block(agg["gens"]),
+        "wall_ms": _perf_block(agg["walls"]),
+        "tokens_per_sec": _perf_block(agg["tok_rates"]),
+        "cache_hit_pct": _perf_block(agg["hits"]),
+        "by_model": by_model,
+        "by_model_realm": by_model_realm,
+        "by_model_acct": by_model_acct,
+    }
+
+
+def _log_complete_frontier(path=None):
+    """最后一个换行之后的字节偏移：整行折叠从这里开始。
+
+    日志的尾巴可能是写了一半的一行（没有换行符），它算样本的一行但不算已折
+    的字节——offset 停在这里，等它写完整再从同一位置重折。向前找换行只在
+    冷路径（或位置校验作废）上做，通常第一次读就命中。
+    """
+    path = path or USAGE_LOG
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return 0
+    chunk = 256 * 1024
+    pos = size
+    try:
+        with open(path, "rb") as fh:
+            while pos > 0:
+                step = min(chunk, pos)
+                pos -= step
+                fh.seek(pos)
+                idx = fh.read(step).rfind(b"\n")
+                if idx >= 0:
+                    return pos + idx + 1
+    except OSError:
+        return 0
+    return 0
+
+
+def _perf_rebuild(key, sample, realm, since, until):
+    """冷启动 / 位置校验不过：从日志尾部的 sample 行重建环形状态。"""
+    state = {"sample": sample, "realm": realm, "since": since, "until": until,
+             "key": None, "offset": 0, "tail": b"", "ring": deque(),
+             "n_at": 0, "pending": False, "pending_raw": None,
+             "agg": _perf_new_agg(), "at": 0.0,
+             "dirty": True, "payload": None}
+    raw_lines = _tail_lines(USAGE_LOG, sample)
+    frontier = _log_complete_frontier()
+    try:
+        size = os.path.getsize(USAGE_LOG)
+    except OSError:
+        size = 0
+    pending_raw = None
+    if size > frontier:
+        try:
+            with open(USAGE_LOG, "rb") as fh:
+                fh.seek(frontier)
+                pending_raw = fh.read()
+        except OSError:
+            pending_raw = None
+    # 尾部半行由 _tail_lines 算进样本的最后一行（末尾残余非空白时），这里把它
+    # 从"完整行"里摘出来单独折——下面 offset 停在它前面，重折路径与它一致。
+    if raw_lines and pending_raw is not None and raw_lines[-1] == pending_raw:
+        raw_lines = raw_lines[:-1]
+    for raw in raw_lines:
+        line = raw.decode("utf-8", "replace").strip()
+        if line:
+            _perf_push(state, line)
+    state["offset"] = frontier
+    if pending_raw is not None and pending_raw.strip() and sample > 0:
+        line = pending_raw.decode("utf-8", "replace").strip()
+        if line:
+            _perf_push(state, line)
+            state["pending"] = True
+    state["key"] = _usage_log_key()
+    state["tail"] = _log_tail_signature(frontier)
+    state["at"] = time.time()
+    _perf_state[key] = state
+    return state
+
+
+def _perf_trim_states():
+    """状态数超上限时按最近使用淘汰（载荷缓存另有 TTL，不受影响）。"""
+    while len(_perf_state) > _PERF_STATE_MAX:
+        oldest = min(_perf_state, key=lambda k: _perf_state[k]["at"])
+        del _perf_state[oldest]
+
+
+def _perf_stats_incremental(key, sample, realm, since, until):
+    """perf_stats 的增量重建：输出与 _perf_stats_uncached 逐字节一致。
+
+    必须在 _perf_lock 里调用（perf_stats 就是这么调的，与"重建在锁里做"的
+    旧意图一致）：状态与载荷缓存由同一把锁保护。
+    """
+    try:
+        state = _perf_state.get(key)
+        log_key = _usage_log_key()
+        if state is None or not _log_resume_ok(state, log_key):
+            # 没有状态，或日志被截断/换掉/同尺寸重写（P:2525-2540 那套位置
+            # 校验）：从尾部样本重建。
+            state = _perf_rebuild(key, sample, realm, since, until)
+        else:
+            if _perf_fold(state):
+                state["dirty"] = True
+            state["key"] = _usage_log_key()
+            state["tail"] = _log_tail_signature(state["offset"])
+        if state["dirty"] or state["payload"] is None:
+            # 样本没变就不重渲染：0 新字节的 TTL 重算到此为止（几十微秒），
+            # 不再对每个桶重排序求分位。
+            state["payload"] = _perf_payload(state)
+            state["dirty"] = False
+        payload = state["payload"]
+        state["at"] = time.time()
+        _perf_trim_states()
+        return payload
+    except Exception as exc:
+        # 任何意外都退回旧的整段重建：状态作废（不留半折的账），这一次仍然
+        # 给出正确载荷；旧实现遇到同样的输入会抛一样的异常，这里不会更差。
+        _perf_state.pop(key, None)
+        log("perf incremental failed, falling back to full scan: %s" % exc)
+        return _perf_stats_uncached(sample, realm, since=since, until=until)
+
+
 _snap_cache = {}
 _snap_lock = threading.Lock()
 # The dashboard polls every 5s. A TTL shorter than the poll interval makes
@@ -1405,6 +1955,9 @@ LIMIT_EVENTS_FILE = os.path.join(USAGE_DIR, "limit-events.jsonl")
 # 会一直写 ENOENT（2026-10-10 实测 limit-events.jsonl 踩过同一个坑）。
 ESTIMATE_DAILY_FILE = os.path.join(USAGE_DIR, "estimate-daily.json")
 _ESTIMATE_SCHEMA = 1
+# recent 的行偏移索引（页 = 日志尾部的第 N 页）。同样必须跟随 --usage-dir：
+# 常量在 import 时按默认目录算过，漏掉它换目录后索引会写到旧目录去。
+RECENT_INDEX_FILE = os.path.join(USAGE_DIR, "usage-recent-index.json")
 # 估算窗口的权重：今天 6 / 昨天 3 / 前天 1，就近高；只在有样本的天之间归一
 # （某天没样本就跳过）。
 _ESTIMATE_WEIGHTS = (6, 3, 1)
@@ -1470,10 +2023,89 @@ def _pair_buffer(state, key):
 
 
 def _pair_append(buf, at, tokens):
+    """Append one (at, tokens) sample, keeping the buffer sorted by `at`.
+
+    The rows arrive in log order, but `at` is the request *completion* clock:
+    two request threads finishing milliseconds apart can append out of order
+    (the real log has a pair 4.96ms apart; the router's own checkpoint one
+    0.47ms). `_range_sum` bisects these lists, so a single inversion would
+    make the window sums skip or double-count whole stretches - the sorted
+    insert (O(n) memmove on a pair that holds tens to hundreds of samples)
+    is what keeps the bisection premise true. The common in-order append
+    stays O(1) exactly as before.
+    """
     # coerce: a log row is free text, and these buffers only ever hold numbers
     tokens = int(tokens)
-    buf["at"].append(float(at))
-    buf["cum"].append((buf["cum"][-1] if buf["cum"] else 0) + tokens)
+    at = float(at)
+    ats = buf["at"]
+    if not ats or at >= ats[-1]:
+        ats.append(at)
+        buf["cum"].append((buf["cum"][-1] if buf["cum"] else 0) + tokens)
+        return
+    cum = buf["cum"]
+    head = buf["head"]
+    index = bisect.bisect_right(ats, at)
+    if index < head:
+        # The sample belongs before the dead prefix: compact it away first
+        # (same absolute-base rule as _pair_trim), because the freshly folded
+        # row is live by definition and must not land behind `head`.
+        buf["base"] = cum[head - 1]
+        del ats[:head]
+        del cum[:head]
+        buf["head"] = 0
+        index = bisect.bisect_right(ats, at)
+    ats.insert(index, at)
+    # cum holds absolute prefix sums; every entry after the insert point
+    # moves up by this sample's tokens.
+    cum.insert(index, (cum[index - 1] if index else buf["base"]) + tokens)
+    for i in range(index + 1, len(cum)):
+        cum[i] += tokens
+
+
+def _pair_repair(buf):
+    """Canonicalize a (possibly out-of-order) pair buffer; False = unrepairable.
+
+    A checkpoint written before this fix carries the buffers in log order,
+    where `at` can regress by milliseconds (the router's own 674KB file does
+    exactly that and was rejected whole). The loading side no longer demands
+    an ordered list: this function stable-sorts the live region by `at` and
+    rebuilds cum/head/base, so every (at, amount) pairing survives and each
+    window sum equals the value recomputed on the sorted sequence. The dead
+    prefix is physically dropped here (base keeps the absolute rule of
+    _pair_trim's compaction), which leaves the state with exactly the live
+    entries a cold fold would have. A negative amount (cum going backwards)
+    is corrupt data: False makes the caller reject the entry and fall back
+    to the cold fold.
+    """
+    at = buf["at"]
+    cum = buf["cum"]
+    head = buf["head"]
+    if len(at) != len(cum) or not 0 <= head <= len(at):
+        return False
+    if head >= len(at):
+        return False
+    origin = cum[head - 1] if head else buf["base"]
+    pairs = []
+    prev = origin
+    for i in range(head, len(cum)):
+        amount = cum[i] - prev
+        if amount < 0:
+            return False
+        pairs.append((at[i], amount))
+        prev = cum[i]
+    pairs.sort(key=lambda item: item[0])
+    rebuilt_at = []
+    rebuilt_cum = []
+    total = origin
+    for value, amount in pairs:
+        rebuilt_at.append(value)
+        total += amount
+        rebuilt_cum.append(total)
+    buf["at"] = rebuilt_at
+    buf["cum"] = rebuilt_cum
+    buf["head"] = 0
+    buf["base"] = origin
+    return True
 
 
 def _pair_trim(buf, cutoff):
@@ -2621,11 +3253,281 @@ def _pricing_inputs(pricing_on=None):
 
 
 def _pricing_unchanged(previous, current):
-    """True when two _pricing_inputs() tuples describe the same prices."""
+    """True when two _pricing_inputs() tuples describe the same prices.
+
+    只留给行级结果记忆（_row_cost_remember）：那里按「价表代次」整表判定，
+    保守但正确。状态指纹走 _pricing_used_unchanged()（T15 的收窄判定）。
+    """
     if previous is None or current is None:
         return False
     return (previous[0] == current[0] and previous[1] is current[1]
             and previous[2] is current[2] and previous[3] is current[3])
+
+
+# ---------------------------------------------------------------------------
+# 「用到的价」状态指纹（T15）：状态指纹收窄成折叠行真正用到的价
+#
+# 价表内容一变（哪怕只是新增一个无关模型的价格），带价格指纹的 5 条状态
+# （snapshot×3 + analytics×2）此前全部判废、各重折 12-15s；但已折行的成本
+# 在设计上就是历史价——带 cost_policy 的行按不可变策略计价，无引用老行由
+# 时间线解析（见 _fold_usage_snapshot 的注释："a later price change cannot
+# rewrite yesterday's totals"）——所以绝大多数重折是白付。
+#
+# 这里把状态指纹从「(policies, timeline, pricing_doc) 三张表的对象身份」收窄
+# 成一份记录（state["pricing"]，checkpoint 的 "pricing" 字段，schema 5）：
+#   * refs           折叠解析出来的每个 pid 的策略内容摘要（_object_digest 按
+#                    对象身份记忆，热路径 O(1)）；pid 当时查不到记 None（=该
+#                    pid 必须继续缺席，出现即作废）。
+#   * timeline       时间线依赖的投影摘要（没有依赖时 None）。
+#   * timeline_at    无引用且成本非零的行的 at 上界。
+#   * timeline_models 上述行的模型集合。
+#   * unresolved     上述行里整条时间线都没提到的模型（解析扫过全部行）。
+#   * backfilled     上述行里出现过回填解析（解析扫过全部行）。
+#   * builtin        用到内置快照时，内置价目表文档的内容摘要。
+#
+# 判定侧 _pricing_used_unchanged() 从当前价表重算同一份记录并逐项比对，不等
+# 就判废重折；相等的部分保证「重折会给出同样的数」。
+#
+# 不动的东西：_row_cost / _row_cost_remember（行级记忆代次仍用整表判定）、
+# series（不算价）、任何聚合口径与窗口路径。
+# ---------------------------------------------------------------------------
+
+# 记录里的固定字段（进程内构造与 checkpoint 采纳都按这一组校验）。
+_PRICED_FIELDS = ("refs", "timeline", "timeline_at", "timeline_models",
+                  "unresolved", "backfilled", "builtin")
+
+
+def _pricing_record_new():
+    """一份空的状态指纹记录（见上面一节；字段固定、可 JSON 往返）。"""
+    return {"refs": {}, "timeline": None, "timeline_at": None,
+            "timeline_models": [], "unresolved": [], "backfilled": False,
+            "builtin": None}
+
+
+def _pricing_record_ok(record):
+    """状态指纹记录的形状；不合格的记录按「价表变了」处理（判废重折）。"""
+    if not isinstance(record, dict):
+        return False
+    for field in _PRICED_FIELDS:
+        if field not in record:
+            return False
+    refs = record["refs"]
+    if not isinstance(refs, dict):
+        return False
+    for pid, digest in refs.items():
+        if not isinstance(pid, str) or not (digest is None
+                                            or isinstance(digest, str)):
+            return False
+    for field in ("timeline", "builtin"):
+        value = record[field]
+        if not (value is None or isinstance(value, str)):
+            return False
+    at = record["timeline_at"]
+    if not (at is None or _usage_cache_number(at)):
+        return False
+    for field in ("timeline_models", "unresolved"):
+        value = record[field]
+        if not isinstance(value, list) or not all(isinstance(v, str)
+                                                  for v in value):
+            return False
+    return isinstance(record["backfilled"], bool)
+
+
+def _copy_pricing_record(record):
+    """记录的深拷贝：落盘在状态锁外序列化，记录必须和活状态脱钩。"""
+    if record is None:
+        return None
+    copy = dict(record)
+    copy["refs"] = dict(record.get("refs") or {})
+    copy["timeline_models"] = list(record.get("timeline_models") or ())
+    copy["unresolved"] = list(record.get("unresolved") or ())
+    return copy
+
+
+def _timeline_at_value(value):
+    """一个 at 值按数字比（坏值按 0，与折叠里的 `at or 0` 同口径）。"""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _timeline_row_at(row):
+    """时间线一行的 at。"""
+    return _timeline_at_value(row.get("at"))
+
+
+# 时间线投影摘要的记忆：值是一个元组 (时间线对象, 参数键, 摘要)，一次 get 拿全
+# （与 _object_digest 的记忆同一个写法）——两个状态锁下的线程同时算也不会读到
+# 拼起来的值；元组里握着时间线对象，身份不会被回收复用。
+_pricing_timeline_memo = {}
+
+
+def _pricing_timeline_digest(timeline, record):
+    """记录里时间线依赖的投影摘要（折叠侧收尾与判定侧共用一份定义）。
+
+    投影 = [[行 at, 该行里 timeline_models 的 {model: pid} 子字典], ...]，
+    摘要 = 排序 JSON + sha1：
+
+      * backfilled 为真（有行靠回填解析）：整条时间线——那批行的解析扫过全部
+        行，任何追加都可能改变结果（保守）；
+      * 否则：at <= timeline_at 的行，外加最早那一行（二分夹逼 index=0 时会读
+        它）；每行只取 timeline_models 里的子字典，无关模型的价变动不进依赖
+        ——这正是 T15 要收掉的重折。行本身（连 at）都要进投影：at 的增减会
+        挪动二分的结果；
+      * unresolved（整条时间线都没提到过的模型）：整条时间线里「提到它的行」
+        ——那批行的解析扫过全部行，之后任何时刻补一行都会改变结果。
+
+    timeline_models 为空（没有无引用非零成本的行）时没有依赖，返回 None。
+    按（时间线对象, 记录参数）记忆：一次刷新里 5 条状态共用同一份时间线，
+    记录没变时只算一次。
+    """
+    models = record.get("timeline_models") or ()
+    if not models:
+        return None
+    key = (record.get("timeline_at"), tuple(models),
+           tuple(record.get("unresolved") or ()),
+           bool(record.get("backfilled")))
+    hit = _pricing_timeline_memo.get(id(timeline))
+    if hit is not None and hit[0] is timeline and hit[1] == key:
+        return hit[2]
+    wanted = set(models)
+    rows = list(timeline or ())
+    parts = []
+    if key[3]:
+        scope = rows
+    else:
+        bound = _timeline_at_value(record.get("timeline_at"))
+        scope = [row for row in rows if _timeline_row_at(row) <= bound]
+        if rows and not scope:
+            scope = rows[:1]
+    parts.append([[_timeline_row_at(row),
+                   {m: pid for m, pid in (row.get("policies") or {}).items()
+                    if m in wanted}]
+                  for row in scope])
+    for model in sorted(record.get("unresolved") or ()):
+        parts.append([[_timeline_row_at(row), (row.get("policies") or {})[model]]
+                      for row in rows
+                      if model in (row.get("policies") or {})])
+    try:
+        payload = json.dumps(parts, sort_keys=True, ensure_ascii=False,
+                             separators=(",", ":")).encode("utf-8")
+    except Exception:
+        return None
+    digest = hashlib.sha1(payload).hexdigest()
+    if len(_pricing_timeline_memo) > 8:
+        # 正常进程里时间线只在价格变化时换代；这里只是给长期运行兜底
+        # （与 _object_digest 的记忆同一条规则）。
+        _pricing_timeline_memo.clear()
+    _pricing_timeline_memo[id(timeline)] = (timeline, key, digest)
+    return digest
+
+
+def _priced_note(priced, row, cost, pricing):
+    """把一行「用到的价」记进状态指纹记录（折叠侧；见上面一节）。
+
+    refs 收下解析出来的 pid 的内容摘要（显式引用 + 时间线解析）；无显式引用
+    且成本非零的行另记时间线依赖。总开关关掉（cost 带 disabled）或价表读不
+    出来（pricing 为 None）时不记——前者折叠没读任何价、后者记不完整，两种
+    都由判定侧按「记录对不上」兜底作废。
+
+    热路径开销：每行几次 dict 查找 + 按对象身份记忆的摘要（第一次之后 O(1)），
+    只有无引用非零成本的行（旧前缀，一次性折过）才会碰列表；那批行里落到
+    内置快照的（模型从未进过时间线）再问一次 policy_ref_at 把依赖记准。
+    """
+    if priced is None or pricing is None or not cost:
+        return
+    if cost.get("disabled"):
+        return
+    source = cost.get("source")
+    if source and source != "builtin":
+        if source not in priced["refs"]:
+            # 一次扫描里价表不变，同一个 pid 的摘要只算一次：命中记忆之后
+            # 这一步就只剩一次成员检查（真机 4.7 万行里只有几个不同 pid）。
+            policy = (pricing[1] or {}).get(source)
+            priced["refs"][source] = (_object_digest(policy)
+                                      if policy is not None else None)
+    else:
+        # 内置快照：文档摘要一变，这些行的价就变（同一份文档只算一次摘要）。
+        doc = pricing[3]
+        if doc is not None and priced["builtin"] is None:
+            priced["builtin"] = _object_digest(doc)
+    pid = row.get("cost_policy")
+    if pid:
+        # 显式引用：价由 refs 看住，与时间线无关；引用的策略当前查不到时
+        # 按「不存在」记，它一旦出现（内容当然也就变了）必须作废重折。
+        if pid not in priced["refs"]:
+            priced["refs"][pid] = None
+        return
+    if not cost.get("known") or not cost.get("cny"):
+        return                       # 零成本：数值上不依赖价表（refs 已记）
+    at = row.get("at") or 0
+    bound = priced["timeline_at"]
+    if bound is None or at > bound:
+        priced["timeline_at"] = at
+    model = row.get("model")
+    if model is not None and model not in priced["timeline_models"]:
+        priced["timeline_models"].append(model)
+        priced["timeline_models"].sort()
+    backfilled = bool(cost.get("backfilled"))
+    if source == "builtin":
+        # 解析结果没进 cost（pid 为空、或它的策略查不到，两条都落到内置快照）：
+        # 再问一次时间线，把「解析出没出 pid / 是不是回填」记准。
+        resolved, scan_backfilled = wb_pricing.policy_ref_at(at, model)
+        if resolved is None:
+            # 整条时间线都没提到这个模型：解析扫过全部行，之后任何时刻补一
+            # 行都会改变结果，所以它按「整条时间线里提到它的行」记账。
+            if model is not None and model not in priced["unresolved"]:
+                priced["unresolved"].append(model)
+                priced["unresolved"].sort()
+        else:
+            backfilled = backfilled or bool(scan_backfilled)
+            if resolved not in priced["refs"]:
+                priced["refs"][resolved] = None
+    if backfilled:
+        priced["backfilled"] = True
+
+
+def _pricing_record_close(priced, pricing):
+    """一次成功的折叠收尾：把时间线投影摘要刷成当前参数下的值。
+
+    记录在折叠过程中增量更新（新行进来只加不改），摘要必须跟着参数走——
+    下一次判定拿它跟「当前时间线按同一组参数算出来的投影」比。按时间线对象
+    与参数记忆，参数没动时这里只是一次查表。
+    """
+    if priced is None or pricing is None:
+        return
+    priced["timeline"] = _pricing_timeline_digest(pricing[2], priced)
+
+
+def _pricing_used_unchanged(record, pricing):
+    """折叠行真正用到的价，与当前价表一致？（T15 的状态判废判定）
+
+    只读记录与当前价表、不碰日志：refs 逐个 pid 比对内容摘要（查不到 = 变化；
+    折叠时查不到的 pid 出现也是变化），时间线依赖重算同一份投影摘要，builtin
+    比对文档摘要。任何一项对不上就返回 False（状态作废、重折）。
+
+    pricing 为 None（价表读不出来）时不能确认，一律 False；总开关关着时折叠
+    没读任何价，只有「折叠时也没用价」（record 为 None）才算一致。
+    """
+    if pricing is None:
+        return False
+    if not pricing[0]:
+        return record is None
+    if not _pricing_record_ok(record):
+        return False
+    policies = pricing[1]
+    for pid, digest in record["refs"].items():
+        policy = policies.get(pid) if policies else None
+        current = _object_digest(policy) if policy is not None else None
+        if current != digest:
+            return False
+    if record["timeline"] != _pricing_timeline_digest(pricing[2], record):
+        return False
+    if record["builtin"] is not None:
+        if _object_digest(pricing[3]) != record["builtin"]:
+            return False
+    return True
 
 
 def _realm_inputs():
@@ -2717,7 +3619,7 @@ def _realm_fold_reproducible(disk):
     return pool == disk
 
 
-def _scan_usage_from(offset, fold, stop_at=None, skip=None, path=None):
+def _scan_usage_from(offset, fold, stop_at=None, skip=None, skip_raw=None, path=None):
     """Fold every row past `offset` into `fold(row)`; returns (offset, error).
 
     The offset handed back is the end of the last row the pass got through.
@@ -2727,7 +3629,12 @@ def _scan_usage_from(offset, fold, stop_at=None, skip=None, path=None):
 
     `skip(line)` drops a line before the parse; the windowed readers pass
     _line_outside_window() here, so a line the range excludes costs a substring
-    search instead of a json.loads.
+    search instead of a json.loads. `skip_raw(raw)` is the same test on the
+    undecoded line, run before the decode: the windowed readers pass
+    _line_outside_window_bytes(), which only answers True for a line the text
+    check above would drop as well, so a line it drops skips the decode too
+    and no other line reads differently. Both are optional and either may be
+    given alone.
 
     `stop_at` caps the read at the offset an all-time fold has already covered,
     so a windowed payload built on top of that fold describes exactly the same
@@ -2738,9 +3645,10 @@ def _scan_usage_from(offset, fold, stop_at=None, skip=None, path=None):
 
     The log is read in binary and the offset advances by the length of each
     line: a tell() per line costs more than the parse it would be tracking,
-    and an offset only has to be a byte count. Each line is decoded to text
-    before it is looked at, which is the order the text-mode readers read in
-    and the one the pre-filter expects.
+    and an offset only has to be a byte count. Every line that reaches the
+    text checks is decoded to text before it is looked at, which is the order
+    the text-mode readers read in and the one the text-mode pre-filter
+    expects; a line `skip_raw` drops never gets that far.
 
     `error` is the exception that stopped the read, or None. A row the fold
     cannot swallow ends the pass exactly where it used to - the readers have
@@ -2769,6 +3677,14 @@ def _scan_usage_from(offset, fold, stop_at=None, skip=None, path=None):
                     # The line straddles the covered bytes, so the all-time
                     # fold never saw it either: leave it out of this pass too.
                     break
+                # The bytes-level pre-filter runs first: a line it can read
+                # exactly and place outside the window never becomes text at
+                # all. It only answers for lines the text filter below would
+                # drop too (see _line_outside_window_bytes), so the rows this
+                # pass folds are exactly the rows it folded before.
+                if skip_raw is not None and skip_raw(raw):
+                    offset = end
+                    continue
                 try:
                     # Decoded before anything else, exactly as the text-mode
                     # readers do: a line no reader can decode stops them where
@@ -2828,7 +3744,176 @@ def _copy_usage_snapshot(snap):
     return out
 
 
-def _fold_usage_snapshot(row, snap, r, since, until, pricing_on=None, also=None):
+# ---------------------------------------------------------------------------
+# 行级结果记忆：把「同一行算出来的东西」跨视图复用
+#
+# 一次冷启动里同一份日志被三个视图各扫一遍（snapshot / analytics / series），
+# 每一行都要重新算一次本地日键（_local_day_key，strftime 真机 43.4µs/行），
+# snapshot 与 analytics 还要各算一次 cost_for_row（真机 72.4µs/行）。这两样都是
+# 行的纯函数——日键只看 at（进程内时区固定），定价只看行的定价字段加价表本身
+# ——所以第二个视图不必再算：记下结果，直接取。
+#
+# 记的是结果，不是状态：五个聚合仍各持各的折叠状态（D1/D2/D3 不受影响），这里
+# 没有任何一份聚合能被另一个视图借走，只有「这行折进哪天」和「这行值多少钱」
+# 两个标量。位置/指纹校验、realm 归属、日桶语义都照旧。
+#
+# 键不能是行对象 id()：三次扫描各自 json.loads 出各自的行对象，旧对象释放后 id
+# 会被复用，按 id 记忆会静默拿到别的行的值。日键按 at 记（纯函数，跨扫描安全）；
+# 定价按它真正读的那几个字段记（model / cost_policy / at / 三个 token 数），外加
+# 价表代次——代次就是扫描开头取到的那份 _pricing_inputs() 元组，价表换代时元组
+# 里的对象不再是同一个，旧条目自然不命中（判定与 _pricing_unchanged 同一条规则）。
+# 同一代次内的价表内容按定义不变，所以命中值必然等于现算值。
+#
+# 两张表都必须有界（路由器上不能拿内存换速度换到失控）：上限按条目数，满了以后
+# 只收「不比表里最旧那条更旧」的行。扫描总是从头往尾走，表里留住的因此是最近的
+# 一批行，第二个视图走到尾部照样命中，被拒的只是已经过去的头段。单条体积实测
+# 日键 60B、定价 402B（键里留着行的模型名/时间戳/三个 token 数），所以两张表的
+# 上限分开给，都可用环境变量调（WB_ROW_MEMO_MAX / WB_ROW_COST_MEMO_MAX，
+# 0 = 关掉这张表）。
+#
+# 不落盘：扫描期的临时记忆，重启后重算一遍即可（清单 §1.5）。
+# ---------------------------------------------------------------------------
+
+# 条目上限（条数，不是字节）。默认按「典型日志装得下大半、内存留在个位数 MB」
+# 给：日键表 6.4 万条（≤3.8MB）；定价表 16384 条（≤6.3MB）。日志更大、内存又
+# 宽裕的部署可以把 _ROW_COST_MEMO_MAX 调到行数以上，拿满跨视图复用（路由器上
+# 整份日志约 4 万行，满覆盖约 15MB）；内存紧的调到 0 就是关掉那张表。
+#
+# 两个值在导入时从环境变量读一次（WB_ROW_MEMO_MAX / WB_ROW_COST_MEMO_MAX，
+# 0 = 关掉那张表）：这是给部署定上限的开关，不是逐次可切的现场开关——而
+# os.environ.get 走「键不存在」那条路要 ~2µs，放在每行都走的插入路径上会把
+# 省下来的时间原样还回去。运行期要改直接改模块属性（测试就是这么做的）。
+_ROW_MEMO_MAX = 65536
+_ROW_COST_MEMO_MAX = 16384
+
+
+def _row_memo_env_cap(name, default):
+    """导入时读一次上限；读不到或解析不出来就按默认。"""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return default
+
+
+_ROW_MEMO_MAX = _row_memo_env_cap("WB_ROW_MEMO_MAX", _ROW_MEMO_MAX)
+_ROW_COST_MEMO_MAX = _row_memo_env_cap("WB_ROW_COST_MEMO_MAX", _ROW_COST_MEMO_MAX)
+
+_row_day_memo = {}          # at -> "YYYY-MM-DD"
+_row_cost_memo = {}         # (model, cost_policy, at, pt, ct, comp) -> (价表代次, 定价结果)
+_row_cost_gen = None        # 定价表当前代次（_pricing_inputs() 的元组）
+_row_memo_tz = time.tzname  # 日键表绑在哪个时区上（见 _row_memo_tz_changed）
+
+
+def _row_memo_at(value):
+    """记忆表的「新旧」比较键：只有数字能比大小，别的（None / 坏行）一律按 0。
+
+    比大小只决定「这条记不记」，不决定结果——比不动就不比，照记。
+    """
+    return value if isinstance(value, (int, float)) else 0
+
+
+def _row_memo_tz_changed():
+    """进程时区被 tzset() 换过 → 日键表整体作废（定价表不受影响）。
+
+    日键是本地时区的函数，跨时区复用旧值会算错天。CPython 的 time.tzset()
+    每次都会重建 time.tzname 这个元组对象，所以「对象换了」就是「时区换过」；
+    没换时这里只是一次身份比较。生产里进程时区不会变，这一句就是白送的。
+    """
+    global _row_memo_tz
+    now = time.tzname
+    if _row_memo_tz is now:
+        return False
+    _row_memo_tz = now
+    _row_day_memo.clear()
+    return True
+
+
+def _cost_entry(pricing, cost):
+    """cost_for_row(details=False) 的返回值 -> 记忆条目（定长元组）。"""
+    return (pricing, cost["known"], cost["cny"], cost.get("band"),
+            cost.get("rates"), cost.get("source"), cost.get("source_at"),
+            cost.get("backfilled"), bool(cost.get("disabled")))
+
+
+def _cost_from_memo(entry):
+    """记忆条目 -> 与 cost_for_row(details=False) 逐键同序的 dict。
+
+    两条分支的形状与原函数一一对应：总开关关掉那一支不带 rates、多一个
+    disabled；有价/没价那一支带 rates。键序照抄原函数的插入顺序，别处
+    按字节对拍时看到的是一样的 dict。
+    """
+    cost = {"cny": entry[2], "known": entry[1], "band": entry[3]}
+    if entry[8]:
+        cost["source"] = "builtin"
+        cost["source_at"] = None
+        cost["backfilled"] = False
+        cost["disabled"] = True
+        return cost
+    cost["rates"] = entry[4]
+    cost["source"] = entry[5]
+    cost["source_at"] = entry[6]
+    cost["backfilled"] = entry[7]
+    return cost
+
+
+def _row_cost(row, pricing, pricing_on):
+    """一行的估算成本，跨视图复用（见「行级结果记忆」一节）。
+
+    pricing 是本次扫描开头取到的 _pricing_inputs() 元组：命中要求条目与它
+    同代。pricing 为 None（价表读不出来）时不进表，照旧每行现算——那条路径
+    本来就不该被记忆；空行（falsy row）同理，它走的是原函数的短路分支。
+
+    返回的形状与 wb_pricing.cost_for_row(..., details=False) 逐键相同；命中
+    时按条目重建一份，调用方拿到的是自己的副本，与现算路径一致。
+    """
+    if pricing is None or not row:
+        return wb_pricing.cost_for_row(row, details=False, enabled=pricing_on)
+    key = (row.get("model"), row.get("cost_policy"), row.get("at"),
+           row.get("prompt_tokens"), row.get("cached_tokens"),
+           row.get("completion_tokens"))
+    memo = _row_cost_memo
+    try:
+        entry = memo.get(key)
+    except TypeError:
+        # 不可哈希的字段（坏行）：原函数到 (doc.get("models") or {}).get(model)
+        # 那一步也会抛 TypeError，这里不抢先，交给它
+        return wb_pricing.cost_for_row(row, details=False, enabled=pricing_on)
+    if entry is not None and _pricing_unchanged(entry[0], pricing):
+        return _cost_from_memo(entry)
+    cost = wb_pricing.cost_for_row(row, details=False, enabled=pricing_on)
+    _row_cost_remember(key, pricing, cost)
+    return cost
+
+
+def _row_cost_remember(key, pricing, cost):
+    """把一行的定价结果记进有界表；价表换代时整表作废。
+
+    换代只可能来自价表文件被改写（策略表/时间线/价目表任一新对象），发生时
+    旧条目按定义全部失效，直接清掉，别让它们白占位置。判定用的是
+    _pricing_unchanged——与状态指纹同一条规则，两处不会漂移。
+    """
+    global _row_cost_gen
+    memo = _row_cost_memo
+    if _row_cost_gen is None or not _pricing_unchanged(_row_cost_gen, pricing):
+        memo.clear()
+        _row_cost_gen = pricing
+    cap = _ROW_COST_MEMO_MAX
+    if cap <= 0:
+        return
+    if len(memo) >= cap:
+        oldest = next(iter(memo))
+        if _row_memo_at(key[2]) < _row_memo_at(oldest[2]):
+            # 比表里最旧的还旧：记了也会立刻被顶掉，不如不记
+            return
+        memo.pop(oldest, None)
+    memo[key] = _cost_entry(pricing, cost)
+
+
+def _fold_usage_snapshot(row, snap, r, since, until, pricing_on=None, also=None,
+                         pricing=None, priced=None):
     """Fold one parsed row into a usage snapshot.
 
     One definition for both callers: the all-time fold (fed only the rows past
@@ -2842,9 +3927,17 @@ def _fold_usage_snapshot(row, snap, r, since, until, pricing_on=None, also=None)
     重问。代价是设置改动从下一次扫描起生效；逐行展示路径不受影响，仍然每行
     查、改设置当场可见。
 
-    `also` 是同一行还要折进的第二份同形状快照（按日分桶的窗口半）。过滤、
-    算价与字段提取只做一次，两份各自累加：折叠本来就要求两侧各记一笔，而
-    cost_for_row 与 realm 判定是每行最贵的那部分，只该付一次。
+    `also` 是同一行还要折进的其余同形状快照（按日/按小时分桶的窗口半），
+    一个元组，空/None 表示没有。过滤、算价与字段提取只做一次，几份各自累加：
+    折叠本来就要求每份各记一笔，而 cost_for_row 与 realm 判定是每行最贵的
+    那部分，只该付一次。
+
+    `pricing` 是本次扫描开头取到的 _pricing_inputs() 元组（调用方从同一个
+    值里取指纹，两处看到的是同一份价表）；传给 _row_cost 当记忆的代次，
+    None 表示价表读不出来、不进表。
+
+    `priced` 是本次扫描要填的「用到的价」记录（见「用到的价」状态指纹一节），
+    只有推进状态的那条折叠传它；窗口半/冷扫描传 None，一行都不记。
     """
     if r and not row_matches_realm(row, r):
         return
@@ -2856,9 +3949,16 @@ def _fold_usage_snapshot(row, snap, r, since, until, pricing_on=None, also=None)
     outcome = row_outcome(row)
     # Each row is priced against the version that was in force when it
     # happened, so a later price change cannot rewrite yesterday's totals.
-    cost = wb_pricing.cost_for_row(row, details=False, enabled=pricing_on)
+    # _row_cost 按行记忆（见「行级结果记忆」）：同一个视图里这一行只算一次，
+    # 第二个视图直接取上次的结果；pricing 是本次扫描的价表代次。
+    cost = _row_cost(row, pricing, pricing_on)
+    if outcome != "client_aborted":
+        # 折进去的每一行都把「用到的价」记进状态指纹（中止行只记 errors，
+        # 不碰价，所以不记）。记的是这次折叠真正读到的价，价表无关的变动
+        # 因此不再判废这条状态（见「用到的价」状态指纹一节）。
+        _priced_note(priced, row, cost, pricing)
     model = row.get("model")
-    targets = (snap,) if also is None else (snap, also)
+    targets = (snap,) if not also else (snap,) + tuple(also)
     if outcome != "completed":
         for tgt in targets:
             tgt["errors"] += 1
@@ -2908,44 +4008,102 @@ _usage_snap_state = {}
 _usage_snap_state_lock = threading.Lock()
 
 
+def _usage_snap_state_advance(r, pricing_on):
+    """（不折叠）取/建状态、采纳 checkpoint、判废归零、记身份指纹。
+
+    调用方必须已持有 _usage_snap_state_lock。返回本次扫描取到的价表代次
+    （_pricing_inputs 的元组）：调用方把它传给折叠当行级记忆的代次，与记进
+    状态指纹的是同一份，两处不会看到两份价表。
+
+    状态指纹是「折叠行真正用到的价」记录（T15，见「用到的价」状态指纹一节）：
+    折叠时逐行更新（state["pricing"]），扫描成功后把时间线投影摘要刷成当前
+    参数下的值（_pricing_record_close）——下一次判废拿它跟「当前价表按同一组
+    参数算出来的投影」比（_pricing_used_unchanged）。
+
+    状态是否「冷」（这次要付一次全量重折）看折过的位置：state["offset"] > 0
+    表示有可续折的数据；0 表示折叠要从文件头开始——状态刚建、刚被价表 /
+    realm / 日志判废、或 checkpoint 采纳失败。判定只看已折位置与三份指纹，
+    一行都不折，所以窗口路径拿它分流是纯加速：重折之后两边给出的字节完全
+    一致（见 _usage_snap_state_cold）。
+
+    采纳/判废只有这一段定义：_usage_snap_state_ready（all-time 折叠）与
+    窗口路径的冷热判定共用它，两边的规则因此不会漂移。
+    """
+    state = _usage_snap_state.get(r)
+    if state is None:
+        state = _usage_snap_state[r] = {"snap": None, "offset": 0, "key": None,
+                                        "pricing": None, "realm": None,
+                                        "tail": b"", "days": {}, "days_floor": None,
+                                        "hours_floor_at": None,
+                                        "hits": [], "hits_overflow": False}
+    pricing = _pricing_inputs(pricing_on)
+    realm = _realm_inputs()
+    log_key = _usage_log_key()
+    # 重折时状态指纹从这份空记录重新长起；总开关关着 / 价表读不出来时
+    # 记 None（折叠没读任何价，判定侧只认「记录也是 None」这一种一致）。
+    fresh = _pricing_record_new() if (pricing is not None
+                                      and pricing[0]) else None
+    if state["snap"] is None:
+        # 全新状态（进程刚起来）：先问 checkpoint，问不到才从零折起。
+        if not _usage_cache_adopt_snapshot(r, state, log_key, pricing, realm):
+            state.update({"snap": _empty_stats(), "offset": 0, "tail": b"",
+                          "days": {}, "days_floor": None, "hours_floor_at": None,
+                          "hits": [], "hits_overflow": False, "pricing": fresh})
+    elif (not _pricing_used_unchanged(state["pricing"], pricing)
+            or state["realm"] != realm
+            or not _log_resume_ok(state, log_key)):
+        state.update({"snap": _empty_stats(), "offset": 0, "tail": b"",
+                      "days": {}, "days_floor": None, "hours_floor_at": None,
+                      "hits": [], "hits_overflow": False, "pricing": fresh})
+    state.update({"realm": realm, "key": log_key})
+    return pricing
+
+
+def _usage_snap_state_cold(r, pricing_on):
+    """窗口请求现在会不会付一次全量重折？True = 会（窗口改走冷扫描）。
+
+    调用方必须已持有 _usage_snap_state_lock。判定就是 all-time 折叠的前半段
+    （_usage_snap_state_advance），不折任何行；为真时窗口半改走按日/按小时
+    分组的冷扫描（_scan_usage_snapshot_window_days / _hours，~1s 量级），
+    重折留给 all-time 视图（_usage_alltime_snapshot）与预热器。
+
+    这条路不写折叠结果，也不改「重折该不该发生」：状态里 offset 仍是 0，
+    下一个 all-time 请求照样从文件头折到文件尾——窗口请求不会把状态冻在
+    冷态。重折发生之后，走不走这条路给出的字节完全相同（冷扫描与日桶/小时
+    桶之和本就是同一批行、同一个求和口径，见两个冷路径函数的 docstring）。
+    """
+    _usage_snap_state_advance(r, pricing_on)
+    return _usage_snap_state[r]["offset"] <= 0
+
+
 def _usage_snap_state_ready(r, pricing_on):
     """把 `r` 的 all-time 折叠推进到文件尾；返回 (state, offset, error)。
 
     调用方必须已持有 _usage_snap_state_lock。日桶与 all-time 折叠共用这一次
     扫描（见 _fold_usage_snapshot 的 also），所以窗口半与 all-time 半描述的
     永远是同一段字节——这正是旧实现用 stop_at 想保证的事。
+
+    采纳 checkpoint 与判废归零在 _usage_snap_state_advance 里（窗口路径的
+    冷热判定也用那一段，见 _usage_snap_state_cold），这里只管折到文件尾。
     """
-    state = _usage_snap_state.get(r)
-    if state is None:
-        state = _usage_snap_state[r] = {"snap": None, "offset": 0, "key": None,
-                                        "pricing": None, "realm": None,
-                                        "tail": b"", "days": {}, "days_floor": None}
-    pricing = _pricing_inputs(pricing_on)
-    realm = _realm_inputs()
-    log_key = _usage_log_key()
-    if state["snap"] is None:
-        # 全新状态（进程刚起来）：先问 checkpoint，问不到才从零折起。
-        if not _usage_cache_adopt_snapshot(r, state, log_key, pricing, realm):
-            state.update({"snap": _empty_stats(), "offset": 0, "tail": b"",
-                          "days": {}, "days_floor": None})
-    elif (not _pricing_unchanged(state["pricing"], pricing)
-            or state["realm"] != realm
-            or not _log_resume_ok(state, log_key)):
-        state.update({"snap": _empty_stats(), "offset": 0, "tail": b"",
-                      "days": {}, "days_floor": None})
-    state.update({"pricing": pricing, "realm": realm, "key": log_key})
+    pricing = _usage_snap_state_advance(r, pricing_on)
+    state = _usage_snap_state[r]
+    priced = state["pricing"]
 
     def fold(row):
-        # 一行折两处：all-time 半 + 它所属那天的窗口半。过滤与算价在
-        # _fold_usage_snapshot 里只做一次。
+        # 一行折三处：all-time 半 + 它所属那天的窗口半 + 那个小时的小时桶。
+        # 过滤与算价在 _fold_usage_snapshot 里只做一次。
+        day = _usage_day_bucket(state, row, r, _day_snapshot_bucket)
+        hour = None if day is None else _usage_hour_bucket(state, row, day)
+        extras = () if day is None else ((day,) if hour is None else (day, hour))
         _fold_usage_snapshot(row, state["snap"], r, None, None, pricing_on,
-                             also=_usage_day_bucket(state, row, r,
-                                                    _day_snapshot_bucket))
+                             also=extras, pricing=pricing, priced=priced)
 
     offset, error = _scan_usage_from(state["offset"], fold)
     if error is None:
         state["offset"] = offset
         state["tail"] = _log_tail_signature(offset)
+        _pricing_record_close(priced, pricing)
     return state, offset, error
 
 
@@ -2974,7 +4132,8 @@ def _usage_alltime_snapshot(r, pricing_on=None):
             log(f"usage snapshot read failed: {error}")
             snap = state["snap"]
             state.update({"snap": None, "offset": 0, "tail": b"",
-                          "days": {}, "days_floor": None})
+                          "days": {}, "days_floor": None, "hours_floor_at": None,
+                          "hits": [], "hits_overflow": False})
     # 落盘决定在锁外做（见 checkpoint 一节）：写盘要逐把读三份状态，在状态
     # 锁里再取别的状态锁会构成锁序环。折叠失败的那次不写——它的 offset 已经
     # 归零，落盘函数也会跳过。
@@ -2987,68 +4146,210 @@ def _scan_usage_snapshot_window(r, since, until, pricing_on=None):
     """One pass over the log, keeping only the rows inside the window.
 
     Nothing is carried over here - a window moves with the clock - but the
-    pre-filter drops the parse for every line it can prove is outside it,
-    which is what keeps a cold day or week view cheap on a multi-day log.
+    pre-filter drops the parse for every line it can prove is outside it, and
+    its bytes-level half drops the decode of those lines as well, which is
+    what keeps a cold day or week view cheap on a multi-day log.
 
     The bounds reach the pre-filter through `or None` because that is the
     test the fold itself applies (`if since and at < since`): a bound of 0
     is a bound the fold ignores, and the pre-filter must not read it as
     "keep nothing after the epoch" and drop rows the fold would have
     counted.
+
+    价表在这里取一次（与 all-time 折叠同一条口径：一次扫描一份价表快照），
+    传给折叠当行级记忆的代次；这次扫描里的行因此可以和别的视图共享定价结果。
     """
+    pricing = _pricing_inputs(pricing_on)
     snap = _empty_stats()
     _, error = _scan_usage_from(
         0,
-        lambda row: _fold_usage_snapshot(row, snap, r, since, until, pricing_on),
+        lambda row: _fold_usage_snapshot(row, snap, r, since, until, pricing_on,
+                                         pricing=pricing),
         skip=lambda line: _line_outside_window(line, since or None,
-                                                 until or None))
+                                                 until or None),
+        skip_raw=lambda raw: _line_outside_window_bytes(raw, since or None,
+                                                        until or None))
     if error is not None:
         log(f"usage snapshot read failed: {error}")
     return snap
 
 
-def _usage_snapshot_window_from_days(r, day_key, pricing_on):
+def _usage_snapshot_window_from_days(r, since, until, pricing_on):
     """窗口半快照 = 窗口内的日桶之和；日桶不可用时返回 None。
 
     先把 all-time 折叠推进到文件尾：日桶与它同一次扫描推进，窗口半与
     all-time 半因此描述同一段字节。
+
+    until 开放（None）时窗口从起点一路到文件尾；until 给出时它必须是本地
+    午夜（调用方已按格点判过，这里再校验一次），窗口就是「起点那天起、
+    until 那天之前」的日桶之和。桶按 at 严格切分（恰好落在 until 上的行归
+    until 那天那一桶，见 _usage_hour_bucket），桶切不出那一刻的行，所以
+    那一刻有整秒行时整条路退回 None（见 _closed_window_edge_ok），调用方
+    接着整段扫描，结果不变。
+
+    状态冷（从没折过/刚被价表、realm、日志判废/采纳失败）时直接返回 None：
+    那条路要先付一次全量重折，窗口请求不背它——调用方退回按日分组的冷扫描
+    （同一批行、同一个求和口径，逐字节相同），重折留给 all-time 视图与
+    预热器（见 _usage_snap_state_cold）。
     """
     with _usage_snap_state_lock:
+        if _usage_snap_state_cold(r, pricing_on):
+            return None
         state, offset, error = _usage_snap_state_ready(r, pricing_on)
         if error is not None:
             # 折叠失败时状态已经归零，日桶跟着清空：这一次退回整段扫描，
             # 与「没有缓存」时的行为一致。
             log(f"usage snapshot read failed: {error}")
             state.update({"snap": None, "offset": 0, "tail": b"",
-                          "days": {}, "days_floor": None})
+                          "days": {}, "days_floor": None, "hours_floor_at": None,
+                          "hits": [], "hits_overflow": False})
             return None
-        if not _days_cover(state, day_key):
+        day_key = _window_day_key_safe(since)
+        if day_key is None or not _days_cover(state, day_key):
             return None
+        until_key = None
+        if until is not None:
+            until_key = _window_day_key_safe(until)
+            if until_key is None or not _closed_window_edge_ok(state, until):
+                return None
         snap = _empty_stats()
         days = state["days"]
         for key in sorted(days):
-            if key >= day_key:
-                _add_usage_snapshot(snap, days[key])
+            if key < day_key:
+                continue
+            if until_key is not None and key >= until_key:
+                break
+            _add_usage_snapshot(snap, days[key])
+    _usage_cache_maybe_save("snapshot", offset)
+    return snap
+
+
+def _usage_snapshot_window_from_hours(r, since, until, pricing_on):
+    """窗口半快照 = 整点窗口内的小时桶之和；小时层不可用时返回 None。
+
+    与日桶版同一条规矩：先把 all-time 折叠推进到文件尾（小时桶与它同一次
+    扫描推进），再从存量桶求和。成立条件缺一不可，任何一条不成立就返回
+    None（调用方退回按小时分组的冷路径）：
+
+      * 窗口起点是本地整点（见 _hour_window_key）；
+      * days_floor 覆盖窗口起点——小时桶挂在日桶上，剪枝跟着日桶走；
+      * 被选中的每个日桶都带小时表。某天的小时格点不成立时整张表被摘掉
+        （见 _usage_hour_bucket），这时整个窗口退回扫描，不能只跳过那一天；
+      * 每个小时桶的 at 落在「窗口起点 + k*3600」的格点上，且与所属日桶
+        对得上（日桶 at + 序号*3600）。这一条挡住夏令时把日边界挪动的
+        情形——与 _series_slice 的格点校验同源；
+      * until 给出时（闭窗口）它也必须落在同一套小时格点上，且直到那一刻
+        没有整秒行（见 _closed_window_edge_ok）：桶按 at 严格切分，窗口
+        只取 at < until 的那批桶，恰好落在 until 上的行由边沿账挡回整段
+        扫描。
+
+        情形——与 _series_slice 的格点校验同源。
+
+    状态冷（从没折过/刚被价表、realm、日志判废/采纳失败）时直接返回 None：
+    那条路要先付一次全量重折，窗口请求不背它——调用方退回按小时分组的冷
+    扫描（同一批行、同一个求和口径，逐字节相同），重折留给 all-time 视图
+    与预热器（见 _usage_snap_state_cold）。
+    """
+    key = _hour_window_key(since)
+    if key is None:
+        return None
+    day_key, k0 = key
+    until_key = None
+    if until is not None:
+        until_key = _hour_window_key(until)
+        if until_key is None:
+            return None
+    with _usage_snap_state_lock:
+        if _usage_snap_state_cold(r, pricing_on):
+            return None
+        state, offset, error = _usage_snap_state_ready(r, pricing_on)
+        if error is not None:
+            log(f"usage snapshot read failed: {error}")
+            state.update({"snap": None, "offset": 0, "tail": b"",
+                          "days": {}, "days_floor": None, "hours_floor_at": None,
+                          "hits": [], "hits_overflow": False})
+            return None
+        if not _days_cover(state, day_key):
+            return None
+        if not _hours_cover(state, since):
+            return None
+        if until_key is not None and not _closed_window_edge_ok(state, until):
+            return None
+        lo = int(since)
+        snap = _empty_stats()
+        days = state["days"]
+        for key in sorted(days):
+            if key < day_key:
+                continue
+            if until_key is not None and key > until_key[0]:
+                break
+            bucket = days[key]
+            hours = bucket.get("hours")
+            if hours is None:
+                return None
+            day_at = int(bucket["at"])
+            for hour in sorted(hours, key=int):
+                if key == day_key and int(hour) < k0:
+                    # 起点那天只看起点之后的整点：更早的桶属于窗口外，跳过
+                    # 它们不影响正确性（桶按 at 严格切分，见 _usage_hour_bucket）。
+                    continue
+                sub = hours[hour]
+                at = int(sub["at"])
+                if at != day_at + int(hour) * 3600:
+                    return None
+                if (at - lo) % 3600:
+                    return None
+                if until_key is not None and (key, int(hour)) >= until_key:
+                    # 闭窗口：until 那一刻归后一桶（桶按 at 严格切分），
+                    # 只取 at < until 的桶；那一刻有整秒行时上面已经退回。
+                    break
+                _add_usage_snapshot(snap, sub)
     _usage_cache_maybe_save("snapshot", offset)
     return snap
 
 
 def _usage_snapshot_window(r, since, until, pricing_on=None):
-    """窗口半快照：对齐窗口由日桶相加，其余保持整段扫描。
+    """窗口半快照：对齐窗口由日桶/小时桶相加，其余保持整段扫描。
 
-    只有「until 开放 + 起点是本地午夜」的窗口拆得成整天的并集（today /
-    week / month 都是）。自定义区间与带 until 的区间一律走整段扫描：起点
-    不是午夜就拆不开，而 until 落在某天中间时，那一天的桶里还有窗口外的
-    行，加进去就是错的。
+    只有「两端都落在同一套格点上」的窗口拆得成存量桶的并集：起点是本地
+    午夜、终点（开放或闭）也是本地午夜时用日桶（today / week / month 与
+    「到某天零点」都是），两端落在本地整点上时用小时桶（自定义区间的常见
+    形态，见 _hour_window_key）。闭窗口的右边界按「at < until 的桶」切
+    （见 _closed_window_edge_ok）：那一刻有整秒行时退回整段扫描，结果与
+    改动前逐字节一致——闭窗口本来走的就是这条兜底。起点不落在格点上、
+    或 until 不落格点的窗口同样保持整段扫描。
     """
-    day_key = _window_day_key(since) if until is None else None
-    if day_key is not None and _usage_day_buckets_enabled():
-        snap = _usage_snapshot_window_from_days(r, day_key, pricing_on)
-        if snap is not None:
-            return snap
-        # 日桶没盖住窗口起点（还没折过/被剪枝/折叠出错）：冷路径现折一份
-        # 按日分组的窗口半，口径与日桶状态一致，两条路径的字节因此相同。
-        return _scan_usage_snapshot_window_days(r, since, pricing_on)
+    if until is None:
+        day_key = _window_day_key_safe(since)
+        if day_key is not None and _usage_day_buckets_enabled():
+            snap = _usage_snapshot_window_from_days(r, since, None, pricing_on)
+            if snap is not None:
+                return snap
+            # 日桶没盖住窗口起点（还没折过/被剪枝/折叠出错）：冷路径现折一份
+            # 按日分组的窗口半，口径与日桶状态一致，两条路径的字节因此相同。
+            return _scan_usage_snapshot_window_days(r, since, None, pricing_on)
+        if _usage_day_buckets_enabled() and _window_hour_key_safe(since) is not None:
+            snap = _usage_snapshot_window_from_hours(r, since, None, pricing_on)
+            if snap is not None:
+                return snap
+            # 小时层没盖住窗口起点（还没折过/被剪枝/那天的小时格点不成立）：
+            # 冷路径现折一份按小时分组的窗口半，口径与小时桶状态一致。
+            return _scan_usage_snapshot_window_hours(r, since, None, pricing_on)
+        return _scan_usage_snapshot_window(r, since, until, pricing_on)
+    # 闭窗口：两端都落在格点上才有桶可借（与上面同一套格点校验）。
+    if _usage_day_buckets_enabled():
+        if (_window_day_key_safe(since) is not None
+                and _window_day_key_safe(until) is not None):
+            snap = _usage_snapshot_window_from_days(r, since, until, pricing_on)
+            if snap is not None:
+                return snap
+            return _scan_usage_snapshot_window_days(r, since, until, pricing_on)
+        if (_window_hour_key_safe(since) is not None
+                and _window_hour_key_safe(until) is not None):
+            snap = _usage_snapshot_window_from_hours(r, since, until, pricing_on)
+            if snap is not None:
+                return snap
+            return _scan_usage_snapshot_window_hours(r, since, until, pricing_on)
     return _scan_usage_snapshot_window(r, since, until, pricing_on)
 
 
@@ -3089,7 +4390,19 @@ def _tail_lines(path, max_lines, chunk=256 * 1024):
     """Return up to the last `max_lines` non-empty lines, oldest first.
 
     The usage log passes 20MB within a day. Scanning it end to end on every
-    dashboard poll was the dominant cost behind slow /usage/* responses.
+    dashboard poll was the dominant cost behind slow /usage/* responses, so
+    the reader walks the file backwards in `chunk`-sized blocks and splits
+    each block exactly once: `buf` carries only the fragment that straddles
+    the boundary into the next (older) block, never the blocks already read.
+
+    Lines that hold nothing but whitespace are not rows and do not count
+    towards max_lines; a trailing chunk with no newline still counts as a
+    line when it holds anything else (record_usage always writes the
+    newline, so that case is a write caught mid-flight).
+
+    逐行的活只剩"这一行要不要"：整块的非空行在 C 层用列表推导滤出来、一次
+    extend 收进 lines（上限再截断），比逐行 strip()+append 少一层 Python
+    循环。字节口径与逐行写法逐字相同（套件里留了参考实现对拍）。
     """
     lines = []
     try:
@@ -3104,11 +4417,13 @@ def _tail_lines(path, max_lines, chunk=256 * 1024):
                 buf = fh.read(step) + buf
                 parts = buf.split(b"\n")
                 buf = parts[0]
-                for raw in reversed(parts[1:]):
-                    if not raw.strip():
-                        continue
-                    lines.append(raw)
-                    if len(lines) >= max_lines:
+                got = [raw for raw in parts[1:] if raw and not raw.isspace()]
+                if got:
+                    lines.extend(reversed(got))
+                    if len(lines) > max_lines:
+                        # 与逐行写法一样：收满 max_lines 就停，剩下的（更老的）
+                        # 行属于更早的块，本来也不会被收进来。
+                        del lines[max_lines:]
                         break
             if len(lines) < max_lines and buf.strip():
                 lines.append(buf)
@@ -3233,6 +4548,9 @@ def usage_timeseries_etag(realm=None, range=None, since=None, until=None,
 # and record_error put the timestamp first and json.dumps keeps that order -
 # which is what makes the window pre-filter below possible.
 _AT_PREFIX = '{"at": '
+# The same prefix as bytes: _line_outside_window_bytes() reads the undecoded
+# line, and deriving the bytes from the text keeps the two in step.
+_AT_PREFIX_B = _AT_PREFIX.encode("ascii")
 
 
 def _line_outside_window(line, lo, hi):
@@ -3276,6 +4594,57 @@ def _line_outside_window(line, lo, hi):
     return line.find('"at"', end) < 0
 
 
+def _line_outside_window_bytes(raw, lo, hi):
+    """_line_outside_window() on the undecoded line: True only when the text
+    check would answer True too.
+
+    The scan reads bytes and only then decodes, so the same test can run
+    before the decode and a line it drops never becomes text at all - which
+    is the whole point, since a narrow window leaves most of a multi-day log
+    outside it. The rules are the text version's, read off the bytes: same
+    prefix, same first comma, same float-token requirement, same window
+    comparison, same "no later `"at"` key" test (see that docstring for what
+    each one is protecting).
+
+    One extra condition: the line has to be ASCII from end to end. Two things
+    ride on it. It makes the byte read exact - every character the text check
+    would see is the byte the check saw - and it is what keeps a line no
+    reader can decode out of the skip path. On the text path that line stops
+    the pass with UnicodeDecodeError before any filter runs (see
+    _scan_usage_from), so skipping it here would fold in rows the old pass
+    never reached. ASCII is a subset of UTF-8, so an all-ASCII line always
+    decodes, and a line with anything else in it returns False and is decoded
+    and filtered exactly as before.
+
+    False therefore means "decode it and check as before", never "this line
+    is inside the window". Bounds must be the ones handed to
+    _line_outside_window(): this check is only allowed to drop lines that one
+    drops.
+    """
+    if not raw.startswith(_AT_PREFIX_B):
+        return False
+    end = raw.find(b",", len(_AT_PREFIX_B))
+    if end < 0:
+        return False
+    token = raw[len(_AT_PREFIX_B):end]
+    # 46/101/69 are `.`/`e`/`E` as byte values. The test is spelled with int
+    # needles because on bytes an int needle is a plain single-byte scan
+    # (memchr), where `b"." in token` runs the general substring search - about
+    # four times the cost on a token this short, paid once per skipped line.
+    # The answer is the text version's either way.
+    if 46 not in token and 101 not in token and 69 not in token:
+        return False
+    try:
+        at = float(token)
+    except ValueError:
+        return False
+    if not ((lo is not None and at < lo) or (hi is not None and at > hi)):
+        return False
+    if raw.find(b'"at"', end) >= 0:
+        return False
+    return raw.isascii()
+
+
 def _usage_timeseries_scan(realm, lo, hi, step):
     """One uncached pass over the log, folding rows into fixed-width buckets.
 
@@ -3283,7 +4652,15 @@ def _usage_timeseries_scan(realm, lo, hi, step):
     口径一字未改。
     """
     buckets = {}
+    # 窗口内 credit 前 50 条：大小 50 的最小堆，堆顶是当前的第 50 名。旧实现
+    # 把整窗的计费行全 append 进列表、扫完再 sort 整份切前 50——排序的是上万
+    # 条，留下的只有 50 条。堆把每行压到一次「比不比堆顶大」的比较，进不了
+    # 前 50 的行连载荷字典都不建。
+    # 堆元素是 (at, -序号, 载荷)：序号取负，让相同 at 时日志靠前的行更大，与
+    # 稳定排序（at 倒序、同 at 保持日志顺序）以及 _series_credit_push 的缓冲
+    # 逐条一致（键唯一，堆的替换规则与稳定排序的取舍等价）。
     credits = []
+    credit_seq = 0
     try:
         with open(USAGE_LOG, encoding="utf-8") as fh:
             for line in fh:
@@ -3327,34 +4704,47 @@ def _usage_timeseries_scan(realm, lo, hi, step):
                 if outcome != "client_aborted":
                     bucket["credit"] += credit
                 if credit > 0:
-                    credits.append({
-                        "at": at, "iso": row.get("iso") or "",
-                        "model": row.get("model") or "",
-                        "account": row.get("account") or "",
-                        "credit": credit,
-                        "total_tokens": row.get("total_tokens") or 0,
-                    })
+                    seq = -credit_seq
+                    credit_seq += 1
+                    if len(credits) < _SERIES_CREDITS_KEEP:
+                        heapq.heappush(credits,
+                                       (at, seq, _series_credit_entry(at, row)))
+                    elif (at, seq) > (credits[0][0], credits[0][1]):
+                        heapq.heapreplace(credits,
+                                          (at, seq, _series_credit_entry(at, row)))
     except FileNotFoundError:
         pass
     except Exception as exc:
         log("usage timeseries read failed: %s" % exc)
-    credits.sort(key=lambda item: item.get("at") or 0, reverse=True)
+    # 堆里就是窗口内的前 50 条；按同一把键排出（键唯一，等于旧实现的稳定
+    # 排序结果：at 倒序、同 at 保持日志顺序）。
+    credits.sort(key=lambda item: (item[0], item[1]), reverse=True)
     return {
         "ok": True, "realm": realm or "all", "bucket_seconds": step,
         "since": lo, "until": hi,
         "series": [buckets[key] for key in sorted(buckets)],
-        "credits": credits[:50],
+        "credits": [item[2] for item in credits],
     }
 
 
 def _usage_timeseries_uncached(realm, lo, hi, step):
-    """窗口序列：优先由日/小时桶切片，不成立时整段扫描。
+    """窗口序列：优先由日/小时桶/分钟环切片，不成立时整段扫描。
 
-    切片只在「窗口起点是本地午夜 + 桶宽 3600/86400」时才是同一件事，所以
-    先按这两条判断要不要惊动状态：自定义区间与分钟桶根本不折状态，也就
-    不会为它们白扫一遍。
+    切片只在「桶宽与窗口对齐」时才是同一件事，所以先按桶宽判断要不要惊动
+    状态：日/小时桶要求窗口起点是本地午夜，分钟环要求起点落在分钟格点上
+    （lo 是 60 的整数倍）。两条都不成立的自定义区间根本不折状态，也就不会
+    为它们白扫一遍。
     """
-    day_key = _window_day_key(lo) if step in (3600, 86400) else None
+    if step in (3600, 86400):
+        day_key = _window_day_key(lo)
+    elif step == 60:
+        # 分钟窗口：起点落在格点上才可能与存量分钟桶一一对应（见
+        # _series_slice_minutes）；不在格点上的窗口连状态都不惊动。
+        day_key = _series_window_day_key(lo)
+        if day_key is not None and not _series_minute_grid_ok(lo):
+            day_key = None
+    else:
+        day_key = None
     if day_key is not None and _usage_day_buckets_enabled():
         with _series_state_lock:
             state, offset, error = _usage_series_state_ready(realm)
@@ -3363,7 +4753,9 @@ def _usage_timeseries_uncached(realm, lo, hi, step):
                 # 折叠失败：状态归零（下一次从零折起），这次退回整段扫描。
                 log("usage timeseries fold failed: %s" % error)
                 state.update({"days": {}, "days_floor": None, "max_at": 0,
-                              "credits": [], "offset": 0, "tail": b""})
+                              "credits": [], "minutes": {}, "minutes_from": None,
+                              "hits": [], "hits_overflow": False,
+                              "offset": 0, "tail": b""})
             else:
                 out = _series_slice(state, realm, lo, hi, step, day_key)
         if error is None:
@@ -3518,24 +4910,636 @@ def _count_usage_rows_uncached(realm=None):
         return counts.get(realm, 0)
 
 
-def recent_usage(limit=100, realm=None, page=1):
-    """Paginated rows from the tail of the log (page 1 is latest).
+# ---------------------------------------------------------------------------
+# recent 的行偏移索引（页 = 日志尾部的第 N 页）
+# ---------------------------------------------------------------------------
+#
+# recent_usage 的每一页都要从日志尾部往回数到第 N×limit 条记录才定位得到：
+# 第 1 页至少要读回一个 256KB 块，realm 过滤命中率低时要读回整个文件，页深
+# 越大代价越大。这里给日志建一份行偏移索引——每 64KB 记一条「行边界字节偏移
+# + 到该处的累计记录数」，页 N 直接 seek 到起点附近再顺序读回页大小量级的
+# 数据，读取量与页深无关。
+#
+# 索引落在数据目录的独立文件里（不并进 checkpoint：checkpoint 是五份聚合
+# 状态的落盘，这份索引的对象只有日志本身，校验与写盘策略都跟着日志走）：
+#
+#   * 位置校验复用聚合那套现成机制（_usage_log_key + _log_offset_holds +
+#     _log_tail_signature，P:2504-2573）：日志被截断、被替换、同尺寸重写都会
+#     让索引作废，从零重扫一遍——宁多扫一次，也不给出一页错的记录；
+#   * 两个口径都在同一次扫描里现算，不复制第二份实现：页数标签走
+#     _count_usage_line（D5：总数含坏 JSON 的非空行），行定位走 recent 自己的
+#     row_matches_realm 归属；
+#   * 「没带 realm 字段的行」的归属要查活账号池（row_realm），跨进程不一定
+#     复现得了：有这类行时，realm 相关的数字只在「活池 == 磁盘归属」且 uid→
+#     realm 与折进来时一致时才用索引（_realm_fold_reproducible），否则退回
+#     老路——老路永远用活池，永远是当前该有的数字。
+_RECENT_INDEX_SCHEMA = 1
+# 索引粒度：每 64KB 记一条行边界。4 万行的日志（约 23MB）只有 350 条上下，
+# 页读取的起点最多偏一段，读取量是「一段 + 页本身」。
+_RECENT_INDEX_SEGMENT = 65536
+# realm 表容量。真实日志只有 intl/cn（外加没带字段的老行归属），超过这个数
+# 说明 realm 字段被人乱写了，索引直接不用（老路照常给出正确结果）。
+_RECENT_INDEX_REALM_CAP = 6
+# realm 值长度上限：手改过的行可以带出很长的值，那只会把索引撑大。
+_RECENT_INDEX_REALM_MAX = 128
 
-    Reading backward in chunks keeps this in the millisecond range while
-    accurately fetching any requested page without missing rows across realms.
+
+def _recent_index_enabled():
+    """索引总开关，默认开；WB_RECENT_INDEX=0 关（现场应急 / 测试切换）。
+
+    与 WB_USAGE_CACHE 同款：每次调用读环境变量，不在导入时定死。
+    """
+    return os.environ.get("WB_RECENT_INDEX", "0").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+def _recent_index_min_bytes():
+    """写盘节流：推进不足这么多字节就不写。默认 256KB。
+
+    这个阈值就是「重启后最多回放多少」：索引加载回来后要把没索引的尾部重新
+    折一遍（每行一次 json.loads），真机 1MB ≈ 0.14s、256KB ≈ 35ms。索引本身
+    只有几 KB，写盘很便宜（日志每天涨 6MB 上下 → 一天几十次写、几百 KB），
+    所以阈值取得比 checkpoint 的 1MB 小一档，把重启后的第一页压在几十毫秒。
     """
     try:
-        limit = max(1, int(limit))
-    except Exception:
-        limit = 100
+        return max(0, int(os.environ.get("WB_RECENT_INDEX_MIN_BYTES", 256 * 1024)))
+    except (TypeError, ValueError):
+        return 256 * 1024
+
+
+def _recent_index_min_seconds():
+    """写盘节流：距上次尝试不足这么多秒就不写。默认 900s。"""
     try:
-        page = max(1, int(page))
+        return max(0.0, float(os.environ.get("WB_RECENT_INDEX_MIN_SECONDS", 900)))
+    except (TypeError, ValueError):
+        return 900.0
+
+
+def _recent_index_stamp():
+    """索引文件的 (路径, mtime_ns, size)；文件不在时后两项为 None。
+
+    路径也在戳里（同 estimate-daily）：换目录后不会被旧目录的戳骗过去。
+    """
+    try:
+        st = os.stat(RECENT_INDEX_FILE)
+        return (RECENT_INDEX_FILE, st.st_mtime_ns, st.st_size)
+    except OSError:
+        return (RECENT_INDEX_FILE, None, None)
+
+
+def _recent_index_realm_map_json(disk):
+    """磁盘那份 uid→realm 的 JSON 形态（与索引文件里的比）。"""
+    if disk is None:
+        return None
+    return [[uid, realm] for uid, realm in disk]
+
+
+def _recent_index_realm_name(value):
+    """realm 表里的键：只收能出现在查询里的短字符串，其余让索引作废。
+
+    row_realm 对带字段的行原样返回字段值，手改过的行可以带出数字或超长的
+    值：它们既进不了 JSON 键、也不会等于任何字符串查询，但会把表撑大，索性
+    让整份索引不可用（老路照常给出正确结果）。
+    """
+    if isinstance(value, str) and len(value) <= _RECENT_INDEX_REALM_MAX:
+        return value
+    return None
+
+
+def _recent_index_realm_ok(state):
+    """realm 相关的数字能不能信这份索引。
+
+    只有「没带 realm 字段、带 account 的行」会查到活池（row_realm），别的行
+    归属只由行内字段决定，任何进程、任何时刻算出来都一样。有这类行时要求：
+    折进来时的 uid→realm（磁盘那份）与现在一致，且活池与磁盘一致
+    （_realm_fold_reproducible）——两者合起来把归属钉死，索引算出的每个
+    realm 计数与现在这台机器上会算出来的那份逐字相同。
+    """
+    if not state["legacy"]:
+        return True
+    realm_map = state["realm_map"]
+    if realm_map is None:
+        return False
+    disk = _account_realm_map()
+    if _recent_index_realm_map_json(disk) != realm_map:
+        return False
+    return _realm_fold_reproducible(disk)
+
+
+def _recent_index_blank():
+    """一份空索引的核心字段（写盘形态与内存形态共用）。"""
+    return {"key": None, "size": 0, "tail": b"", "realm_map": None,
+            "legacy": False, "realms": [], "counts": {}, "row_counts": {},
+            "lines": 0, "rows": 0, "segs": []}
+
+
+_recent_index_lock = threading.Lock()
+# 索引状态（由 _recent_index_lock 保护）。字段：
+#   stamp          —— 上次读到/写下的索引文件戳（外部改动靠它发现）；
+#   usable         —— 位置校验通过、可以服务查询；
+#   giveup         —— 扫描撞上索引处理不了的行，本进程不再重试（日志换掉才重来）；
+#   key/size/tail  —— 与聚合同款的位置信息：索引覆盖到 size（行边界）；
+#   realm_map      —— 折进来时的磁盘 uid→realm（realm 数字的指纹）；
+#   legacy         —— 日志里有归属要查活池的行；
+#   realms/counts/row_counts —— realm 表与两个口径的计数（count 口径只有总数，
+#                      recent 口径按段存，供定位）；
+#   segs           —— [offset, rows, <row_counts 各列>]，累计值；
+#   wrote_size/at  —— 写盘节流（记「尝试」而非成功，失败也退避）。
+_recent_index_state = {
+    "stamp": None, "usable": False, "giveup": False, "giveup_key": None,
+    "key": None, "size": 0, "tail": b"", "realm_map": None, "legacy": False,
+    "realms": [], "counts": {}, "row_counts": {}, "lines": 0, "rows": 0,
+    "segs": [], "wrote_size": 0, "wrote_at": 0.0,
+}
+
+
+def _recent_index_restart(state, realm_map):
+    """清回零重新折（保留文件戳与写盘节流）：位置或归属口径变了才走这里。"""
+    state.update(_recent_index_blank())
+    state.update({"usable": False, "giveup": False, "giveup_key": None,
+                  "realm_map": realm_map})
+
+
+def _recent_index_add_realm(state, name):
+    """把一个新 realm 值加进表，段数组同步补一列零。
+
+    表就是段数组的列序：某一段里没出现过的值，计数本来就是 0，补零不改变
+    任何累计值。
+    """
+    if name in state["realms"]:
+        return True
+    if len(state["realms"]) >= _RECENT_INDEX_REALM_CAP:
+        return False
+    state["realms"].append(name)
+    for seg in state["segs"]:
+        seg.append(0)
+    state["counts"].setdefault(name, 0)
+    state["row_counts"].setdefault(name, 0)
+    return True
+
+
+def _recent_index_dirty(state):
+    """扫描撞上索引处理不了的行：这份状态不能用了，本进程不再重试。
+
+    与「干净停下」的区别：_count_usage_line 可能已经把半个计数写进状态，
+    续读会得到错的累计值，所以整份丢掉、记住日志位置——日志被换掉（key 变）
+    才再试一次，否则每次调用都重扫一遍比老路还贵。
+    """
+    state.update(_recent_index_blank())
+    state.update({"usable": False, "giveup": True,
+                  "giveup_key": _usage_log_key()})
+    return False
+
+
+def _recent_index_fold_line(state, line):
+    """一行折进两个口径；返回 False 表示这行让索引不能用了（见上）。"""
+    counts = state["counts"]
+    before = len(counts)
+    shim = {"n": state["lines"], "n_realm": counts}
+    try:
+        _count_usage_line(shim, line)
     except Exception:
-        page = 1
-    realm = realm_scope(realm)
-    total = count_usage_rows(realm)
-    total_pages = max(1, (total + limit - 1) // limit) if total > 0 else 1
-    page = min(page, total_pages)
+        return _recent_index_dirty(state)
+    state["lines"] = shim["n"]
+    if len(counts) != before:
+        for name in list(counts):
+            if name in state["realms"]:
+                continue
+            good = _recent_index_realm_name(name)
+            if good is None or not _recent_index_add_realm(state, good):
+                return _recent_index_dirty(state)
+    try:
+        row = json.loads(line)
+    except Exception:
+        return True                     # 坏 JSON：算行数、不算记录（D5 同款）
+    if not isinstance(row, dict):
+        # 老实现会把 null / 数组这类行原样放进 matching（随后计价时炸掉）：
+        # 这种日志不用索引，让老路照旧处理。
+        return _recent_index_dirty(state)
+    if not row.get("realm") and row.get("account"):
+        state["legacy"] = True          # 这一行的归属要查活池
+    try:
+        name = row_realm(row)
+    except Exception:
+        return _recent_index_dirty(state)
+    name = _recent_index_realm_name(name)
+    if name is None or not _recent_index_add_realm(state, name):
+        return _recent_index_dirty(state)
+    state["rows"] += 1
+    state["row_counts"][name] = state["row_counts"].get(name, 0) + 1
+    return True
+
+
+def _recent_index_extend(state):
+    """把索引推进到日志尾部；返回是否可用。
+
+    与 _count_usage_scan 同一套字节纪律：整行推进、半行留给下一趟、解码失败
+    即停。停下的位置就是 size（最后一条完整行的末尾），下一趟从那里接着读，
+    所以半行与坏字节只让索引暂时不可用，不会让每次调用都重扫整份日志。
+    """
+    if state["giveup"]:
+        return False
+    offset = state["size"]
+    try:
+        with open(USAGE_LOG, "rb") as fh:
+            fh.seek(offset)
+            while True:
+                raw = fh.readline()
+                if not raw:
+                    break
+                if not raw.endswith(b"\n"):
+                    state["size"] = offset      # 半行（写入中/掉电碎片）
+                    return False
+                end = offset + len(raw)
+                try:
+                    line = raw.decode("utf-8").strip()
+                except UnicodeDecodeError:
+                    state["size"] = offset      # 解码失败：索引停在这行之前
+                    return False
+                if line and not _recent_index_fold_line(state, line):
+                    if not state["giveup"]:
+                        state["size"] = offset
+                    return False
+                offset = end
+                last = state["segs"][-1][0] if state["segs"] else 0
+                if offset - last >= _RECENT_INDEX_SEGMENT:
+                    state["segs"].append(
+                        [offset, state["rows"]]
+                        + [state["row_counts"].get(r, 0)
+                           for r in state["realms"]])
+    except OSError:
+        state["size"] = offset
+        return False
+    except Exception:
+        state["size"] = offset
+        return False
+    state["size"] = offset
+    state["key"] = _usage_log_key()
+    state["tail"] = _log_tail_signature(offset)
+    if state["tail"] is None:
+        return False                        # 签名读不回来：位置校验立不住
+    state["usable"] = True
+    return True
+
+
+def _recent_index_payload(state):
+    """索引的 JSON 形态：段用增量写（offset 差 + 各列计数差）。
+
+    增量写出来的数字都小（offset 差就是段宽，计数差是段内的记录数），4 万行
+    的日志整份不到 10KB；累计值在加载时一次加回去。不排序键：段数组是位置
+    敏感的，形状固定，无需靠键序表达什么。
+    """
+    segs = []
+    prev_off = 0
+    prev = [0] * (2 + len(state["realms"]))
+    for seg in state["segs"]:
+        row = [seg[0] - prev_off]
+        for i in range(1, len(seg)):
+            row.append(seg[i] - prev[i])
+        segs.append(row)
+        prev_off = seg[0]
+        prev = seg
+    return {
+        "schema": _RECENT_INDEX_SCHEMA,
+        "seg": _RECENT_INDEX_SEGMENT,
+        "key": list(state["key"] or (0, 0, 0)),
+        "tail": state["tail"].hex(),
+        "realm_map": state["realm_map"],
+        "legacy": bool(state["legacy"]),
+        "realms": list(state["realms"]),
+        "totals": {"lines": state["lines"], "rows": state["rows"],
+                   "counts": dict(state["counts"]),
+                   "row_counts": dict(state["row_counts"])},
+        "segs": segs,
+    }
+
+
+def _recent_index_write(state):
+    """原子写索引（同目录 .tmp + os.replace，同 checkpoint / estimate-daily）。"""
+    os.makedirs(USAGE_DIR, exist_ok=True)
+    tmp = RECENT_INDEX_FILE + ".tmp"
+    text = json.dumps(_recent_index_payload(state), ensure_ascii=False,
+                      separators=(",", ":"))
+    try:
+        with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text)
+        os.replace(tmp, RECENT_INDEX_FILE)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _recent_index_parse(data):
+    """磁盘上的索引 → 内存状态；任何一处不合形状都返回 None（当作没有索引）。"""
+    if not isinstance(data, dict) or data.get("schema") != _RECENT_INDEX_SCHEMA:
+        return None
+    if data.get("seg") != _RECENT_INDEX_SEGMENT:
+        return None
+    realms = data.get("realms")
+    if not isinstance(realms, list) or len(realms) > _RECENT_INDEX_REALM_CAP:
+        return None
+    for name in realms:
+        if _recent_index_realm_name(name) is None:
+            return None
+    if len(set(realms)) != len(realms):
+        return None
+    totals = data.get("totals")
+    if not isinstance(totals, dict):
+        return None
+    lines = totals.get("lines")
+    rows = totals.get("rows")
+    counts = totals.get("counts")
+    row_counts = totals.get("row_counts")
+    if (not _usage_cache_int(lines) or lines < 0
+            or not _usage_cache_int(rows) or rows < 0):
+        return None
+    if not _usage_cache_counts_ok(counts) or not _usage_cache_counts_ok(row_counts):
+        return None
+    key = data.get("key")
+    if (not isinstance(key, list) or len(key) != 3
+            or not all(_usage_cache_int(v) and v >= 0 for v in key)):
+        return None
+    tail = data.get("tail")
+    if not isinstance(tail, str):
+        return None
+    try:
+        tail_bytes = bytes.fromhex(tail)
+    except ValueError:
+        return None
+    realm_map = data.get("realm_map")
+    if realm_map is not None:
+        if not isinstance(realm_map, list):
+            return None
+        for item in realm_map:
+            if (not isinstance(item, list) or len(item) != 2
+                    or not isinstance(item[0], str)
+                    or not isinstance(item[1], str)):
+                return None
+    if not isinstance(data.get("legacy"), bool):
+        # 老行归属要不要查池：这个标记决定 realm 数字信不信这份索引，写成
+        # 别的一律当坏文件（宁可重扫）。
+        return None
+    segs_raw = data.get("segs")
+    if not isinstance(segs_raw, list):
+        return None
+    width = 2 + len(realms)
+    segs = []
+    off = 0
+    prev = [0] * width
+    for raw in segs_raw:
+        if (not isinstance(raw, list) or len(raw) != width
+                or not all(_usage_cache_int(v) and v >= 0 for v in raw)):
+            return None
+        off += raw[0]
+        cur = [off]
+        for i in range(1, width):
+            cur.append(prev[i] + raw[i])
+        segs.append(cur)
+        prev = cur
+    state = _recent_index_blank()
+    state.update({
+        "key": tuple(key), "size": key[0], "tail": tail_bytes,
+        "realm_map": realm_map, "legacy": data.get("legacy") is True,
+        "realms": list(realms), "counts": dict(counts),
+        "row_counts": dict(row_counts), "lines": lines, "rows": rows,
+        "segs": segs,
+    })
+    return state
+
+
+def _recent_index_adopt(state, stamp):
+    """文件戳变了：把磁盘那份读进来。
+
+    只接受「比内存这份更新」（同一份日志上更长的索引，或内存这份已经不成立）
+    的文件——内存里那份是同一份日志的续读，回退到更短的磁盘版本等于白扫。
+    读不出来或校验不过就当没有索引：下一趟从零重建（坏文件不报错）。
+    """
+    data = None
+    if stamp[1] is not None:
+        try:
+            with open(RECENT_INDEX_FILE, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError, UnicodeDecodeError):
+            data = None
+    loaded = _recent_index_parse(data) if data is not None else None
+    if loaded is not None:
+        log_key = _usage_log_key()
+        if (_log_offset_holds(loaded["key"], log_key, loaded["size"])
+                and _log_tail_signature(loaded["size"]) == loaded["tail"]):
+            if not state["usable"] or loaded["size"] > state["size"]:
+                state.update(loaded)
+                state.update({"usable": True, "giveup": False,
+                              "giveup_key": None, "stamp": stamp,
+                              "wrote_size": loaded["size"],
+                              "wrote_at": time.time()})
+                return
+    state["stamp"] = stamp
+    if not state["usable"]:
+        _recent_index_restart(
+            state, _recent_index_realm_map_json(_account_realm_map()))
+
+
+def _recent_index_maybe_write(state):
+    """按节流阈值把索引落盘（默认 256KB / 900s）。
+
+    第一次建起来立即写——那正是「重启后免重扫」的那一份；之后只在推进满
+    256KB 或距上次尝试满 900s 时写（空闲不重写）。记「尝试」而非成功：只读
+    文件系统上失败会一直成立，不退避的话每次刷新都去试写一遍。归属复现不了
+    的索引不写：写下去别的进程也不敢用。
+    """
+    now = time.time()
+    size = state["size"]
+    if size <= state["wrote_size"]:
+        return
+    if (size - state["wrote_size"] < _recent_index_min_bytes()
+            and (now - state["wrote_at"]) < _recent_index_min_seconds()):
+        return
+    if not _recent_index_realm_ok(state):
+        return
+    state["wrote_at"] = now
+    state["wrote_size"] = size
+    try:
+        _recent_index_write(state)
+    except Exception as exc:
+        log("recent index write failed: %s" % exc)
+        return
+    state["stamp"] = _recent_index_stamp()
+
+
+def _recent_index_snapshot(state):
+    """给调用方的只读拷贝（锁外读页时状态可能被别的线程推进）。"""
+    return {
+        "size": state["size"],
+        "realms": list(state["realms"]),
+        "counts": dict(state["counts"]),
+        "row_counts": dict(state["row_counts"]),
+        "lines": state["lines"],
+        "rows": state["rows"],
+        "segs": [list(seg) for seg in state["segs"]],
+    }
+
+
+def _recent_index_resume_ok(state, log_key):
+    """位置校验：索引覆盖的字节还是这份日志的前缀。
+
+    与聚合折叠同款判据（_log_offset_holds + _log_tail_signature）：size/inode
+    挡住截断与换文件，size 前的 64B 签名挡住同尺寸重写。
+    """
+    return (_log_offset_holds(state["key"], log_key, state["size"])
+            and _log_tail_signature(state["size"]) == state["tail"])
+
+
+def _recent_index_ready(realm_filtered=False):
+    """扩到文件尾的索引快照；None 表示这次查询走老路（count + 反向读）。
+
+    顺序固定：先看文件戳（外部改动）→ 位置校验（截断/替换/同尺寸重写）→
+    归属口径（realm_map 变了整份重折）→ 续读到尾 → realm 查询再验一次归属。
+    """
+    if not _recent_index_enabled():
+        return None
+    with _recent_index_lock:
+        state = _recent_index_state
+        stamp = _recent_index_stamp()
+        if state["stamp"] != stamp:
+            _recent_index_adopt(state, stamp)
+        log_key = _usage_log_key()
+        if state["giveup"]:
+            if state["giveup_key"] == log_key:
+                return None
+            state["giveup"] = False             # 日志被换掉了：再给一次机会
+        if state["size"] > 0:
+            if not _recent_index_resume_ok(state, log_key):
+                # 位置对不上（截断/换文件/同尺寸重写）：整份重折
+                _recent_index_restart(
+                    state, _recent_index_realm_map_json(_account_realm_map()))
+            elif state["legacy"]:
+                realm_map = _recent_index_realm_map_json(_account_realm_map())
+                if state["realm_map"] != realm_map:
+                    # 归属口径变了（uid→realm 改过）：整份重折
+                    # ——与聚合折叠同款政策。
+                    _recent_index_restart(state, realm_map)
+        if not state["usable"] and not state["segs"] and not state["lines"]:
+            # 从零开始：把这次的归属口径记下来（后面续读都按它校验）
+            state["realm_map"] = _recent_index_realm_map_json(
+                _account_realm_map())
+        # 每次都续读到文件尾：日志只会追加，续读的代价就是新字节（没有新
+        # 字节时只是一次 seek 到底的空读）。
+        if not _recent_index_extend(state):
+            return None
+        if realm_filtered and not _recent_index_realm_ok(state):
+            return None
+        _recent_index_maybe_write(state)
+        return _recent_index_snapshot(state)
+
+
+def _recent_index_total(snap, realm):
+    """页数标签：口径与 count_usage_rows 完全一致（总数含坏 JSON 的非空行）。"""
+    if not realm:
+        return snap["lines"]
+    return snap["counts"].get(realm, 0)
+
+
+def _recent_index_page(snap, realm, page, limit):
+    """第 page 页的记录（新的在前）；None 表示索引答不了，调用方走老路。
+
+    老实现的页 = 从尾部往回数第 (page-1)*limit+1 .. page*limit 条记录，切片
+    两端都夹在「真的存在这么多条」上（页数标签含坏行、记录数不含，最后几页
+    因此可能短、甚至为空）。这里把同一件事换算成从头数的序号：第 k 条匹配
+    记录在两套里是同一行，于是页的字节区间就是 [第 K_lo 条起点, 第 K_hi 条
+    终点]，从 K_lo 所在段的起点顺序读过去即可。
+    """
+    if realm:
+        if realm not in snap["realms"]:
+            return []                        # 一条也不匹配：老路也是空页
+        col = 2 + snap["realms"].index(realm)
+        total_rows = snap["row_counts"].get(realm, 0)
+    else:
+        col = 1
+        total_rows = snap["rows"]
+    target = page * limit
+    k_hi = total_rows - (page - 1) * limit
+    if k_hi < 1:
+        return []                            # 页落在记录总数之外：老路是空切片
+    k_lo = max(1, total_rows - target + 1)
+    segs = snap["segs"]
+    # 二分：第一个「到该段起点为止的记录数 >= K_lo」的段；它前一段就是起点
+    lo, hi = 0, len(segs)
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if segs[mid][col] < k_lo:
+            lo = mid + 1
+        else:
+            hi = mid
+    start = segs[lo - 1][0] if lo > 0 else 0
+    have = segs[lo - 1][col] if lo > 0 else 0
+    # 段起点之前的记录数是 have，段里第一条就是第 have+1 条：跳过
+    # k_lo-have-1 条，下一条正好是第 k_lo 条（K_lo > have 由二分保证）。
+    rows = _recent_index_read(start, realm, k_lo - have - 1, k_hi - k_lo + 1)
+    if rows is None:
+        return None
+    rows.reverse()
+    return rows
+
+
+def _recent_index_read(start, realm, skip, take):
+    """从 start 顺序读到第 take 条匹配记录；对不上就返回 None（走老路）。
+
+    读取量 = 一段（64KB）+ 页本身的字节，与页深无关——这正是老实现最贵的
+    地方（第 1 页也要读满一个 256KB 块，realm 过滤的页要读回整个文件）。
+    读到的行与老实现逐字一致：同一套 strip/解码（"replace"）与 json.loads，
+    realm 过滤走同一个 row_matches_realm。
+    """
+    rows = []
+    seen = 0
+    try:
+        with open(USAGE_LOG, "rb") as fh:
+            fh.seek(start)
+            buf = b""
+            while len(rows) < take:
+                # 64KB 一读：正好一段的量级，页读完就停手（读取量 = 一段 +
+                # 页本身的字节，与页深无关）。
+                chunk = fh.read(64 * 1024)
+                if not chunk:
+                    break
+                buf += chunk
+                parts = buf.split(b"\n")
+                buf = parts.pop()
+                for raw in parts:
+                    st = raw.strip()
+                    if not st:
+                        continue
+                    try:
+                        item = json.loads(st.decode("utf-8", "replace"))
+                    except Exception:
+                        continue
+                    if not isinstance(item, dict):
+                        return None     # 索引覆盖的字节里不该有这种行
+                    if realm and not row_matches_realm(item, realm):
+                        continue
+                    if seen < skip:
+                        seen += 1
+                        continue
+                    rows.append(item)
+                    if len(rows) >= take:
+                        break
+    except Exception as exc:
+        log("recent index read failed: %s" % exc)
+        return None
+    if len(rows) < take:
+        return None
+    return rows
+
+
+def _recent_backward_page(realm, page, limit):
+    """老路：从尾部按 256KB 块往回读，凑够 page*limit 条再切片。
+
+    页深越大读得越多（realm 过滤命中率低时要读回整个文件），所以索引可用时
+    不走这里；索引答不了（半行、坏字节、池没就绪……）时它是唯一的正确答案，
+    逐字保留原实现的行为。
+    """
     target_count = page * limit
     matching = []
     chunk = 256 * 1024
@@ -3577,7 +5581,42 @@ def recent_usage(limit=100, realm=None, page=1):
         log("recent_usage read failed: %s" % exc)
     start_idx = (page - 1) * limit
     end_idx = start_idx + limit
-    page_rows = matching[start_idx:end_idx]
+    return matching[start_idx:end_idx]
+
+
+def recent_usage(limit=100, realm=None, page=1):
+    """Paginated rows from the tail of the log (page 1 is latest).
+
+    Reading backward in chunks keeps this in the millisecond range while
+    accurately fetching any requested page without missing rows across realms.
+
+    索引可用时页从索引直接定位（见上面那一节）：页数标签与页内容都来自同一次
+    扫描，读取量是页大小量级；索引答不了就整段退回 _recent_backward_page()，
+    两条路的输出逐字相同。
+    """
+    try:
+        limit = max(1, int(limit))
+    except Exception:
+        limit = 100
+    try:
+        page = max(1, int(page))
+    except Exception:
+        page = 1
+    realm = realm_scope(realm)
+    index = _recent_index_ready(realm_filtered=bool(realm))
+    page_rows = None
+    if index is not None:
+        total = _recent_index_total(index, realm)
+        total_pages = max(1, (total + limit - 1) // limit) if total > 0 else 1
+        page = min(page, total_pages)
+        page_rows = _recent_index_page(index, realm, page, limit)
+        if page_rows is None:
+            index = None
+    if index is None:
+        total = count_usage_rows(realm)
+        total_pages = max(1, (total + limit - 1) // limit) if total > 0 else 1
+        page = min(page, total_pages)
+        page_rows = _recent_backward_page(realm, page, limit)
     # Equivalent-token cost per row at OpenRouter list prices, computed here
     # so every consumer of /usage/recent gets the same number. Each row is
     # priced against the version that was in force when it happened, and says
@@ -4254,7 +6293,8 @@ def _bump_analytics_models(tgt, m_id, vals, is_err, cost_cny):
     tm["cost_cny"] += cost_cny
 
 
-def _fold_usage_analytics(row, realm, maps, half, pricing_on=None, also=None):
+def _fold_usage_analytics(row, realm, maps, half, pricing_on=None, also=None,
+                          pricing=None, priced=None):
     """Fold one parsed row into one half of the analytics payload.
 
     `maps` holds the four maps that half folds into and `half` names the stat
@@ -4266,9 +6306,16 @@ def _fold_usage_analytics(row, realm, maps, half, pricing_on=None, also=None):
     served by many upstream accounts, and one account can serve many keys, so
     the two tables are views of the same spend, not a decomposition of it.
 
-    `also` 是同一行还要折进的第二份 (maps, half)（按日分桶的窗口半）。过滤、
-    算价与字段提取只做一次，两份各自累加：折叠本来就要求两侧各记一笔，而
-    cost_for_row 与 realm 判定是每行最贵的那部分，只该付一次。
+    `also` 是同一行还要折进的那几份 (maps, half) 的序列（按日分桶与按小时
+    分桶的窗口半）。过滤、算价与字段提取只做一次，各份各自累加：折叠本来
+    就要求每侧各记一笔，而 cost_for_row 与 realm 判定是每行最贵的那部分，
+    只该付一次。
+
+    `pricing` 是本次扫描开头取到的 _pricing_inputs() 元组（见
+    _fold_usage_snapshot 的同名参数）。
+
+    `priced` 是本次扫描要填的「用到的价」记录（见「用到的价」状态指纹一节），
+    只有推进状态的那条折叠传它；窗口半/冷扫描传 None。
     """
     if realm and not row_matches_realm(row, realm):
         return
@@ -4280,7 +6327,9 @@ def _fold_usage_analytics(row, realm, maps, half, pricing_on=None, also=None):
     if outcome == "client_aborted":
         return
     is_err = outcome != "completed"
-    cost = wb_pricing.cost_for_row(row, details=False, enabled=pricing_on)
+    cost = _row_cost(row, pricing, pricing_on)
+    # 折进去的每一行都把「用到的价」记进状态指纹（中止行在上面整行跳过）。
+    _priced_note(priced, row, cost, pricing)
     cost_cny = cost["cny"] if cost["known"] else 0.0
     vals = _analytics_row_values(row)
     acct_uid = row.get("account") or "(unattributed)"
@@ -4294,7 +6343,9 @@ def _fold_usage_analytics(row, realm, maps, half, pricing_on=None, also=None):
         k_id = KEY_BUCKET_BEFORE
     k_realm = row_realm(row) or ""
     at = row.get("at") or 0
-    targets = ((maps, half),) if also is None else ((maps, half), also)
+    targets = [(maps, half)]
+    if also is not None:
+        targets.extend(also)
     for tgt, (stat_key, models_key) in targets:
         _feed_analytics(tgt["summary"], vals, is_err, cost_cny)
 
@@ -4366,18 +6417,21 @@ def _analytics_all_time(realm, pricing_on=None):
             log("compute_usage_analytics failed: %s" % error)
             maps = state["maps"]
             state.update({"maps": _new_analytics_maps(), "offset": 0, "tail": b"",
-                          "days": {}, "days_floor": None})
+                          "days": {}, "days_floor": None, "max_at": 0})
     if error is None:
         _usage_cache_maybe_save("analytics", offset)
     return maps, offset
 
 
-def _analytics_state_ready(realm, pricing_on=None):
-    """把 `realm` 的 all-time 折叠推进到文件尾；返回 (state, offset, error)。
+def _analytics_state_advance(realm, pricing_on=None):
+    """（不折叠）取/建状态、采纳 checkpoint、判废归零、记指纹。
 
-    调用方必须已持有 _analytics_state_lock。日桶与 all-time 折叠共用这一次
-    扫描（见 _fold_usage_analytics 的 also），窗口半与 all-time 半因此描述
-    同一段字节。
+    调用方必须已持有 _analytics_state_lock。返回本次扫描取到的价表代次
+    （与记进状态指纹的是同一份）。状态是否「冷」（这次要付一次全量重折）看
+    state["offset"]：> 0 表示有可续折的数据，0 表示折叠要从文件头开始——
+    状态刚建、刚被价表 / realm / 日志判废、或 checkpoint 采纳失败。与
+    snapshot 侧同一套分工：采纳/判废只有这一段定义，_analytics_state_ready
+    与窗口路径的冷热判定（_analytics_state_cold）共用它，两边不会漂移。
     """
     state = _analytics_state.get(realm)
     if state is None:
@@ -4385,74 +6439,256 @@ def _analytics_state_ready(realm, pricing_on=None):
                                            "offset": 0, "key": None,
                                            "pricing": None, "realm": None,
                                            "tail": b"", "days": {},
-                                           "days_floor": None}
+                                           "days_floor": None, "max_at": 0,
+                                           "hours_keep": True,
+                                           "hits": [], "hits_overflow": False}
     pricing = _pricing_inputs(pricing_on)
     realm_inputs = _realm_inputs()
     log_key = _usage_log_key()
+    fresh = _pricing_record_new() if (pricing is not None
+                                      and pricing[0]) else None
     if state["key"] is None:
         # 全新状态（进程刚起来）：先问 checkpoint，问不到才从零折起。
         if not _usage_cache_adopt_analytics(realm, state, log_key, pricing, realm_inputs):
             state.update({"maps": _new_analytics_maps(), "offset": 0, "tail": b"",
-                          "days": {}, "days_floor": None})
-    elif (not _pricing_unchanged(state["pricing"], pricing)
+                          "days": {}, "days_floor": None, "max_at": 0,
+                          "hits": [], "hits_overflow": False, "pricing": fresh})
+    elif (not _pricing_used_unchanged(state["pricing"], pricing)
             or state["realm"] != realm_inputs
             or not _log_resume_ok(state, log_key)):
         state.update({"maps": _new_analytics_maps(), "offset": 0, "tail": b"",
-                      "days": {}, "days_floor": None})
-    state.update({"pricing": pricing, "realm": realm_inputs, "key": log_key})
+                      "days": {}, "days_floor": None, "max_at": 0,
+                      "hits": [], "hits_overflow": False, "pricing": fresh})
+    state.update({"realm": realm_inputs, "key": log_key})
+    return pricing
+
+
+def _analytics_state_cold(realm, pricing_on=None):
+    """窗口请求现在会不会付一次全量重折？True = 会（窗口改走冷扫描）。
+
+    调用方必须已持有 _analytics_state_lock。语义与 _usage_snap_state_cold
+    逐条相同：判定不折叠、不写结果，窗口请求不会把状态冻在冷态（offset 仍是
+    0，下一个 all-time 半的请求照样从零折到文件尾），重折之后两边字节一致。
+    """
+    _analytics_state_advance(realm, pricing_on)
+    return _analytics_state[realm]["offset"] <= 0
+
+
+def _analytics_state_ready(realm, pricing_on=None):
+    """把 `realm` 的 all-time 折叠推进到文件尾；返回 (state, offset, error)。
+
+    调用方必须已持有 _analytics_state_lock。日桶、小时子表与 all-time 折叠
+    共用这一次扫描（见 _fold_usage_analytics 的 also），窗口半与 all-time 半
+    因此描述同一段字节。
+
+    `hours_keep` 标记这份状态要维护小时子表（剪枝线比日桶短，见
+    _prune_day_buckets）；`max_at` 是折过的最大 at（含 realm 不匹配的行），
+    小时窗口靠它判断窗口上界有没有切掉桶里的行。
+
+    状态指纹是「折叠行真正用到的价」记录（T15，见「用到的价」状态指纹一节）：
+    折叠时逐行更新（state["pricing"]），扫描成功后刷时间线投影摘要
+    （_pricing_record_close），判废走 _pricing_used_unchanged。
+
+    采纳 checkpoint 与判废归零在 _analytics_state_advance 里（窗口路径的
+    冷热判定也用那一段），这里只管折到文件尾。
+    """
+    pricing = _analytics_state_advance(realm, pricing_on)
+    state = _analytics_state[realm]
+    priced = state["pricing"]
 
     def fold(row):
-        # 一行折两处：all-time 半 + 它所属那天的窗口半（过滤与算价只做一次）。
+        # 一行折三处：all-time 半 + 它所属那天的窗口半 + 那天里它所属那小时
+        # 的窗口半（过滤与算价只做一次）。
+        at = row.get("at") or 0
+        if at > state["max_at"]:
+            state["max_at"] = at
         day = _usage_day_bucket(state, row, realm, _day_analytics_bucket)
+        hour = _analytics_hour_bucket(day, at)
+        if day is None:
+            also = None
+        elif hour is None:
+            also = ((day, _ANALYTICS_WINDOW),)
+        else:
+            also = ((day, _ANALYTICS_WINDOW), (hour, _ANALYTICS_WINDOW))
         _fold_usage_analytics(
-            row, realm, state["maps"], _ANALYTICS_ALL, pricing_on,
-            also=None if day is None else (day, _ANALYTICS_WINDOW))
+            row, realm, state["maps"], _ANALYTICS_ALL, pricing_on, also=also,
+            pricing=pricing, priced=priced)
 
     offset, error = _scan_usage_from(state["offset"], fold)
     if error is None:
         state["offset"] = offset
         state["tail"] = _log_tail_signature(offset)
+        _pricing_record_close(priced, pricing)
     return state, offset, error
 
 
-def _analytics_window_from_days(realm, day_key, pricing_on):
+def _analytics_window_from_days(realm, day_key, until, pricing_on):
     """窗口半 maps = 窗口内的日桶之和；日桶不可用时返回 None。
 
     先确保 all-time 折叠推进到文件尾：日桶与它同一次扫描推进，窗口半与
     all-time 半因此描述同一段字节（旧实现用 stop_at 保证的同一件事）。
+
+    until 给出时（闭窗口）它必须是本地午夜（调用方已按格点判过，这里再
+    校验一次），窗口只取 at < until 的那批日桶：恰好落在 until 上的行归
+    until 那天那一桶（桶按 at 严格切分，见 _usage_hour_bucket），桶切不出
+    那一刻的行，所以那一刻有整秒行时整条路退回 None（见
+    _closed_window_edge_ok），调用方接着整段扫描，结果不变。
+
+    状态冷（从没折过/刚被价表、realm、日志判废/采纳失败）时直接返回 None：
+    那条路要先付一次全量重折，窗口请求不背它——调用方退回按日分组的冷扫描
+    （同一批行、同一个求和口径，逐字节相同），重折留给 all-time 半与预热器
+    （见 _analytics_state_cold）。
     """
     with _analytics_state_lock:
+        if _analytics_state_cold(realm, pricing_on):
+            return None
         state, offset, error = _analytics_state_ready(realm, pricing_on)
         if error is not None:
             log("compute_usage_analytics failed: %s" % error)
             state.update({"maps": _new_analytics_maps(), "offset": 0, "tail": b"",
-                          "days": {}, "days_floor": None})
+                          "days": {}, "days_floor": None, "max_at": 0,
+                          "hits": [], "hits_overflow": False})
             return None
         if not _days_cover(state, day_key):
             return None
+        until_key = None
+        if until is not None:
+            until_key = _window_day_key_safe(until)
+            if until_key is None or not _closed_window_edge_ok(state, until):
+                return None
         maps = _new_analytics_maps()
         days = state["days"]
         for key in sorted(days):
-            if key >= day_key:
-                _add_analytics_window_maps(maps, days[key])
+            if key < day_key:
+                continue
+            if until_key is not None and key >= until_key:
+                break
+            _add_analytics_window_maps(maps, days[key])
+    _usage_cache_maybe_save("analytics", offset)
+    return maps
+
+
+# ---------------------------------------------------------------------------
+# analytics 的小时层：自定义区间窗口的就近取值
+#
+# 日桶只拆得开「起点是本地午夜 + until 开放」的窗口；面板的自定义区间起点是
+# 任意时刻，那条路径一直整段扫描（路由器上冷 49.4s）。而 analytics 的 token
+# 口径含失败行（见 _feed_analytics），与 snapshot/series 不同，借不了别人的
+# 层——所以这里在 analytics 自己的日桶里再挂一层小时子表（analytics 算价，
+# 小时桶跟着带成本字段），起点落在「本地午夜 + k*3600」格点上的窗口就是窗口
+# 内小时桶之和，O(小时数)。
+#
+# 与日桶同一条纪律：对齐窗口的求和统一用「按小时分组」的口径，冷扫描
+# （_scan_usage_analytics_window_hours）、小时桶、加载 checkpoint 三条路径
+# 给出的字节完全一致；非整小时的起点（面板按分钟选的时间）拆不开，仍然整段
+# 扫描，正确性优先。WB_USAGE_DAY_BUCKETS=0 一并关掉小时层。
+#
+# 保留比日桶短得多（WB_USAGE_HOUR_KEEP_HOURS，默认 48h）：小时桶只为近期的
+# 自定义窗口服务，每个桶的形状与日桶一样（summary + 每账号/每模型/每 key），
+# 跟着 32 天的日桶全留会让 checkpoint 膨胀十几倍。剪枝线以外的天由查询侧按
+# 「这一天还有没有 hours」自己表达（没有就退回扫描），所以不另存 floor。
+# ---------------------------------------------------------------------------
+
+
+def _analytics_window_from_hours(realm, since, until, pricing_on):
+    """窗口半 maps = 窗口内的小时桶之和；小时层不可用时返回 None。
+
+    成立条件（缺一不可，任何一条不成立就退回扫描——正确性优先）：
+      * 窗口起点落在本地午夜起算的小时格点上（调用方已判过，这里再按桶校验）；
+      * until 开放，或 until 不低于折过的最大 at（否则窗口上界会切掉桶里的行），
+        或 until 落在同一套小时格点上且直到那一刻没有整秒行（见
+        _closed_window_edge_ok）——这时窗口只取 at < until 的那批桶，恰好
+        落在 until 上的行由边沿账挡回整段扫描；
+      * days_floor 覆盖窗口起点所在的天（更早的天没有桶）；
+      * 窗口起点所在的天及其后每一天都有 hours 子表（被剪枝线剪掉、或本地
+        午夜落在不存在的小时里而摘掉的那天，都会让窗口整体退回扫描）。
+
+    状态冷（从没折过/刚被价表、realm、日志判废/采纳失败）时直接返回 None：
+    那条路要先付一次全量重折，窗口请求不背它——调用方退回按小时分组的冷
+    扫描（同一批行、同一个求和口径，逐字节相同），重折留给 all-time 半与
+    预热器（见 _analytics_state_cold）。
+    """
+    with _analytics_state_lock:
+        if _analytics_state_cold(realm, pricing_on):
+            return None
+        state, offset, error = _analytics_state_ready(realm, pricing_on)
+        if error is not None:
+            log("compute_usage_analytics failed: %s" % error)
+            state.update({"maps": _new_analytics_maps(), "offset": 0, "tail": b"",
+                          "days": {}, "days_floor": None, "max_at": 0,
+                          "hits": [], "hits_overflow": False})
+            return None
+        cut_at = None
+        if until is not None:
+            if until < state["max_at"]:
+                # 闭窗口切进桶里：until 必须落在同一套小时格点上、且直到
+                # 那一刻没有整秒行，桶才切得出这个窗口。
+                if (_window_hour_key_safe(until) is None
+                        or not _closed_window_edge_ok(state, until)):
+                    return None
+                cut_at = int(until)
+        day_key = _local_day_key(since)
+        if not _days_cover(state, day_key):
+            return None
+        lo_i = int(since)
+        maps = _new_analytics_maps()
+        for key in sorted(state["days"]):
+            if key < day_key:
+                continue
+            if cut_at is not None and _day_key_start(key) > cut_at:
+                break
+            bucket = state["days"][key]
+            hours = bucket.get("hours")
+            if hours is None:
+                return None
+            day_at = int(bucket["at"])
+            for hour in sorted(hours, key=int):
+                sub = hours[hour]
+                if int(sub["at"]) != day_at + int(hour) * 3600:
+                    return None
+                # 格点校验对起点所在那天的每个桶都做（含 at < since 的桶）：
+                # 时区偏移不是整小时的夏令时（极少数时区）会让格点整体错开
+                # 半小时，错开的桶可能横跨起点、把 at >= since 的行关在里面
+                # ——跳过它就会漏行，所以宁可整个窗口退回扫描。
+                if (int(sub["at"]) - lo_i) % 3600:
+                    return None
+                if int(sub["at"]) < lo_i:
+                    continue
+                if cut_at is not None and int(sub["at"]) >= cut_at:
+                    # 闭窗口：until 那一刻归后一桶（桶按 at 严格切分），
+                    # 只取 at < until 的桶；那一刻有整秒行时上面已经退回。
+                    break
+                _add_analytics_window_maps(maps, sub)
     _usage_cache_maybe_save("analytics", offset)
     return maps
 
 
 def _analytics_window(realm, since, until, stop_at, pricing_on):
-    """窗口半 analytics：对齐窗口由日桶相加，其余保持整段扫描。
+    """窗口半 analytics：对齐窗口由日桶/小时桶相加，其余保持整段扫描。
 
-    与 _usage_snapshot_window 同一条规矩：只有「until 开放 + 起点是本地
-    午夜」的窗口拆得成整天的并集。
+    与 _usage_snapshot_window 同一条规矩，外加一层小时桶：起点是本地午夜、
+    终点开放或也是本地午夜的窗口拆得成整天的并集；起点落在整小时的其它窗口
+    （自定义区间）拆得成整小时的并集，由 analytics 自己的小时层回答（见
+    「小时层」一节）；其余一律保持整段扫描。闭窗口的右边界按「at < until
+    的桶」切，那一刻有整秒行时退回扫描（见 _closed_window_edge_ok）。
     """
-    day_key = _window_day_key(since) if until is None else None
-    if day_key is not None and _usage_day_buckets_enabled():
-        maps = _analytics_window_from_days(realm, day_key, pricing_on)
+    day_key = _window_day_key_safe(since)
+    until_day = None if until is None else _window_day_key_safe(until)
+    if (day_key is not None and _usage_day_buckets_enabled()
+            and (until is None or until_day is not None)):
+        maps = _analytics_window_from_days(realm, day_key, until, pricing_on)
         if maps is not None:
             return maps
         # 日桶没盖住窗口起点：冷路径现折一份按日分组的窗口半，口径一致。
-        return _scan_usage_analytics_window_days(realm, since, stop_at,
+        return _scan_usage_analytics_window_days(realm, since, until, stop_at,
                                                  pricing_on)
+    if _window_hour_aligned(since) and _usage_day_buckets_enabled():
+        maps = _analytics_window_from_hours(realm, since, until, pricing_on)
+        if maps is not None:
+            return maps
+        # 小时层没盖住：冷路径现折一份按小时分组的窗口半，口径与小时层一致。
+        return _scan_usage_analytics_window_hours(realm, since, until, stop_at,
+                                                  pricing_on)
     return _scan_usage_analytics_window(realm, since, until, stop_at=stop_at,
                                         pricing_on=pricing_on)
 
@@ -4463,7 +6699,11 @@ def _scan_usage_analytics_window(realm, since, until, stop_at=None, pricing_on=N
     The all-time half is not rebuilt here - it comes from the incremental fold
     - and the read stops where that fold stopped, so both halves of the
     payload describe the same bytes even when a row lands mid-rebuild.
+
+    价表在这里取一次（与 all-time 折叠同一条口径），传给折叠当行级记忆的
+    代次：这次窗口扫描里的行可以和 all-time 半共享定价结果。
     """
+    pricing = _pricing_inputs(pricing_on)
     maps = _new_analytics_maps()
 
     def fold(row):
@@ -4474,11 +6714,13 @@ def _scan_usage_analytics_window(realm, since, until, stop_at=None, pricing_on=N
             return
         if until is not None and at > until:
             return
-        _fold_usage_analytics(row, realm, maps, _ANALYTICS_WINDOW, pricing_on)
+        _fold_usage_analytics(row, realm, maps, _ANALYTICS_WINDOW, pricing_on,
+                              pricing=pricing)
 
     _, error = _scan_usage_from(
         0, fold, stop_at=stop_at,
-        skip=lambda line: _line_outside_window(line, since, until))
+        skip=lambda line: _line_outside_window(line, since, until),
+        skip_raw=lambda raw: _line_outside_window_bytes(raw, since, until))
     if error is not None:
         log("compute_usage_analytics failed: %s" % error)
     return maps
@@ -4616,12 +6858,27 @@ def _add_analytics_stat(dst, src):
 # 的天。剪枝会抬高 days_floor，任何够不到的天都因此退回整段扫描——宁可多
 # 扫一次，不能少算一天。
 #
+# analytics 的日桶还挂一层小时子表（保留线更短，只给自定义区间用，见
+# 「analytics 的小时层」一节）：那不是日桶的一部分，日桶求和原样忽略它。
+#
 # 浮点求和的口径：窗口 = 日桶逐日相加，与旧实现「整段扫描逐行累加」的区别
 # 只是浮点的结合顺序（credit / cost_cny / speed_sum 可能差最后一两个 ulp，
 # 整数字段逐位相同）。逐行顺序无法从日聚合还原，这是日桶推导的固有代价；
 # 本文件里所有对齐窗口的路径统一用「按日分组」的口径（冷扫描、日桶、加载
 # checkpoint 三条路径给出的字节完全一致），把「像没有缓存一样正确」保成
-# 路径之间的一致性。WB_USAGE_DAY_BUCKETS=0 可整体退回旧的逐行口径。
+# 路径之间的一致性；analytics 的小时窗口同理，只是分组的粒度换成小时。
+# WB_USAGE_DAY_BUCKETS=0 可整体退回旧的逐行口径。
+#
+# 小时层（T9）：日桶只服务「起点是本地午夜」的窗口，而面板的自定义区间
+# （range=custom）起点是任意时刻——最常见的形态就是整点（datetime-local
+# 输入框给的是分钟粒度，操作者选整点的概率远高于选 37 分）。于是每个日桶
+# 里再挂一张小时子表（_usage_hour_bucket），起点落在本地整点上的窗口由
+# 「整小时桶之和」回答：token/requests/credit 与成本字段（cost_cny /
+# cost_missing / by_model_acct）全部来自同一份桶，口径与整段扫描一致，不
+# 需要像「借时间序列的小时桶」那样丢掉成本列（series 不算价，D3）。
+# 小时层比日桶短命（_usage_hour_keep_days），覆盖不到就退回按小时分组的
+# 冷路径——两条路径的字节逐字节相同，语义与改动前一致（只是浮点结合顺序
+# 按小时而不是按行）。
 # ---------------------------------------------------------------------------
 
 # 日桶保留天数：月窗口最多回溯 30 天（当月 1 号），32 天留两天余量。更早的
@@ -4629,6 +6886,15 @@ def _add_analytics_stat(dst, src):
 # 要重写整份文件。调小它（WB_USAGE_DAY_KEEP_DAYS）会让更宽的窗口退回整段
 # 扫描（结果仍然正确，只是慢）：对 flash 写入敏感的部署可以调到 8，只保周。
 _USAGE_DAY_KEEP_DAYS = 32
+
+# 小时桶保留天数：小时层只服务面板的自定义整点窗口（操作者回头看最近一两
+# 天的某个整点），保留 2 天 = 最少 48 小时、最多 72 小时（剪枝按天走，见
+# _prune_hour_buckets）。再往前的小时桶没有任何现实窗口够得到，而每个小时
+# 桶都是完整的一份窗口半快照（含 by_model_acct 三层结构，实测约 2KB/桶）
+# ——路由器上 checkpoint 每多一份都要跟着重写，flash 写入慢且费寿命。覆盖
+# 不到的窗口退回冷路径，结果正确，只是慢。WB_USAGE_HOUR_KEEP_DAYS 可调；
+# 对 flash 特别敏感的部署可以调到 1（只保今天，24~48 小时）。
+_USAGE_HOUR_KEEP_DAYS = 2
 
 # 日桶求和要跳过的字段：started 是每份快照各自的创建时刻，不是累计量。
 # 与 _USAGE_CACHE_SNAPSHOT_NUMBERS 同源（同一份构造函数的数字字段），只是
@@ -4650,14 +6916,51 @@ def _usage_day_keep_days():
         return _USAGE_DAY_KEEP_DAYS
 
 
+def _usage_hour_keep_days():
+    """小时桶保留天数，默认 2；WB_USAGE_HOUR_KEEP_DAYS 可调。
+
+    同 _usage_day_keep_days：每次调用都读环境变量。取值再小也保留一天
+    （max(1, ...)）：小时层至少要能服务「今天的整点窗口」，否则等于没建。
+    """
+    try:
+        return max(1, int(os.environ.get("WB_USAGE_HOUR_KEEP_DAYS",
+                                         _USAGE_HOUR_KEEP_DAYS)))
+    except (TypeError, ValueError):
+        return _USAGE_HOUR_KEEP_DAYS
+
+
 def _usage_day_buckets_enabled():
     """日桶总开关，默认开；WB_USAGE_DAY_BUCKETS=0 退回逐行扫描口径。
 
     与 WB_USAGE_CACHE 同样的用法：现场紧急关掉、测试在一个进程里来回切。
-    关掉时既不折日桶也不用它们，窗口路径与改动前逐字节一致。
+    关掉时既不折日桶也不用它们，窗口路径与改动前逐字节一致。小时层挂在
+    日桶上（每个日桶里的 hours 子表），所以这个开关一并管住小时层：关掉
+    时既不折小时桶，整点窗口也退回逐行口径。
     """
     return os.environ.get("WB_USAGE_DAY_BUCKETS", "1").strip().lower() not in (
         "0", "false", "no", "off")
+
+
+# analytics 小时子表的保留小时数：小时层只为近期的自定义窗口服务，而每个小时
+# 桶的形状与日桶一样重（summary + 每账号/每模型/每 key），跟着 32 天的日桶
+# 全留会让 checkpoint 膨胀十几倍。48 小时覆盖「从昨天某个整点起」这类最常用
+# 的手动窗口，剪枝又在每天新建日桶时跑一次，实际保留 48~72 小时。调大只是让
+# checkpoint 变大（层覆盖更宽），调小只是让更早的自定义窗口退回整段扫描
+# （结果仍然正确，只是慢）。
+_USAGE_HOUR_KEEP_HOURS = 48
+
+
+def _usage_hour_keep_hours():
+    """小时子表保留小时数，默认 48；WB_USAGE_HOUR_KEEP_HOURS 可调。
+
+    每次调用都读环境变量，理由与 WB_USAGE_DAY_KEEP_DAYS 相同（现场调、测试
+    里来回切）。
+    """
+    try:
+        return max(1, int(os.environ.get("WB_USAGE_HOUR_KEEP_HOURS",
+                                         _USAGE_HOUR_KEEP_HOURS)))
+    except (TypeError, ValueError):
+        return _USAGE_HOUR_KEEP_HOURS
 
 
 def _local_day_key(ts):
@@ -4666,8 +6969,32 @@ def _local_day_key(ts):
     用字符串而不是午夜 epoch 当日桶的键：窗口与日桶的比较就是一次字符串
     比较（ISO 日期天然有序），查询不必再算一遍本地午夜，也不会被夏令时的
     日长变化影响——同一套本地日历日规则在折叠与查询两侧都成立。
+
+    结果按 ts 记忆（见「行级结果记忆」）：一次冷启动里三个视图各扫一遍日志，
+    每一行都要问一次日键，第二、第三遍直接取。时区被 tzset() 换过时表整体
+    作废；不可哈希的 ts（坏行）不进表，照旧真算、照旧抛同样的异常。
     """
-    return time.strftime("%Y-%m-%d", time.localtime(ts))
+    memo = _row_day_memo
+    if _row_memo_tz is not time.tzname:
+        _row_memo_tz_changed()
+    try:
+        hit = memo.get(ts)
+    except TypeError:
+        return time.strftime("%Y-%m-%d", time.localtime(ts))
+    if hit is not None:
+        return hit
+    key = time.strftime("%Y-%m-%d", time.localtime(ts))
+    cap = _ROW_MEMO_MAX
+    if cap > 0:
+        if len(memo) >= cap:
+            # 满了：只收「不比表里最旧那条更旧」的 ts。扫描从头往尾走，表里
+            # 留住的因此总是最近的一批行，第二遍走到尾部照样命中。
+            oldest = next(iter(memo))
+            if _row_memo_at(ts) < _row_memo_at(oldest):
+                return key
+            memo.pop(oldest, None)
+        memo[ts] = key
+    return key
 
 
 def _day_key_start(key):
@@ -4690,18 +7017,164 @@ def _window_day_key(since):
     return _local_day_key(since)
 
 
-def _day_snapshot_bucket(key, day_start):
-    """一天一份的窗口半快照桶；形状与 _empty_stats() 一致。
+def _hour_window_key(since):
+    """窗口起点能由小时桶推导时返回 (日键, 小时序号)，否则 None。
+
+    只有「起点正好是本地整点」的窗口才拆得成整小时桶的并集：小时桶按
+    「离那天本地午夜多少个 3600 秒」切格点（见 _usage_hour_bucket），所以
+    起点必须同时满足两条——本地墙上时间落在整点（_local_hour_start 能原样
+    还原），并且离本地午夜的距离是 3600 的整数倍。夏令时把日边界挪动、
+    或时区按半小时偏移的情形，只要 since 不落在格点上就返回 None（退回
+    扫描，正确性优先）。
+
+    整点起点也可能是本地午夜（两者同时成立）：调用方先问日桶，所以这条
+    只在「不是午夜」时兜住自定义区间的整点窗口。
+    """
+    if since is None:
+        return None
+    if _local_hour_start(since) != since:
+        return None
+    day_key = _local_day_key(since)
+    day_at = _day_key_start(day_key)
+    k = int((since - day_at) // 3600)
+    if day_at + k * 3600 != since:
+        return None
+    return day_key, k
+
+
+def _window_hour_aligned(since):
+    """窗口起点是否落在「本地午夜 + k*3600」的小时格点上。
+
+    小时桶的格点是「离那天的本地午夜多少秒」（见 _analytics_hour_bucket），
+    所以起点减它所属那天的本地午夜必须是 3600 的整数倍。自定义区间的起点是
+    任意分钟时拆不开——那条路径保持整段扫描（正确性优先）；起点正好是本地
+    午夜时恒成立（0 是 3600 的整数倍），与 _window_day_key 相容。
+    """
+    if since is None:
+        return False
+    return (_local_midnight(since) - since) % 3600 == 0
+
+
+# 闭窗口边沿账的上限：只有「at 恰好落在整秒上」的行进账，真实日志里几乎为
+# 零（at 是 time.time() 的浮点秒，落在整秒上的概率约百万分之一）。手改过的
+# 日志可能有很多，超过上限就停记并留痕——闭窗口退回整段扫描，正确性优先。
+_CLOSED_WINDOW_HITS_MAX = 256
+
+
+def _closed_window_hit_record(state, at):
+    """行恰好落在整秒上时记一笔（闭窗口走桶求和的边沿账）。
+
+    桶按 at 严格切分（见 _usage_hour_bucket）：闭窗口 [since, until] 与
+    「at < until 的那批桶」只差「恰好落在 until 上的行」，所以直到那一刻
+    没有整秒行时，桶的和就是窗口的全部（见 _closed_window_edge_ok）。这份
+    账只收真正进了桶的那些行（realm/剪枝线与折叠同一套判定），记录点因此
+    在 _usage_day_bucket 的过滤之后。
+
+    at 不是有限数（手改日志的 Infinity/NaN）时整秒判定不成立就跳过——
+    `at // 1` 对这些值不抛异常，不把一次折叠打断在这里。
+    """
+    if at != at // 1:
+        return
+    hits = state["hits"]
+    if len(hits) >= _CLOSED_WINDOW_HITS_MAX:
+        state["hits_overflow"] = True
+        return
+    hits.append(int(at))
+
+
+def _closed_window_edge_ok(state, until):
+    """闭窗口的右边界能否由存量桶回答：直到 until 为止没有行落在整秒上。
+
+    直到那一刻没有整秒行时，「[since, until] 的行」与「at < until 的桶」是
+    同一批（桶按 at 严格切分，恰好落在 until 上的行归后一桶）；真有一行
+    恰好落在 until 上时桶切不出它，只能退回整段扫描。账记满（见
+    _closed_window_hit_record）同样退回。
+    """
+    if state["hits_overflow"]:
+        return False
+    return until not in state["hits"]
+
+
+def _window_day_key_safe(ts):
+    """_window_day_key 的取值安全版：取值离谱时返回 None。
+
+    手写的极大 since/until（例如 6e18）会让 _local_midnight 里的
+    time.localtime 抛 OSError——那只是「这个窗口服务不了」的一种，按退回
+    整段扫描处理，不该把端点打成 500（与 _series_window_day_key 同一个用意）。
+    """
+    try:
+        return _window_day_key(ts)
+    except (OSError, OverflowError, ValueError):
+        return None
+
+
+def _window_hour_key_safe(ts):
+    """_hour_window_key 的取值安全版：取值离谱时返回 None（同上）。"""
+    try:
+        return _hour_window_key(ts)
+    except (OSError, OverflowError, ValueError):
+        return None
+
+
+def _new_window_snapshot_bucket(at):
+    """一份带格点 at 的窗口半快照桶（日桶与小时桶共用这个形状）。
 
     started 不参与求和（见 _add_usage_snapshot），形状保留只是让校验与
-    all-time 半共用同一套 _usage_cache_snapshot_ok。
+    all-time 半共用同一套 _usage_cache_snapshot_ok。at 是这个桶的本地格点
+    （日的午夜 / 小时的整点）epoch：小时桶按它切 3600 的格点，求和侧按它
+    做格点校验——与时间序列的桶同一套做法（_new_series_bucket）。
     """
-    return _empty_stats()
+    bucket = _empty_stats()
+    bucket["at"] = at
+    return bucket
+
+
+def _day_snapshot_bucket(key, day_start):
+    """一天一份的窗口半快照桶；形状与 _empty_stats() 一致。"""
+    return _new_window_snapshot_bucket(day_start)
 
 
 def _day_analytics_bucket(key, day_start):
-    """一天一份的窗口形状 analytics maps。"""
-    return _new_analytics_maps()
+    """一天一份的窗口形状 analytics maps（带 at 与小时子表，见「小时层」一节）。
+
+    at 是那天的本地午夜：小时子表按「离本地午夜多少秒」切，行的归属因此
+    不依赖折叠时刻（迟写/补写的行落回它时间戳所属的那天那小时）。
+    """
+    bucket = _new_analytics_maps()
+    bucket["at"] = day_start
+    bucket["hours"] = {}
+    return bucket
+
+
+def _new_analytics_hour_bucket(at):
+    """一小时一份的窗口形状 analytics maps（带 at；见「小时层」一节）。"""
+    bucket = _new_analytics_maps()
+    bucket["at"] = at
+    return bucket
+
+
+def _analytics_hour_bucket(day, at):
+    """这一行该折进的小时桶（day 桶的 hours 子表）；不该折时返回 None。
+
+    小时键是「离那天的本地午夜多少秒」的整小时数（字符串，与 JSON 往返后的
+    形状一致，同时间序列的小时子表）。本地午夜落在不存在的小时里（夏令时在
+    午夜切换的极少数时区）时这一行放不进格点：把整天的 hours 摘掉，让覆盖
+    这一天的小时窗口整体退回扫描（日桶本身照常，不受影响）。
+    """
+    if day is None:
+        return None
+    hours = day.get("hours")
+    if hours is None:
+        return None
+    day_at = int(day["at"])
+    if at < day_at:
+        day.pop("hours", None)
+        return None
+    hour = str(int((at - day_at) // 3600))
+    sub = hours.get(hour)
+    if sub is None:
+        sub = hours[hour] = _new_analytics_hour_bucket(day_at + int(hour) * 3600)
+    return sub
 
 
 def _day_series_bucket(key, day_start):
@@ -4729,6 +7202,7 @@ def _usage_day_bucket(state, row, r, factory):
         # 剪枝线以下的天：那些桶已经被丢掉，而且任何可服务的窗口都从
         # days_floor 那天起，这一行不在其中——跳过不影响窗口。
         return None
+    _closed_window_hit_record(state, at)
     days = state["days"]
     bucket = days.get(key)
     if bucket is None:
@@ -4744,6 +7218,11 @@ def _prune_day_buckets(state, days, newest_key):
     往前 _usage_day_keep_days() 天），没剪过时第一次折到新的一天也会把它记
     下来——比这条线更早的窗口一律退回整段扫描（时钟大幅回拨、日志里有远古
     补写行这类情况），宁可多扫一次，不能少算一天。
+
+    analytics 状态还挂着一条更短的小时子表保留线（state["hours_keep"]）：
+    小时层只为近期的自定义窗口服务，只摘旧天的 "hours" 子表，日桶本身照常
+    留满保留天数。被摘掉的天由查询侧按「这一天还有没有 hours」自己表达
+    （见 _analytics_window_from_hours），所以这里不用另存一个 floor。
     """
     horizon = _local_day_key(_day_key_start(newest_key)
                              - _usage_day_keep_days() * 86400)
@@ -4752,6 +7231,20 @@ def _prune_day_buckets(state, days, newest_key):
     floor = state.get("days_floor")
     if floor is None or floor < horizon:
         state["days_floor"] = horizon
+    # 带小时层的状态（snapshot，见 _usage_hour_bucket）顺带剪小时表：小时层
+    # 的保留期比日桶短，剪枝线要跟着一起抬。analytics / series 的状态没有
+    # hours_floor_at 这个键，不会被这条带到。
+    if "hours_floor_at" in state:
+        _prune_hour_buckets(state, days, newest_key)
+    # analytics 状态还挂着一条更短的小时子表保留线（state["hours_keep"]）：
+    # 小时层只为近期的自定义窗口服务，只摘旧天的 "hours" 子表，日桶本身照常
+    # 留满保留天数。
+    if state.get("hours_keep"):
+        hour_horizon = _local_day_key(_day_key_start(newest_key)
+                                      - _usage_hour_keep_hours() * 3600)
+        for key, bucket in days.items():
+            if key < hour_horizon:
+                bucket.pop("hours", None)
 
 
 def _days_cover(state, day_key):
@@ -4763,6 +7256,98 @@ def _days_cover(state, day_key):
     """
     floor = state.get("days_floor")
     return floor is not None and day_key >= floor
+
+
+def _usage_hour_bucket(state, row, day):
+    """这一行该折进哪个小时桶；不该折时返回 None。
+
+    小时桶挂在日桶里（`hours` 子表），键是「离当天本地午夜的 3600 秒个数」
+    的字符串——与时间序列的小时子桶同一套格点规则（见 _fold_usage_series）：
+    桶的 at = 日桶 at + 序号*3600，所以每个桶恰好覆盖一个整点区间，跨桶
+    求和不会重复也不会漏。
+
+    at 早于日桶 at 的行（极少数时区在本地午夜切换夏令时，午夜那一刻不存在）
+    放不进格点：整张小时表摘掉并留痕（`hours` 记为 None），求和侧看到没有表
+    就退回按小时分组的冷路径（日桶本身照常，日窗口不受影响）。留痕是为了
+    挡住「摘掉之后又来了这一天的行、把表重建出来」——重建的表缺了被摘掉的
+    那批行，一旦被求和侧选中就是少算。
+
+    hours_floor_at 是小时层的剪枝线：比它早的天不再折小时表。迟写/补写的
+    行可能落回很久以前那天（日桶还留着），但那张表早被剪掉，重新建起来
+    只会得到一张缺了其余小时的表——求和侧一旦用它就会少算，所以这里直接
+    不折（求和侧另有 _hours_cover 兜底）。
+    """
+    floor = state.get("hours_floor_at")
+    if floor is None or day["at"] < floor:
+        return None
+    at = row.get("at") or 0
+    day_at = day["at"]
+    hours = day.get("hours")
+    if hours is None and "hours" in day:
+        # 这天的小时表被摘过（午夜兜底）：不再重建，见 docstring。
+        return None
+    if at < day_at:
+        day["hours"] = None
+        return None
+    if hours is None:
+        hours = day["hours"] = {}
+    hour = str(int((at - day_at) // 3600))
+    sub = hours.get(hour)
+    if sub is None:
+        sub = hours[hour] = _new_window_snapshot_bucket(day_at + int(hour) * 3600)
+    return sub
+
+
+def _prune_hour_buckets(state, days, newest_key):
+    """丢掉保留窗口之外的日桶里的小时表，并把 hours_floor_at 抬到剪枝线。
+
+    小时层比日桶短命：它只服务最近几天的整点窗口（见 _USAGE_HOUR_KEEP_DAYS）。
+    剪枝按天走（与 _prune_day_buckets 同一套算术），所以实际保留在
+    keep_days 与 keep_days+1 天之间。hours_floor_at 的语义与 days_floor 相同
+    ——「这份状态的小时层从哪个时刻起是完整的」——更早的整点窗口一律退回
+    冷路径，宁可多扫一次，不能少算一个桶。
+    """
+    horizon_at = _day_key_start(newest_key) - _usage_hour_keep_days() * 86400
+    horizon = _local_day_key(horizon_at)
+    for key in list(days):
+        if key < horizon and "hours" in days[key]:
+            # 与午夜兜底同一个留痕：表置 None 而不是删键。剪枝线（下面那条）
+            # 本来也挡着重建，但留痕让「这张表不可用」成为桶自己的事实，
+            # 求和侧与折叠侧不必再依赖两条线的一致性。
+            days[key]["hours"] = None
+    floor = state.get("hours_floor_at")
+    if floor is None or floor < horizon_at:
+        state["hours_floor_at"] = horizon_at
+
+
+def _hours_cover(state, since):
+    """这份状态的小时层能否服务起点为 `since` 的窗口。
+
+    hours_floor_at 是剪枝线（见 _prune_hour_buckets）：比它早的窗口可能少了
+    被剪掉的小时表，只能退回扫描。它最早也要折到第一个新的一天才会记下
+    （没折过就是 None，此时谁都不服务——调用方总是先折到文件尾）。
+    """
+    floor = state.get("hours_floor_at")
+    return floor is not None and since >= floor
+
+
+def _hours_floor_on_adopt(days, stored):
+    """采用 checkpoint 时的小时层剪枝线：取「文件里的」与「按最新一天现算」
+    的较晚者。
+
+    较晚者一定安全：剪枝线只会往前抬，抬高了最多是少服务几天（那些窗口
+    退回冷路径），永远不会服务一张被剪过的表。两条都挡住同一条路——拿
+    不完整的表当完整（那是这个层唯一会算错数的方向）：文件里那条可能是
+    别的保留天数下写的，现算这条跟着当前 WB_USAGE_HOUR_KEEP_DAYS 走。
+    """
+    recomputed = None
+    if days:
+        recomputed = _day_key_start(max(days)) - _usage_hour_keep_days() * 86400
+    if stored is None:
+        return recomputed
+    if recomputed is None:
+        return stored
+    return max(stored, recomputed)
 
 
 def _add_usage_bucket(dst_map, key, src):
@@ -4848,7 +7433,12 @@ def _add_analytics_window_maps(dst, src):
 
 
 def _copy_analytics_window_maps(maps):
-    """一份窗口形状 maps 的深拷贝（落盘用，形状同 _new_analytics_maps()）。"""
+    """一份窗口形状 maps 的深拷贝（落盘用，形状同 _new_analytics_maps()）。
+
+    日桶/小时桶还会多带 at（两者都有）与 hours 子表（日桶）：照原样拷贝、
+    键序保持折叠时的插入顺序——checkpoint 不排序，加载回来要与冷启动逐字节
+    一致（见 _usage_cache_write）。
+    """
     out = {"summary": dict(maps["summary"]), "accts": {}, "models": {}, "keys": {}}
     for uid, entry in maps["accts"].items():
         copy = dict(entry)
@@ -4863,31 +7453,51 @@ def _copy_analytics_window_maps(maps):
         copy["window_models"] = _copy_analytics_models(km["window_models"])
         copy["realms"] = dict(km["realms"])
         out["keys"][kid] = copy
+    if "at" in maps:
+        out["at"] = maps["at"]
+    hours = maps.get("hours")
+    if hours is not None:
+        out["hours"] = {h: _copy_analytics_window_maps(sub)
+                        for h, sub in hours.items()}
     return out
 
 
-def _scan_usage_snapshot_window_days(r, since, pricing_on=None):
+def _scan_usage_snapshot_window_days(r, since, until, pricing_on=None):
     """窗口半的冷路径：整段扫一遍，先按日分桶再相加。
 
     日桶状态不可用（还没折过、被剪枝、折叠出错）时走这里。结果必须与日桶
-    状态给出的窗口半逐字节一致：窗口起点是本地午夜，两边装的是同一批行、
-    同一个「按日分组」的求和口径，只是桶一个现折、一个存量。
+    状态给出的窗口半逐字节一致：窗口起点是本地午夜（until 给出时终点也是
+    本地午夜），两边装的是同一批行、同一个「按日分组」的求和口径，只是桶
+    一个现折、一个存量。
+
+    状态冷时它是窗口请求的直接答案（不折状态，重折留给 all-time 视图与
+    预热器，见 _usage_snap_state_cold）；其余情形它紧跟一次 all-time 折叠
+    （_usage_snapshot_window_from_days 先折到文件尾才发现日桶不够用），
+    行级记忆几乎全中：同一批行刚在 all-time 半算过价与日键。窗口外的行由
+    skip 挡在解析之前，这条路只付窗口内那批行。价表照样在本函数开头取一次。
     """
+    pricing = _pricing_inputs(pricing_on)
     days = {}
 
     def fold(row):
         at = row.get("at") or 0
         if since and at < since:
             return
+        if until and at > until:
+            return
         key = _local_day_key(at)
         bucket = days.get(key)
         if bucket is None:
             bucket = days[key] = _empty_stats()
-        _fold_usage_snapshot(row, bucket, r, None, None, pricing_on)
+        _fold_usage_snapshot(row, bucket, r, None, None, pricing_on,
+                             pricing=pricing)
 
     _, error = _scan_usage_from(
         0, fold,
-        skip=lambda line: _line_outside_window(line, since or None, None))
+        skip=lambda line: _line_outside_window(line, since or None,
+                                               until or None),
+        skip_raw=lambda raw: _line_outside_window_bytes(raw, since or None,
+                                                        until or None))
     if error is not None:
         log(f"usage snapshot read failed: {error}")
     snap = _empty_stats()
@@ -4896,23 +7506,80 @@ def _scan_usage_snapshot_window_days(r, since, pricing_on=None):
     return snap
 
 
-def _scan_usage_analytics_window_days(realm, since, stop_at=None, pricing_on=None):
+def _scan_usage_snapshot_window_hours(r, since, until, pricing_on=None):
+    """窗口半的冷路径：整段扫一遍，先按小时分桶再相加。
+
+    小时层状态不可用（还没折过、被剪枝、折叠出错、那天的格点不成立）时走
+    这里。结果必须与小时桶状态给出的窗口半逐字节一致：窗口起点是本地整点
+    （until 给出时终点也落在同一套格点上），两边装的是同一批行、同一个
+    「按（日，小时）分组」的求和口径，只是桶一个现折、一个存量。
+
+    分组与 _usage_hour_bucket 同一套算术（日键 + 离午夜多少个 3600 秒），
+    但这里对 at 早于本地午夜的行照折不误（键可以是负的）：状态侧那种行会
+    把整张小时表摘掉、窗口退回这条路径，所以这条路径必须把它们算进去。
+    排序按 (日键, 序号) 数值序，与状态侧的遍历顺序一致。
+
+    价表在本函数开头取一次，行级记忆（见「行级结果记忆」）跟着这一批扫描
+    走：同一批行通常刚在 all-time 半算过价与日键，这里几乎全中。
+    """
+    pricing = _pricing_inputs(pricing_on)
+    hours = {}
+    day_ats = {}
+
+    def fold(row):
+        at = row.get("at") or 0
+        if since and at < since:
+            return
+        if until and at > until:
+            return
+        key = _local_day_key(at)
+        day_at = day_ats.get(key)
+        if day_at is None:
+            day_at = day_ats[key] = _day_key_start(key)
+        hour = int((at - day_at) // 3600)
+        bucket = hours.get((key, hour))
+        if bucket is None:
+            bucket = hours[(key, hour)] = _empty_stats()
+        _fold_usage_snapshot(row, bucket, r, None, None, pricing_on,
+                             pricing=pricing)
+
+    _, error = _scan_usage_from(
+        0, fold,
+        skip=lambda line: _line_outside_window(line, since or None,
+                                               until or None),
+        skip_raw=lambda raw: _line_outside_window_bytes(raw, since or None,
+                                                        until or None))
+    if error is not None:
+        log(f"usage snapshot read failed: {error}")
+    snap = _empty_stats()
+    for key in sorted(hours):
+        _add_usage_snapshot(snap, hours[key])
+    return snap
+
+
+def _scan_usage_analytics_window_days(realm, since, until, stop_at=None,
+                                      pricing_on=None):
     """窗口半 analytics 的冷路径：按日分桶再相加（见 snapshot 版）。"""
+    pricing = _pricing_inputs(pricing_on)
     days = {}
 
     def fold(row):
         at = row.get("at") or 0
         if since is not None and at < since:
             return
+        if until is not None and at > until:
+            return
         key = _local_day_key(at)
         maps = days.get(key)
         if maps is None:
             maps = days[key] = _new_analytics_maps()
-        _fold_usage_analytics(row, realm, maps, _ANALYTICS_WINDOW, pricing_on)
+        _fold_usage_analytics(row, realm, maps, _ANALYTICS_WINDOW, pricing_on,
+                              pricing=pricing)
 
     _, error = _scan_usage_from(
         0, fold, stop_at=stop_at,
-        skip=lambda line: _line_outside_window(line, since, None))
+        skip=lambda line: _line_outside_window(line, since, until),
+        skip_raw=lambda raw: _line_outside_window_bytes(raw, since, until))
     if error is not None:
         log("compute_usage_analytics failed: %s" % error)
     out = _new_analytics_maps()
@@ -4921,20 +7588,82 @@ def _scan_usage_analytics_window_days(realm, since, stop_at=None, pricing_on=Non
     return out
 
 
+def _scan_usage_analytics_window_hours(realm, since, until, stop_at=None,
+                                       pricing_on=None):
+    """窗口半 analytics 的冷路径（起点整小时）：按小时分桶再相加。
+
+    小时层不可用（还没折过、被剪枝、折叠出错、until 切在桶中间）时走这里。
+    结果必须与小时桶状态给出的窗口半逐字节一致：两边装的是同一批行、同一个
+    「按小时分组」的求和口径，只是桶一个现折、一个存量。
+
+    分桶与折叠侧同一条规则（离那天的本地午夜多少秒）；本地午夜落在不存在
+    的小时里时这一天的小时键会变成负数，求和照样把它算进去（分组只是浮点
+    结合顺序的载体），所以这条冷路径不依赖格点是否成立。
+
+    价表在本函数开头取一次，行级记忆（见「行级结果记忆」）跟着这一批扫描走。
+    """
+    pricing = _pricing_inputs(pricing_on)
+    days = {}
+
+    def fold(row):
+        at = row.get("at") or 0
+        if since is not None and at < since:
+            return
+        if until is not None and at > until:
+            return
+        key = _local_day_key(at)
+        day = days.get(key)
+        if day is None:
+            day = days[key] = (_day_key_start(key), {})
+        day_at, hours = day
+        hour = str(int((at - day_at) // 3600))
+        maps = hours.get(hour)
+        if maps is None:
+            maps = hours[hour] = _new_analytics_maps()
+        _fold_usage_analytics(row, realm, maps, _ANALYTICS_WINDOW, pricing_on,
+                              pricing=pricing)
+
+    _, error = _scan_usage_from(
+        0, fold, stop_at=stop_at,
+        skip=lambda line: _line_outside_window(line, since, until),
+        skip_raw=lambda raw: _line_outside_window_bytes(raw, since, until))
+    if error is not None:
+        log("compute_usage_analytics failed: %s" % error)
+    out = _new_analytics_maps()
+    for key in sorted(days):
+        _day_at, hours = days[key]
+        for hour in sorted(hours, key=int):
+            _add_analytics_window_maps(out, hours[hour])
+    return out
+
+
 # ---------------------------------------------------------------------------
-# 时间序列的日/小时桶
+# 时间序列的日/小时/分钟桶
 #
 # usage_timeseries() 本来就把行按时间装桶，但每次缓存未命中都要整段扫描
 # （路由器上 range=week 约 2 秒）。窗口边界同样是本地午夜，而它的桶宽只有
-# 3600 与 86400 两种能与窗口对齐（span<=6h 的分钟桶只出现在自定义区间，
-# 那条路保持整段扫描）。折叠时顺手维护日桶与小时桶，窗口就是它们的切片：
-# 每个输出桶恰好等于一个存量桶（不做跨桶相加），所以连浮点求和都是逐位
-# 一致的——不像 snapshot/analytics 的窗口半需要把日桶相加。
+# 3600 与 86400 两种能与窗口对齐；span<=6h 的窗口（自定义区间，选择器
+# 见 _usage_timeseries_scope）给出 step=60，边界是任意分钟格点，日/小时桶
+# 都答不了——这一档由「最近 6 小时的分钟环」回答（见 _fold_usage_series_minute）。
+# 折叠时顺手维护这三层，窗口就是它们的切片：每个输出桶恰好等于一个存量桶
+# （不做跨桶相加），所以连浮点求和都是逐位一致的——不像 snapshot/analytics
+# 的窗口半需要把日桶相加。
 # ---------------------------------------------------------------------------
 _series_state = {}
 _series_state_lock = threading.Lock()
 # credit 历史只保留最近这么多条（整段扫描返回的也是窗口内的前 50 条）。
 _SERIES_CREDITS_KEEP = 50
+# 分钟环的保留窗口：6 小时，与选择器给出 step=60 的最大跨度（span<=6h）一一
+# 对应。分钟桶比小时桶密 60 倍，跟着日桶的 32 天保留会让 checkpoint 翻好几倍，
+# 而更早的窗口本来就该由小时层（step=3600）回答——所以环只留最近 6 小时。
+# 保留线用「桶的 at 严格小于 max_at - 窗口」判定，窗口服务条件写成
+# lo >= max_at - 窗口；两者一配对，服务得上的窗口需要的桶恰好一个不落
+# （窗口起点必须落在分钟格点上，见 _series_minute_grid_ok）。
+_SERIES_MINUTE_WINDOW = 6 * 3600
+# 折叠途中环的临时上限：超过就按保留线剪一次。剪枝是 O(环大小)、而环的
+# 正常大小 <= 361（6 小时 + 两个端点），720 是给「冷折时环里还堆着更早的
+# 桶」留的余量——这样整趟冷折的内存有界（满环约 200KB），不用等折完才剪。
+_SERIES_MINUTE_RING_CAP = 720
 
 
 def _new_series_bucket(at):
@@ -4963,6 +7692,19 @@ def _feed_series_bucket(bucket, row):
         bucket["credit"] += (row.get("credit") or 0)
 
 
+def _series_credit_entry(at, row):
+    """一条计费行的载荷：整段扫描与增量缓冲共用的字段表。
+
+    两边的条目会出现在同一个响应的 credits 数组里，键序也是响应字节的
+    一部分，所以只能有一份定义。
+    """
+    return {"at": at, "iso": row.get("iso") or "",
+            "model": row.get("model") or "",
+            "account": row.get("account") or "",
+            "credit": row.get("credit") or 0,
+            "total_tokens": row.get("total_tokens") or 0}
+
+
 def _series_credit_push(credits, row, at):
     """把一条带 credit 的行放进「最近 50 条」缓冲。
 
@@ -4972,18 +7714,56 @@ def _series_credit_push(credits, row, at):
     行不可能是窗口的前 50 条。at 相同时两边都是稳定排序，顺序（日志顺序）
     一致。
     """
-    credits.append({"at": at, "iso": row.get("iso") or "",
-                    "model": row.get("model") or "",
-                    "account": row.get("account") or "",
-                    "credit": row.get("credit") or 0,
-                    "total_tokens": row.get("total_tokens") or 0})
+    credits.append(_series_credit_entry(at, row))
     if len(credits) > _SERIES_CREDITS_KEEP * 2:
         credits.sort(key=lambda item: item.get("at") or 0, reverse=True)
         del credits[_SERIES_CREDITS_KEEP:]
 
 
+def _series_minute_key(at):
+    """行 -> 它所属的分钟桶键：epoch 分钟（向下取整）。
+
+    键用 epoch 分钟而不是「离本地午夜多少秒」：分钟窗口的起点是任意分钟格点
+    （自定义区间的 since），不锚在本地午夜上，所以桶的格点也取绝对分钟；
+    这样跨午夜、跨小时都是同一张表，切片不必按天分组。
+    """
+    return int(at // 60)
+
+
+def _fold_usage_series_minute(state, row, at):
+    """一行折进分钟环（与日/小时桶同一 realm 过滤、同一折叠口径）。
+
+    保留线以下的桶不建（建了也会被下一次剪枝丢掉）：窗口要服务得上的行都在
+    max_at - 6h 之上，更早的行折进来只是白建一个马上被剪的桶。
+    """
+    key = _series_minute_key(at)
+    if key * 60 < state["max_at"] - _SERIES_MINUTE_WINDOW:
+        return
+    minutes = state["minutes"]
+    bucket = minutes.get(key)
+    if bucket is None:
+        bucket = minutes[key] = _new_series_bucket(key * 60)
+        if len(minutes) > _SERIES_MINUTE_RING_CAP:
+            _prune_series_minutes(state)
+    _feed_series_bucket(bucket, row)
+
+
+def _prune_series_minutes(state):
+    """丢掉保留线（max_at - 6h）以下的分钟桶。
+
+    只按 max_at 剪，不跟日桶的 32 天剪枝线：分钟环的覆盖范围就是它自己的
+    保留窗口，与日桶保留多少天无关。判定与 _fold_usage_series_minute 的
+    跳过条件同一条（桶的 at 严格小于保留线），两边不会出现「建的桶马上被剪」
+    或「剪了还需要的桶」。
+    """
+    horizon = state["max_at"] - _SERIES_MINUTE_WINDOW
+    minutes = state["minutes"]
+    for key in [k for k in minutes if k * 60 < horizon]:
+        del minutes[key]
+
+
 def _fold_usage_series(row, r, state):
-    """一行折进时间序列状态：日桶 + 小时桶 + credit 缓冲。"""
+    """一行折进时间序列状态：日桶 + 小时桶 + 分钟环 + credit 缓冲。"""
     at = row.get("at") or 0
     if at > state["max_at"]:
         # 折过的最大 at：窗口上界（hi=now）只要不低于它，存量桶就都在窗口内。
@@ -4993,6 +7773,9 @@ def _fold_usage_series(row, r, state):
     if bucket is None:
         return
     _feed_series_bucket(bucket, row)
+    # 分钟环放在小时桶的午夜兜底之前：兜底会 return（那一天的 hours 摘掉），
+    # 而分钟环与日/小时格点无关，漏折一行就会让它的覆盖出现空洞。
+    _fold_usage_series_minute(state, row, at)
     if at < bucket["at"]:
         # 本地午夜落在不存在的小时里（极少数时区的夏令时正好在午夜切换）：
         # 这一天的行放不进小时格点，把 hours 摘掉让切片对这一天整体退回扫描
@@ -5018,11 +7801,18 @@ def _usage_series_state_ready(r):
 
     调用方必须已持有 _series_state_lock。时间序列折叠不算价，所以状态只带
     realm 指纹（行没有 realm 字段时 row_realm() 会读它）。
+
+    状态里的 `minutes_from` 是分钟环的完整线：从零折起（含 refold）时它是
+    None（环对整份日志完整）；采用了一份没有分钟环的旧 checkpoint 时，环只
+    对采用点之后折进来的行完整，那条线就是采用时的 max_at（见
+    _usage_cache_adopt_series）。
     """
     state = _series_state.get(r)
     if state is None:
         state = _series_state[r] = {
             "days": {}, "days_floor": None, "max_at": 0, "credits": [],
+            "minutes": {}, "minutes_from": None,
+            "hits": [], "hits_overflow": False,
             "offset": 0, "key": None, "realm": None, "tail": b""}
     realm = _realm_inputs()
     log_key = _usage_log_key()
@@ -5030,16 +7820,23 @@ def _usage_series_state_ready(r):
         # 全新状态（进程刚起来）：先问 checkpoint，问不到才从零折起。
         if not _usage_cache_adopt_series(r, state, log_key, realm):
             state.update({"days": {}, "days_floor": None, "max_at": 0,
-                          "credits": [], "offset": 0, "tail": b""})
+                          "credits": [], "minutes": {}, "minutes_from": None,
+                          "hits": [], "hits_overflow": False,
+                          "offset": 0, "tail": b""})
     elif state["realm"] != realm or not _log_resume_ok(state, log_key):
         state.update({"days": {}, "days_floor": None, "max_at": 0,
-                      "credits": [], "offset": 0, "tail": b""})
+                      "credits": [], "minutes": {}, "minutes_from": None,
+                      "hits": [], "hits_overflow": False,
+                      "offset": 0, "tail": b""})
     state.update({"realm": realm, "key": log_key})
     offset, error = _scan_usage_from(
         state["offset"], lambda row: _fold_usage_series(row, r, state))
     if error is None:
         state["offset"] = offset
         state["tail"] = _log_tail_signature(offset)
+        # 折叠途中的剪枝是按上限触发的，收尾再剪一次，落盘的环就是保留窗口
+        # 以内的那一批（状态不折时这里也不花时间：环大小 <= 上限）。
+        _prune_series_minutes(state)
     return state, offset, error
 
 
@@ -5053,34 +7850,184 @@ def _series_output_bucket(bucket):
             "total_tokens": bucket["total_tokens"], "credit": bucket["credit"]}
 
 
+def _series_minute_grid_ok(lo):
+    """窗口起点能否落在分钟环的格点上：lo 必须是 60 的整数倍。
+
+    整段扫描的桶边界是 lo + k*60，存量分钟桶的边界是 epoch 分钟的整数倍；
+    两组边界一一对应（可以整桶取用）当且仅当 lo 自己落在格点上。面板的
+    datetime-local 输入给的就是整分钟（fromLocalInputValue 只到分钟），
+    手写的带小数的 since 一律退回整段扫描。
+    """
+    return int(lo) == lo and int(lo) % 60 == 0
+
+
+def _series_window_day_key(lo):
+    """窗口起点 lo 的本地日键；取值超出平台 epoch 范围时返回 None。
+
+    _local_day_key 走 time.localtime，手写的极大 since（例如 6e18）会让它抛
+    OSError——那只是「这个窗口服务不了」的一种，按退回整段扫描处理，不该把
+    端点打成 500。分钟切片拿这个键做 days_floor 覆盖判断，拿不到就退回扫描。
+    """
+    try:
+        return _local_day_key(lo)
+    except (OSError, OverflowError, ValueError):
+        return None
+
+
+def _series_closed_cut_ok(state, lo_i, hi, step):
+    """闭窗口的右边界能否由存量桶回答：hi 落在桶格点上，且直到它没有整秒行。
+
+    桶按 at 严格切分（日/小时桶锚在本地午夜，分钟环锚在 epoch 分钟），所以
+    hi 落在与桶同一条格点上时，「[lo, hi] 的行」与「at < hi 的桶」只差
+    「恰好落在 hi 上的行」；那一刻有整秒行时桶切不出它，只能退回整段扫描
+    （见 _closed_window_edge_ok）。取值离谱的 hi（手写 URL）按不成立处理，
+    退回整段扫描——与 _series_window_day_key 的取值保护同一个用意。
+    """
+    if not _closed_window_edge_ok(state, hi):
+        return False
+    if step == 60:
+        try:
+            return _series_minute_grid_ok(hi)
+        except (OverflowError, ValueError):
+            return False
+    try:
+        hi_i = int(hi)
+    except (OverflowError, ValueError):
+        return False
+    if hi_i != hi:
+        return False
+    return (hi_i - lo_i) % step == 0
+
+
+def _series_slice_minutes(state, realm, lo, hi, day_key):
+    """分钟环的切片；不满足对齐/覆盖条件时返回 None（退回整段扫描）。
+
+    成立条件（缺一不可，任何一条不成立就退回整段扫描——正确性优先）：
+      * 窗口起点是分钟格点（见 _series_minute_grid_ok）；
+      * hi 不低于折过的最大 at：否则窗口上界会切进桶里，而桶是聚合值，
+        切不出一半来（与日/小时切片同一条）。hi 切进数据里（闭窗口）时
+        还要过闭窗口闸门（见 _series_closed_cut_ok）：hi 落在分钟格点上、
+        且直到那一刻没有整秒行，才按「at < hi 的桶」切，恰好落在 hi 上的
+        行由边沿账挡回整段扫描；
+      * 窗口起点不早于 max_at - 6h：环的保留线，更早的窗口环里没有桶；
+      * 窗口起点晚于 minutes_from：环只从那条线之后才完整（采用过没有
+        分钟环的旧 checkpoint 时才有这条线，见 _usage_series_state_ready）；
+      * 每个桶的 at 落在键*60 上且不晚于 max_at（形状校验之外的防御，
+        与 _series_slice 对小时子桶的格点校验同一个用意）。
+    输出桶与整段扫描逐条相同（同一批行、同一个网格、同一个累加口径），
+    credits 与日/小时切片共用下面同一段选择。
+    """
+    minutes = state.get("minutes")
+    if not minutes:
+        # 空环（或状态里没有环）：这一份状态没有任何行落在保留窗口里。空环
+        # 答不出窗口里的行，也不能把窗口静默答成空序列——退回整段扫描，
+        # 由扫描给出真值（正确的空序列也由它给）。
+        return None
+    lo_i = int(lo)
+    cut = False
+    if hi < state["max_at"]:
+        # 上界切进环里：闭窗口闸门不成立就退回整段扫描（结果不变）。
+        if not _series_closed_cut_ok(state, lo_i, hi, 60):
+            return None
+        cut = True
+    if not _series_minute_grid_ok(lo):
+        return None
+    if lo_i < state["max_at"] - _SERIES_MINUTE_WINDOW:
+        return None
+    minutes_from = state.get("minutes_from")
+    if minutes_from is not None and lo_i <= minutes_from:
+        return None
+    if day_key is None:
+        # 直接调用（测试）时补上；取值离谱（见 _series_window_day_key）就退回。
+        day_key = _series_window_day_key(lo)
+        if day_key is None:
+            return None
+    if not _days_cover(state, day_key):
+        return None
+    series = []
+    for key in sorted(minutes):
+        sub = minutes[key]
+        at = int(sub["at"])
+        if at != key * 60 or at > state["max_at"]:
+            return None
+        if at < lo_i:
+            continue
+        if cut and at >= hi:
+            # 闭窗口：hi 那一刻归后一桶（桶按 at 严格切分），只取 at < hi
+            # 的桶；那一刻有整秒行时上面已经退回。
+            break
+        out = _series_output_bucket(sub)
+        # 整段扫描的桶 at 是 lo + k*60，类型跟着 lo 走（int 或 float）；
+        # 存量桶的 at 是整数，这里按 lo 的类型对齐，两边的 JSON 字节才一致。
+        out["at"] = int(at) if isinstance(lo, int) else float(at)
+        series.append(out)
+    return _series_payload(state, realm, lo, hi, 60, series)
+
+
+def _series_payload(state, realm, lo, hi, step, series):
+    """切片载荷的公共部分：窗口头 + credit 历史。
+
+    credit 历史：缓冲按 at 倒序稳定排序后取窗口内的前 50 条——与整段扫描
+    的选择逐条相同（见 _series_credit_push 的论证）。窗口的两端都要过滤：
+    缓冲收的是整份日志的计费行，闭窗口的上界切进缓冲里时（hi < max_at），
+    at > hi 的行不属于窗口，整段扫描不会收它们，切片也必须裁掉。
+    """
+    credits = sorted(state["credits"], key=lambda item: item.get("at") or 0,
+                     reverse=True)
+    credits = [c for c in credits
+               if lo <= (c.get("at") or 0) <= hi][:_SERIES_CREDITS_KEEP]
+    return {"ok": True, "realm": realm or "all",
+            "bucket_seconds": step, "since": lo, "until": hi,
+            "series": series, "credits": credits}
+
+
 def _series_slice(state, realm, lo, hi, step, day_key):
-    """窗口序列 = 日桶/小时桶的切片；不满足对齐条件时返回 None。
+    """窗口序列 = 日桶/小时桶/分钟环的切片；不满足对齐条件时返回 None。
 
     成立条件（缺一不可，任何一条不成立就退回整段扫描——正确性优先）：
       * 窗口起点是本地午夜（day_key 由 _window_day_key 给出）；
       * 桶宽是 3600 或 86400（与窗口对齐的两种）；
       * days_floor 覆盖窗口起点（剪枝/更早的天没折过就只能整段扫）；
-      * hi 不低于折过的最大 at，否则窗口上界会切掉桶里的行；
+      * hi 不低于折过的最大 at，否则窗口上界会切掉桶里的行；hi 切进数据里
+        （闭窗口）时还要过闭窗口闸门（见 _series_closed_cut_ok）：hi 落在
+        同一套桶格点上、且直到那一刻没有整秒行，才按「at < hi 的桶」切，
+        恰好落在 hi 上的行由边沿账挡回整段扫描；
       * 每个桶的 at 落在 lo + k*step 的格点上。这一条同时挡住夏令时：日长
         不是 86400 秒的那天之后，每一天的本地午夜都不再落在 86400 的格点上，
         于是自动退回整段扫描。时区没有夏令时（cn/路由器）时恒真。
+
+    桶宽 60 走分钟环（条件见 _series_slice_minutes），它不要求窗口起点是
+    本地午夜，只要求落在分钟格点上。
     """
+    if step == 60:
+        return _series_slice_minutes(state, realm, lo, hi, day_key)
     if step not in (3600, 86400):
         return None
+    lo_i = int(lo)
+    cut = False
     if hi < state["max_at"]:
-        return None
+        # 上界切进桶里：闭窗口闸门不成立就退回整段扫描（结果不变）。
+        if not _series_closed_cut_ok(state, lo_i, hi, step):
+            return None
+        cut = True
     if not _days_cover(state, day_key):
         return None
-    lo_i = int(lo)
     series = []
+    done = False
     for key in sorted(state["days"]):
-        if key < day_key:
+        if key < day_key or done:
             continue
         bucket = state["days"][key]
         day_at = int(bucket["at"])
         if (day_at - lo_i) % 86400:
             return None
         if step == 86400:
+            if cut and day_at >= hi:
+                # 闭窗口：hi 那一刻归后一桶（桶按 at 严格切分），只取
+                # at < hi 的桶；那一刻有整秒行时上面已经退回。这一天及其后
+                # 的桶都在窗口外，done 把循环收口。
+                done = True
+                continue
             series.append(_series_output_bucket(bucket))
             continue
         hours = bucket.get("hours")
@@ -5094,15 +8041,12 @@ def _series_slice(state, realm, lo, hi, step, day_key):
                 return None
             if (int(sub["at"]) - lo_i) % 3600:
                 return None
+            if cut and int(sub["at"]) >= hi:
+                # 闭窗口的右边界（放在格点校验之后——错开的桶要先退回扫描）。
+                done = True
+                break
             series.append(_series_output_bucket(sub))
-    # credit 历史：缓冲按 at 倒序稳定排序后取窗口内的前 50 条——与整段扫描
-    # 的选择逐条相同（见 _series_credit_push 的论证）。
-    credits = sorted(state["credits"], key=lambda item: item.get("at") or 0,
-                     reverse=True)
-    credits = [c for c in credits if (c.get("at") or 0) >= lo][:_SERIES_CREDITS_KEEP]
-    return {"ok": True, "realm": realm or "all",
-            "bucket_seconds": step, "since": lo, "until": hi,
-            "series": series, "credits": credits}
+    return _series_payload(state, realm, lo, hi, step, series)
 
 
 def _top_models(bucket, top_n=KEY_MODEL_TOP_N):
@@ -5324,12 +8268,19 @@ def _compute_usage_analytics_uncached(realm=None, since=None, until=None):
 # ---------------------------------------------------------------------------
 # 聚合状态落盘（重启后免冷扫）
 #
-# 上面的三份增量聚合（_usage_alltime_snapshot / _usage_by_account_buckets /
-# _analytics_all_time）把状态放在模块级字典里，进程一重启就全丢：第一次刷新
-# 仍是全量扫一遍日志。日志每天涨一万多行，冷扫描成本跟着线性上升——路由器
-# 上 2.7 万行的一次冷启动要 6~8 秒，一个月后接近两分钟。这里把三份状态连同
-# 它们的位置信息写进数据目录下的一个 JSON 文件，重启后第一次刷新只读文件
-# 尾部的新增字节。
+# 上面的几份增量聚合（_usage_alltime_snapshot / _usage_by_account_buckets /
+# _analytics_all_time / 时间序列 / 剩余用量）把状态放在模块级字典里，进程一
+# 重启就全丢：第一次刷新仍是全量扫一遍日志。日志每天涨一万多行，冷扫描成本
+# 跟着线性上升——路由器上 2.7 万行的一次冷启动要 6~8 秒，一个月后接近两分钟。
+# 这里把每份状态连同它们的位置信息写进数据目录，重启后第一次刷新只读文件尾
+# 部的新增字节。
+#
+# v4 起**一类状态一份文件**（usage-aggregate-cache-<kind>.json）：五份状态
+# 各有各的位置/指纹校验与写入节流，加载端按需解析——只跑 /usage 的进程不再
+# 为其余四份（真机上 remaining 一份就比其余加起来还大）付解析成本；写侧也只
+# 重写「有推进的那一类」。升级前的单文件（v3）只读兼容：某一类还没有自己的
+# 文件时从旧文件里取它那一节（旧文件不重写、也不删除，等各类都落过一次盘就
+# 自然被忽略）。
 #
 # 文件放在数据目录里是刻意的：它和日志同生命周期，跟着 sysupgrade 一起走，
 # 也和日志一起被搬走、清掉。读写失败（只读文件系统、磁盘满、权限不足）一律
@@ -5342,7 +8293,9 @@ def _compute_usage_analytics_uncached(realm=None, since=None, until=None):
 # ---------------------------------------------------------------------------
 
 # 数据目录下的文件名。usage/*.json 已被 .gitignore 覆盖。
+# 带 <kind> 的是 v4 布局（一类一份）；不带的是升级前的单文件，只读不写。
 _USAGE_CACHE_NAME = "usage-aggregate-cache.json"
+_USAGE_CACHE_KIND_NAME = "usage-aggregate-cache-%s.json"
 # 状态结构或折叠口径一变就 +1，旧文件整体作废。这是唯一挡在「旧结构喂进新
 # 代码」前面的东西，改动状态形状时别忘了它。
 # v2：写盘不再排序（v1 用 sort_keys 写，加载回来所有 dict 变字母序，响应
@@ -5351,7 +8304,22 @@ _USAGE_CACHE_NAME = "usage-aggregate-cache.json"
 # v3：状态多了按日分桶（窗口半的增量）与时间序列的日/小时桶。载荷形状变了，
 # 旧文件同样整体作废：升级后第一次刷新做一次全量折叠（一次性代价，之后
 # checkpoint 照旧）——这正是把窗口半也变成增量的入场费。
-_USAGE_CACHE_SCHEMA = 3
+# v4：一类状态一份文件（每份自带 schema 与 kind 标签），并且快照/analytics 的
+# 日桶里多了小时子表（整点窗口的小时层）、series 多了分钟环。载荷形状的变化由
+# 各类自己的校验器挡住：升级前的单文件（v3）只读兼容，作为各类还没有自己文件
+# 时的回退来源——能通过新校验器的段（by_account / series / remaining）照常
+# 采纳，通不过的（缺小时表的 snapshot / analytics）在升级后第一次刷新时做一次
+# 全量折叠，之后 checkpoint 照旧。
+# v5：snapshot / analytics 的 "pricing" 字段从「三张表的内容摘要」（["on", d1,
+# d2, d3] / ["off"]）换成「折叠行真正用到的价」记录（T15）。旧条目的字段形状
+# 对不上新判定，采纳端直接拒——升级后第一次刷新一次性重折（与 v3→v4 同处置），
+# 之后价表再变只按「用到的价」判废（无关模型的价变动不再重折）。
+_USAGE_CACHE_SCHEMA = 5
+# 升级前唯一布局的版本号：v3 单文件。只出现在只读回退路径上。
+_USAGE_CACHE_LEGACY_SCHEMA = 3
+# 五类状态的固定集合（文件名、kind 标签与写盘循环都用它）。
+_USAGE_CACHE_KINDS = ("snapshot", "by_account", "analytics", "series",
+                      "remaining")
 
 
 def _usage_cache_enabled():
@@ -5365,12 +8333,17 @@ def _usage_cache_enabled():
 
 
 def _usage_cache_path():
-    """checkpoint 的路径。
+    """升级前单文件（v3）的路径；只读回退与探针脚本用。
 
     每次调用重算，而不是在导入时算成常量：--usage-dir、测试和探针脚本都会
     在导入之后改 USAGE_DIR，常量会写到旧目录去。
     """
     return os.path.join(USAGE_DIR, _USAGE_CACHE_NAME)
+
+
+def _usage_cache_kind_path(kind):
+    """某一类状态的 checkpoint 路径（v4 布局；同上，每次调用重算）。"""
+    return os.path.join(USAGE_DIR, _USAGE_CACHE_KIND_NAME % kind)
 
 
 def _usage_cache_min_bytes():
@@ -5404,10 +8377,13 @@ _usage_cache_lock = threading.Lock()
 # 写盘串行锁：只被 _usage_cache_maybe_save() 拿一次、且永远是最外层（拿它
 # 之后才拿状态锁/节流锁），所以它不参与任何锁序环。
 _usage_cache_write_lock = threading.Lock()
-# 进程启动后只读一次 checkpoint：读到就记下来（按 realm 逐份取用），读不到
-# 也记 None——坏文件、只读文件系统都不该让每次刷新都去解析一遍。
-_usage_cache_loaded = False
-_usage_cache_read_result = None
+# 进程启动后按「类」只读一次 checkpoint：读到就记下来，读不到也记 None——
+# 坏文件、只读文件系统都不该让每次刷新都去解析一遍。只解析调用方真正要的
+# 那一类，这正是拆文件的意义（只跑 /usage 的进程不解析 remaining）。
+# 升级前的单文件（v3）也只读一次，作为某一类还没有自己文件时的回退来源。
+_usage_cache_kind_cache = {}
+_USAGE_CACHE_LEGACY_UNREAD = object()
+_usage_cache_legacy_data = _USAGE_CACHE_LEGACY_UNREAD
 # 写盘节流状态，全部由 _usage_cache_lock 保护：
 #   progress[kind]     —— 本进程见过该类状态折叠到的最远 offset；
 #   checkpointed[kind] —— 该类状态上次「尝试」落盘时的 offset（失败也记，
@@ -5415,38 +8391,55 @@ _usage_cache_read_result = None
 #   last_attempt       —— 上次尝试写盘的时刻，时间阈值与失败退避都靠它。
 # 按「类」记账而不是记一个总数：某类状态第一次折叠（或中途重扫）时 offset
 # 从 0 跳到文件尾，这一类要尽快落盘，而刚采用过 checkpoint 的类不能被别的
-# 类的推进带着白写一遍。
+# 类的推进带着白写一遍。v4 起写盘也按类分开：只重写「有推进的那一类」。
 _usage_cache_progress = {}
 _usage_cache_checkpointed = {}
 _usage_cache_last_attempt = time.time()
 
 
-def _usage_cache_data():
-    """checkpoint 的解析结果，或 None。
+def _usage_cache_forget():
+    """忘掉本进程读过的 checkpoint（模拟一次重启；测试与探针用）。
+
+    读记忆按「类」记账，所以要清的是一个集合；调用点不许持有任何状态锁，
+    本函数自己取 _usage_cache_lock（与读取路径同一把）。
+    """
+    global _usage_cache_legacy_data
+    with _usage_cache_lock:
+        _usage_cache_kind_cache.clear()
+        _usage_cache_legacy_data = _USAGE_CACHE_LEGACY_UNREAD
+
+
+def _usage_cache_kind_entries(kind):
+    """某一类状态的条目列表（读一次、按类记忆）；没有可用来源时返回 None。
+
+    本类文件不存在或读不出时回退到升级前的单文件里对应的那一节：升级后的
+    第一次刷新因此不必把整个日志重折一遍。本类文件一旦存在（schema 与 kind
+    都对得上）就是唯一来源，旧文件不再参与该类——旧文件里那份可能更旧，也
+    可能已经和日志对不上，位置校验各自负责。
 
     调用点可能在状态锁内（采用阶段），所以本函数会取 _usage_cache_lock；
     反向的锁序不存在——写盘路径取状态锁之前一定先放开本锁，见
     _usage_cache_maybe_save。
     """
-    global _usage_cache_loaded, _usage_cache_read_result
     if not _usage_cache_enabled():
         return None
-    if _usage_cache_loaded:
-        return _usage_cache_read_result
     with _usage_cache_lock:
-        if not _usage_cache_loaded:
-            _usage_cache_read_result = _usage_cache_read()
-            _usage_cache_loaded = True
-        return _usage_cache_read_result
+        if kind not in _usage_cache_kind_cache:
+            entries = _usage_cache_read_kind(kind)
+            if entries is None:
+                entries = _usage_cache_read_legacy_kind(kind)
+            _usage_cache_kind_cache[kind] = entries
+        return _usage_cache_kind_cache[kind]
 
 
-def _usage_cache_read():
-    """读 checkpoint 文件并做顶层校验；任何一步不成立都返回 None。
+def _usage_cache_read_kind(kind):
+    """读某一类的 checkpoint 文件并做顶层校验；任何一步不成立都返回 None。
 
     None 和「文件不存在」同义：调用方按没有缓存处理，绝不因此报错。
+    调用方持有 _usage_cache_lock（解析在锁内做，与 v3 的单文件读取一致）。
     """
     try:
-        with open(_usage_cache_path(), "rb") as fh:
+        with open(_usage_cache_kind_path(kind), "rb") as fh:
             raw = fh.read()
     except OSError:
         return None
@@ -5461,6 +8454,54 @@ def _usage_cache_read():
     if not _usage_cache_int(data.get("schema")):
         return None
     if data["schema"] != _USAGE_CACHE_SCHEMA:
+        return None
+    # kind 标签是双保险：文件被复制/改名成另一类的名字时，宁可当没有缓存。
+    if data.get("kind") != kind:
+        return None
+    entries = data.get("entries")
+    if not isinstance(entries, list):
+        return None
+    return entries
+
+
+def _usage_cache_read_legacy_kind(kind):
+    """升级前单文件（v3）里某一类的条目，或 None；文件只解析一次。
+
+    调用方持有 _usage_cache_lock。条目列表是解析结果的一部分，采用路径从
+    它里面 pop（取过即删），与 v3 时的用法一致。
+    """
+    global _usage_cache_legacy_data
+    if _usage_cache_legacy_data is _USAGE_CACHE_LEGACY_UNREAD:
+        _usage_cache_legacy_data = _usage_cache_read_legacy_file()
+    data = _usage_cache_legacy_data
+    if not isinstance(data, dict):
+        return None
+    entries = data.get(kind)
+    if not isinstance(entries, list):
+        return None
+    return entries
+
+
+def _usage_cache_read_legacy_file():
+    """升级前的单文件（v3）解析结果，或 None。
+
+    只做顶层校验（对象 + schema 恰好是 3）。不校验它的 kind 字段——v3 的
+    文件本来就没有这个字段，各类小节就是顶层键。任何一步不成立都返回 None。
+    """
+    try:
+        with open(_usage_cache_path(), "rb") as fh:
+            raw = fh.read()
+    except OSError:
+        return None
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    if not _usage_cache_int(data.get("schema")):
+        return None
+    if data["schema"] != _USAGE_CACHE_LEGACY_SCHEMA:
         return None
     return data
 
@@ -5487,28 +8528,6 @@ def _object_digest(obj):
         _usage_cache_digest_memo.clear()
     _usage_cache_digest_memo[id(obj)] = (obj, digest)
     return digest
-
-
-def _pricing_inputs_key(inputs):
-    """把 _pricing_inputs() 的元组压成一段跨进程可比的价格指纹。
-
-    进程内那套靠对象身份（_pricing_unchanged），身份活不过重启，所以这里存
-    内容摘要。摘要取的是取价函数真正返回的对象而不是价表文件：文件损坏时会
-    回退到内联表，折叠读到的也是内联表，指纹必须描述折叠真正读的东西；文件
-    不在时内联表有没有变过，也只有摘要看得出来。
-    """
-    if inputs is None:
-        return None
-    if not inputs[0]:
-        # 总开关关着：取价路径一个价表都不读，开关本身就是全部输入。
-        return ["off"]
-    digests = []
-    for obj in inputs[1:]:
-        digest = _object_digest(obj)
-        if digest is None:
-            return None
-        digests.append(digest)
-    return ["on"] + digests
 
 
 def _realm_inputs_key(inputs):
@@ -5564,8 +8583,8 @@ def _usage_cache_bucket_ok(bucket):
     return _usage_cache_counts_ok(bucket.get("accounts"))
 
 
-def _usage_cache_snapshot_ok(snap):
-    """snapshot 折叠的形状。
+def _usage_cache_snapshot_bucket_ok(snap):
+    """一个窗口半快照桶的形状（all-time 半、日桶、小时桶共用）。
 
     少一个键，折叠或 _copy_usage_snapshot() 就会半路抛错，那次刷新报出半份
     数字——校验必须挡在采用之前。
@@ -5601,6 +8620,33 @@ def _usage_cache_snapshot_ok(snap):
     return True
 
 
+def _usage_cache_snapshot_ok(snap):
+    """窗口半快照桶 + 它可能挂着的小时子表（见 _usage_hour_bucket）。
+
+    小时子表的校验与时间序列那份（_usage_cache_series_bucket_ok）同一套：
+    键是数字字符串（折叠侧从一开始就写 str(序号)，与 JSON 往返后的形状
+    一致），子桶形状同快照桶且不再嵌表（表只挂在日桶上）。at 是格点，
+    没有它求和侧就做不了格点校验，所以这里也要求它是数字。
+    """
+    if not _usage_cache_snapshot_bucket_ok(snap):
+        return False
+    hours = snap.get("hours")
+    if hours is None:
+        return True
+    if not isinstance(hours, dict):
+        return False
+    for hour, sub in hours.items():
+        if not (isinstance(hour, str) and hour.isdigit()):
+            return False
+        if not isinstance(sub, dict) or "hours" in sub:
+            return False
+        if not _usage_cache_number(sub.get("at")):
+            return False
+        if not _usage_cache_snapshot_bucket_ok(sub):
+            return False
+    return True
+
+
 def _usage_cache_stat_ok(stat):
     """一个 analytics 统计桶：折叠会就地累加它的每一个字段。"""
     if not isinstance(stat, dict):
@@ -5625,7 +8671,7 @@ def _usage_cache_models_ok(models):
 
 
 def _usage_cache_analytics_window_ok(maps):
-    """窗口形状的 analytics maps（日桶）：同一批表，装的是 window 那一半。
+    """窗口形状的 analytics maps（日桶/小时桶）：同一批表，装的是 window 那一半。
 
     与 _usage_cache_analytics_ok 是两份形状，不能互相顶替：日桶只折窗口半，
     少 all_time/all_models 两个键，用 all-time 的校验器会把整份 analytics
@@ -5669,6 +8715,44 @@ def _usage_cache_analytics_window_ok(maps):
         if not _usage_cache_number(entry.get("last_at")):
             return False
     return True
+
+
+def _usage_cache_analytics_hours_ok(hours):
+    """analytics 日桶的小时子表：{小时键: 窗口形状 maps + at}。
+
+    小时键是数字字符串（JSON 的对象键只能是字符串，折叠侧从一开始就用
+    str(小时序号)），子桶就是一份窗口形状 maps 再带它自己的 at——形状与
+    时间序列的小时子表同一个道理。
+    """
+    if not isinstance(hours, dict):
+        return False
+    for hour, sub in hours.items():
+        if not (isinstance(hour, str) and hour.isdigit()):
+            return False
+        if not isinstance(sub, dict) or "hours" in sub:
+            return False
+        if not _usage_cache_number(sub.get("at")):
+            return False
+        if not _usage_cache_analytics_window_ok(sub):
+            return False
+    return True
+
+
+def _usage_cache_analytics_day_ok(bucket):
+    """analytics 的日桶：窗口形状 maps + at（本地午夜）+ hours 子表。
+
+    小时层要靠 at 与小时子表回答自定义窗口，两者缺一这份状态就只能服务
+    按日对齐的窗口——旧版本写下的日桶（没有这两个键）因此在这里被拒，
+    升级后 analytics 整体重折一次（一次性代价），小时层立刻就有历史可借；
+    snapshot/series 等其余四份状态照旧采用，不受影响。
+    """
+    if not isinstance(bucket, dict):
+        return False
+    if not _usage_cache_number(bucket.get("at")):
+        return False
+    if not _usage_cache_analytics_hours_ok(bucket.get("hours")):
+        return False
+    return _usage_cache_analytics_window_ok(bucket)
 
 
 def _usage_cache_analytics_ok(maps):
@@ -5734,9 +8818,13 @@ def _usage_cache_buckets_ok(buckets):
 def _usage_cache_remaining_ok(entry):
     """剩余用量折叠：事件表 + 每个 (账号, 模型) 的 at/cum 两个平行列表。
 
-    at 必须单调（窗口求和靠二分找左端）、cum 必须单调且与 at 等长——这两条
-    是加载后一切查询的前提，坏一条就会静默算出错数字，所以逐元素走一遍：
-    一次重启付 1~3ms，换掉一次全量冷扫。
+    cum 必须单调（回退=负增量=坏数据）且与 at 等长、base 不可能超过 cum[0]
+    ——这些是加载后一切查询的前提，坏一条就会静默算出错数字，所以逐元素走
+    一遍：一次重启付 1~3ms，换掉一次全量冷扫。
+    `at` **不要求有序**：写入侧的 at 是请求完成时刻，多线程下会回退几毫秒
+    （真机日志与路由器自己写出的 checkpoint 都踩过），旧版在这里整份拒绝、
+    每次重启都退回冷扫。加载端改为由 _pair_repair 做一次稳定排序（配对不变、
+    前缀和重算），所以有序性校验搬到了那里，形状检查留在这里。
     """
     if not isinstance(entry, dict):
         return False
@@ -5783,13 +8871,9 @@ def _usage_cache_remaining_ok(entry):
             return False
         if pair["head"] < 0 or pair["head"] > len(at) or pair["base"] < 0:
             return False
-        last_at = None
         for value in at:
             if not _usage_cache_number(value):
                 return False
-            if last_at is not None and value < last_at:
-                return False
-            last_at = value
         last_cum = None
         for value in cum:
             if not _usage_cache_int(value):
@@ -5856,6 +8940,50 @@ def _usage_cache_series_bucket_ok(bucket):
     return True
 
 
+def _usage_cache_series_minutes_ok(rows):
+    """分钟环的落盘形状：[分钟, 8 个数字] 的严格升序列表。
+
+    None 是合法的（旧版 checkpoint 没有分钟环这个键）：采用端把它当「环只
+    从采用点之后才完整」处理（见 _usage_cache_adopt_series），所以这里放行
+    而不是拒整份。行首必须是真整数（JSON 里 12345.0 不算）、严格递增——
+    递增同时钉住「没有重复分钟」；其余 8 个必须是折叠累加出来的数字。
+    """
+    if rows is None:
+        return True
+    if not isinstance(rows, list):
+        return False
+    last = None
+    for row in rows:
+        if not isinstance(row, list) or len(row) != 1 + len(_SERIES_MINUTE_FIELDS):
+            return False
+        minute = row[0]
+        if not _usage_cache_int(minute):
+            return False
+        if last is not None and minute <= last:
+            return False
+        last = minute
+        for value in row[1:]:
+            if not _usage_cache_number(value):
+                return False
+    return True
+
+
+def _usage_cache_minutes_state(rows):
+    """落盘行 -> 折叠时的字典桶（键是 epoch 分钟整数）。
+
+    还原出的桶与冷折出来的逐字段同类型（int 的字段来自 JSON 的整数写法，
+    credit 是浮点），所以「采用后再切片」与「冷折后切片」的输出逐字节一致。
+    """
+    out = {}
+    for row in rows or []:
+        key = int(row[0])
+        bucket = _new_series_bucket(key * 60)
+        for index, field in enumerate(_SERIES_MINUTE_FIELDS, start=1):
+            bucket[field] = row[index]
+        out[key] = bucket
+    return out
+
+
 def _usage_cache_credits_ok(credits):
     """credit 缓冲：{at, iso, model, account, credit, total_tokens} 的列表。"""
     if not isinstance(credits, list):
@@ -5872,17 +9000,32 @@ def _usage_cache_credits_ok(credits):
     return True
 
 
+def _usage_cache_hits_ok(hits, overflow):
+    """闭窗口边沿账的落盘形状：[整秒 epoch] 列表 + 严格 bool 溢出标记。
+
+    旧版 checkpoint 没有这两个键（entry.get 给 None）→ 拒：升级后第一次刷新
+    重折一次（与 v3→v4「缺小时表的 snapshot/analytics 被拒、一次性重折」
+    同一套处置）。账是「直到某刻没有行落在整秒上」的证明，缺了它闭窗口只能
+    退回扫描（正确但慢），宁可重折一次把它补全。
+    """
+    if not isinstance(hits, list) or not isinstance(overflow, bool):
+        return False
+    for value in hits:
+        if not _usage_cache_int(value):
+            return False
+    return True
+
+
 def _usage_cache_take(kind, realm=None):
-    """从 checkpoint 数据里取出一份状态（取过即删），没有合适的返回 None。
+    """从 checkpoint 里取出一份状态（取过即删），没有合适的返回 None。
 
     snapshot/analytics 按 realm 匹配（JSON 的 null 表示不限 realm），
     by_account / remaining 只有一份。逐份取用：同一份不会被第二次采用，也就
     不存在「先取走、校验失败、下个 realm 又拿到一份脏状态」的路径。
+
+    只解析、只取用调用方要的那一类文件：其余四类连文件都不打开。
     """
-    data = _usage_cache_data()
-    if not data:
-        return None
-    entries = data.get(kind)
+    entries = _usage_cache_kind_entries(kind)
     if not isinstance(entries, list):
         return None
     # 取走这一步也要在锁里：两个 realm 的首次刷新可能同时到这里，一个
@@ -5936,15 +9079,17 @@ def _usage_cache_position_ok(entry, log_key):
     return offset, tail
 
 
-def _usage_cache_fingerprints_ok(entry, pricing_key, realm_key):
-    """价格与 realm 指纹必须和当前进程读到的一致。
+def _usage_cache_fingerprints_ok(entry, pricing_used_ok, realm_key):
+    """「用到的价」与 realm 指纹必须和当前进程读到的一致。
 
-    任一侧取不到（None）都算不一致：取不到就意味着「折叠当时读了什么」已经
-    无法确认，缓存不能当有效用。
+    价格一侧由调用方用 _pricing_used_unchanged(entry["pricing"], pricing)
+    判好（记录形状不符、价表读不出来、总开关翻转都在那里返回 False），这里
+    只把它和 realm 一侧一起收口。任一侧取不到（None）都算不一致：取不到就
+    意味着「折叠当时读了什么」已经无法确认，缓存不能当有效用。
     """
-    if pricing_key is None or realm_key is None:
+    if not pricing_used_ok or realm_key is None:
         return False
-    return entry.get("pricing") == pricing_key and entry.get("realm_inputs") == realm_key
+    return entry.get("realm_inputs") == realm_key
 
 
 def _usage_cache_note_adopted(kind, offset):
@@ -5967,6 +9112,10 @@ def _usage_cache_adopt_snapshot(r, state, log_key, pricing, realm):
 
     调用方持有 _usage_snap_state_lock，并且只在 state 全新时调用：采用只把
     offset/tail 往前挪，折叠逻辑一行不动。
+
+    闭窗口的边沿账（hits/hits_overflow）是这一份的必填项：旧版 checkpoint
+    没有这两个键，会被拒 → 升级后第一次刷新重折一次（一次性代价，与
+    v3→v4 缺小时表时的处置一致）。
     """
     entry = _usage_cache_take("snapshot", r)
     if entry is None:
@@ -5974,8 +9123,9 @@ def _usage_cache_adopt_snapshot(r, state, log_key, pricing, realm):
     position = _usage_cache_position_ok(entry, log_key)
     if position is None:
         return False
-    if not _usage_cache_fingerprints_ok(entry, _pricing_inputs_key(pricing),
-                                        _realm_inputs_key(realm)):
+    if not _usage_cache_fingerprints_ok(
+            entry, _pricing_used_unchanged(entry.get("pricing"), pricing),
+            _realm_inputs_key(realm)):
         return False
     snap = entry.get("snap")
     if not _usage_cache_snapshot_ok(snap):
@@ -5984,9 +9134,21 @@ def _usage_cache_adopt_snapshot(r, state, log_key, pricing, realm):
     floor = entry.get("days_floor")
     if not _usage_cache_days_ok(days, floor, _usage_cache_snapshot_ok):
         return False
+    hours_floor = entry.get("hours_floor_at")
+    if hours_floor is not None and not _usage_cache_number(hours_floor):
+        return False
+    hits = entry.get("hits")
+    overflow = entry.get("hits_overflow")
+    if not _usage_cache_hits_ok(hits, overflow):
+        return False
     offset, tail = position
     state.update({"snap": snap, "offset": offset, "tail": tail,
-                  "days": days, "days_floor": floor})
+                  "days": days, "days_floor": floor,
+                  "hours_floor_at": _hours_floor_on_adopt(days, hours_floor),
+                  "hits": list(hits), "hits_overflow": overflow,
+                  # 「用到的价」记录跟着状态一起装进来：后续增量折叠继续往
+                  # 这份记录里加，下一次判废拿它比对当前价表。
+                  "pricing": _copy_pricing_record(entry.get("pricing"))})
     _usage_cache_note_adopted("snapshot", offset)
     return True
 
@@ -6013,6 +9175,9 @@ def _usage_cache_adopt_remaining(state, log_key):
 
     事件日志的位置在这里单独校验：它很小，位置对不上就整份放弃——冷读一遍
     两个文件比「先采用一半、再发现对不上」简单得多。
+    每个 pair 还要过一遍 _pair_repair：旧版写出的缓冲按日志顺序排列，`at`
+    可能回退几毫秒，这里统一整理成按 `at` 稳定排序的规范形态（有序的文件
+    上它就是一次 O(n) 的核对）。整理不了的（负增量=坏数据）整份放弃。
     """
     entry = _usage_cache_take("remaining")
     if entry is None or not _usage_cache_remaining_ok(entry):
@@ -6033,8 +9198,11 @@ def _usage_cache_adopt_remaining(state, log_key):
     usage = {}
     for pair_key, pair in entry["usage"].items():
         uid, _, model = pair_key.partition("\x1f")
-        usage[(uid, model)] = {"at": list(pair["at"]), "cum": list(pair["cum"]),
-                               "head": pair["head"], "base": pair["base"]}
+        buf = {"at": list(pair["at"]), "cum": list(pair["cum"]),
+               "head": pair["head"], "base": pair["base"]}
+        if not _pair_repair(buf):
+            return False
+        usage[(uid, model)] = buf
     state["log"] = {"offset": offset, "key": tuple(entry["key"]), "tail": tail}
     state["file"] = file_state
     state["usage"] = usage
@@ -6046,26 +9214,36 @@ def _usage_cache_adopt_remaining(state, log_key):
 
 
 def _usage_cache_adopt_analytics(realm, state, log_key, pricing, realm_inputs):
-    """analytics all-time 折叠的采用。"""
+    """analytics all-time 折叠的采用；闭窗口的边沿账是必填项（见 snapshot 版）。"""
     entry = _usage_cache_take("analytics", realm)
     if entry is None:
         return False
     position = _usage_cache_position_ok(entry, log_key)
     if position is None:
         return False
-    if not _usage_cache_fingerprints_ok(entry, _pricing_inputs_key(pricing),
-                                        _realm_inputs_key(realm_inputs)):
+    if not _usage_cache_fingerprints_ok(
+            entry, _pricing_used_unchanged(entry.get("pricing"), pricing),
+            _realm_inputs_key(realm_inputs)):
         return False
     maps = entry.get("maps")
     if not _usage_cache_analytics_ok(maps):
         return False
     days = entry.get("days")
     floor = entry.get("days_floor")
-    if not _usage_cache_days_ok(days, floor, _usage_cache_analytics_window_ok):
+    if not _usage_cache_days_ok(days, floor, _usage_cache_analytics_day_ok):
+        return False
+    max_at = entry.get("max_at")
+    if not _usage_cache_number(max_at):
+        return False
+    hits = entry.get("hits")
+    overflow = entry.get("hits_overflow")
+    if not _usage_cache_hits_ok(hits, overflow):
         return False
     offset, tail = position
     state.update({"maps": maps, "offset": offset, "tail": tail,
-                  "days": days, "days_floor": floor})
+                  "days": days, "days_floor": floor, "max_at": max_at,
+                  "hits": list(hits), "hits_overflow": overflow,
+                  "pricing": _copy_pricing_record(entry.get("pricing"))})
     _usage_cache_note_adopted("analytics", offset)
     return True
 
@@ -6091,9 +9269,30 @@ def _usage_cache_adopt_series(r, state, log_key, realm_inputs):
     credits = entry.get("credits")
     if not _usage_cache_credits_ok(credits):
         return False
+    minutes = entry.get("minutes")
+    if not _usage_cache_series_minutes_ok(minutes):
+        return False
+    minutes_from = entry.get("minutes_from")
+    if minutes_from is not None and not _usage_cache_number(minutes_from):
+        return False
+    hits = entry.get("hits")
+    overflow = entry.get("hits_overflow")
+    if not _usage_cache_hits_ok(hits, overflow):
+        return False
+    if minutes is None:
+        # 旧版 checkpoint（没有分钟环这个键）：这一份状态是能用的（日/小时桶
+        # 与 credits 都在），只是分钟环要从采用点之后才开始折。把完整线记成
+        # 采用时的 max_at——前缀里所有行的 at 都 <= 它，所以起点晚于它的窗口
+        # 只碰得到之后折进来的行，环对它们是完整的；早于它的窗口一律退回
+        # 整段扫描（见 _series_slice_minutes）。
+        minutes = []
+        minutes_from = max_at
     offset, tail = position
     state.update({"days": days, "days_floor": floor, "max_at": max_at,
-                  "credits": credits, "offset": offset, "tail": tail})
+                  "credits": credits, "offset": offset, "tail": tail,
+                  "minutes": _usage_cache_minutes_state(minutes),
+                  "minutes_from": minutes_from,
+                  "hits": list(hits), "hits_overflow": overflow})
     _usage_cache_note_adopted("series", offset)
     return True
 
@@ -6110,6 +9309,45 @@ def _copy_series_day(bucket):
     return copy
 
 
+def _copy_snapshot_day(bucket):
+    """一个窗口半日桶的深拷贝（含 hours 子表，见 _usage_hour_bucket）。"""
+    copy = _copy_usage_snapshot(bucket)
+    hours = bucket.get("hours")
+    if hours is not None:
+        copy["hours"] = {h: _copy_usage_snapshot(sub)
+                         for h, sub in hours.items()}
+    return copy
+
+
+# 分钟环落盘行的字段顺序：[分钟, 这 8 个数字]（at 由分钟推出，省下每桶 10
+# 字节；credit 在最后，与 _new_series_bucket 的键序一致）。
+_SERIES_MINUTE_FIELDS = ("requests", "errors", "prompt_tokens",
+                         "completion_tokens", "reasoning_tokens",
+                         "cached_tokens", "total_tokens", "credit")
+
+
+def _usage_cache_minutes_copy(minutes):
+    """分钟环的落盘形态：按分钟升序的 [分钟, 8 个数字] 行。
+
+    形状与内存里的字典桶不同（键换成行首的整数、字段名省掉），这是刻意的
+    体积预算：环最多 361 个桶（6 小时），字典形状每个桶 ~150 字节、满环要
+    50KB 级，位置数组把每个桶压到 40~50 字节（本机真实数据实测 52）。形状
+    差异只存在于落盘/加载这一层：加载端（_usage_cache_minutes_state）还原
+    成与冷折完全一样的字典桶，切片与输出的字节不受影响。排序写出而不是按
+    插入顺序，是为了让文件内容与折叠顺序无关（冷折与「采用后再折」写出的
+    这份字节一致）。状态里没有环（不该发生，但落盘不靠断言）时写 null：
+    加载端按「环不完整」处理。
+    """
+    if minutes is None:
+        return None
+    rows = []
+    for key in sorted(minutes or {}):
+        bucket = minutes[key]
+        rows.append([int(key)] + [bucket.get(field)
+                                  for field in _SERIES_MINUTE_FIELDS])
+    return rows
+
+
 def _usage_cache_snapshot_entry(realm, state):
     """一份 snapshot 状态的 JSON 形态；不适合落盘时返回 None。
 
@@ -6120,10 +9358,15 @@ def _usage_cache_snapshot_entry(realm, state):
     tail = state.get("tail")
     if offset <= 0 or not isinstance(tail, bytes) or state.get("snap") is None:
         return None
-    pricing_key = _pricing_inputs_key(state.get("pricing"))
+    # 「用到的价」记录（T15；见「用到的价」状态指纹一节）：形状不合格就不写。
+    # 记录为 None（总开关关着 / 价表读不出来）时也跳过——那份折叠没读任何价，
+    # 落盘没有任何加速作用（采纳端只认「记录也是 None」这一种一致）。
+    record = state.get("pricing")
+    if not _pricing_record_ok(record):
+        return None
     realm_inputs = state.get("realm")
     realm_key = _realm_inputs_key(realm_inputs)
-    if pricing_key is None or realm_key is None:
+    if realm_key is None:
         return None
     if not _realm_fold_reproducible(realm_inputs[1]):
         # 这次折叠的归属冷进程复现不了（见 _realm_fold_reproducible）：写下去
@@ -6131,14 +9374,25 @@ def _usage_cache_snapshot_entry(realm, state):
         return None
     return {"realm": realm, "offset": offset,
             "key": list(state["key"] or (0, 0, 0)), "tail": tail.hex(),
-            "pricing": pricing_key, "realm_inputs": realm_key,
+            # 记录的深拷贝在锁内做，序列化在锁外做（同下面几份深拷贝）。
+            "pricing": _copy_pricing_record(record), "realm_inputs": realm_key,
             # 深拷贝在锁内做，序列化在锁外做（见 _usage_cache_collect）。
             "snap": _copy_usage_snapshot(state["snap"]),
             # 按日分桶的窗口半：与 all-time 半同一次扫描折出来的，位置也
-            # 跟着同一条 offset/tail 校验，不另设一套。
+            # 跟着同一条 offset/tail 校验，不另设一套。日桶里还挂着小时
+            # 子表（T9 的小时层），深拷贝必须跟着一起做。
             "days": _usage_cache_days_copy(state.get("days"),
-                                           _copy_usage_snapshot),
-            "days_floor": state.get("days_floor")}
+                                           _copy_snapshot_day),
+            "days_floor": state.get("days_floor"),
+            # 小时层的剪枝线（见 _hours_cover）：缺了它重启后的小时层要么
+            # 不折（None 直接挡住 _usage_hour_bucket），要么服务了被剪过的
+            # 天——两者都不对，所以它和日桶一起落盘。
+            "hours_floor_at": state.get("hours_floor_at"),
+            # 闭窗口的边沿账（见 _closed_window_hit_record）：直到某刻没有行
+            # 落在整秒上的证明。旧版 checkpoint 没有这两个键，采用端因此
+            # 拒整份、升级后一次性重折。
+            "hits": list(state["hits"]),
+            "hits_overflow": bool(state["hits_overflow"])}
 
 
 def _usage_cache_by_account_entry(state):
@@ -6197,27 +9451,37 @@ def _usage_cache_analytics_entry(realm, state):
     tail = state.get("tail")
     if offset <= 0 or not isinstance(tail, bytes):
         return None
-    pricing_key = _pricing_inputs_key(state.get("pricing"))
+    record = state.get("pricing")
+    if not _pricing_record_ok(record):
+        return None          # 同 snapshot：「用到的价」记录不合格就不写
     realm_inputs = state.get("realm")
     realm_key = _realm_inputs_key(realm_inputs)
-    if pricing_key is None or realm_key is None:
+    if realm_key is None:
         return None
     if not _realm_fold_reproducible(realm_inputs[1]):
         return None          # 同 snapshot：这次折叠的归属冷进程复现不了
     return {"realm": realm, "offset": offset,
             "key": list(state["key"] or (0, 0, 0)), "tail": tail.hex(),
-            "pricing": pricing_key, "realm_inputs": realm_key,
+            "pricing": _copy_pricing_record(record), "realm_inputs": realm_key,
             "maps": _copy_analytics_all_time(state["maps"]),
             "days": _usage_cache_days_copy(state.get("days"),
                                            _copy_analytics_window_maps),
-            "days_floor": state.get("days_floor")}
+            "days_floor": state.get("days_floor"),
+            # 折过的最大 at：小时层靠它判断 until 有没有切掉桶里的行。
+            "max_at": state.get("max_at") or 0,
+            # 闭窗口的边沿账（见 _closed_window_hit_record）：旧版 checkpoint
+            # 没有这两个键，采用端因此拒整份、升级后一次性重折。
+            "hits": list(state["hits"]),
+            "hits_overflow": bool(state["hits_overflow"])}
 
 
 def _usage_cache_series_entry(realm, state):
     """时间序列状态的 JSON 形态；同上，只写折叠成功过的。
 
     这一份最大（日桶 + 24 小时子桶 × 保留天数），所以深拷贝只拷桶本身，
-    credit 缓冲是 dict 列表、直接浅拷外层。
+    credit 缓冲是 dict 列表、直接浅拷外层。分钟环再压一层：落盘用位置数组
+    而不是字典桶（见 _usage_cache_minutes_copy），满环 361 个桶也就 10KB
+    量级（本机实测每桶 52 字节），字典形状会平白多出几十 KB。
     """
     offset = state.get("offset") or 0
     tail = state.get("tail")
@@ -6232,64 +9496,73 @@ def _usage_cache_series_entry(realm, state):
             "days": _usage_cache_days_copy(state.get("days"), _copy_series_day),
             "days_floor": state.get("days_floor"),
             "max_at": state.get("max_at") or 0,
-            "credits": [dict(item) for item in (state.get("credits") or [])]}
+            "credits": [dict(item) for item in (state.get("credits") or [])],
+            "minutes": _usage_cache_minutes_copy(state.get("minutes")),
+            "minutes_from": state.get("minutes_from"),
+            # 闭窗口的边沿账（见 _closed_window_hit_record）：旧版 checkpoint
+            # 没有这两个键，采用端因此拒整份、升级后一次性重折。
+            "hits": list(state["hits"]),
+            "hits_overflow": bool(state["hits_overflow"])}
 
 
-def _usage_cache_collect():
-    """逐把取五份状态，做锁外可序列化的深拷贝；返回 (payload, offsets) 或 None。
+def _usage_cache_collect_kind(kind):
+    """逐把取一类状态，做锁外可序列化的深拷贝；返回 (entries, offset) 或 None。
 
-    每份状态单独加锁、单独拷贝，几份之间不强求同一个瞬间：加载端对每份分别
-    校验 offset/tail/指纹，一份新一份旧也各自成立。锁是逐把拿、随即放开的，
-    不存在嵌套——写盘路径不能制造「snapshot -> analytics」这样的锁序边。
+    每次只取一类：写盘路径按类分别调用，只重写「有推进的那一类」。状态各自
+    加锁、各自拷贝，各类之间不强求同一个瞬间：加载端对每份分别校验 offset/
+    tail/指纹，一份新一份旧也各自成立。锁是逐把拿、随即放开的，不存在嵌套
+    ——写盘路径不能制造「snapshot -> analytics」这样的锁序边。
+
+    entries 为空（状态都归零/不可复现）时返回 None：没得写就不写，等下一次
+    折叠成功再落盘。offset 是该类各 realm 状态里的最远位置。
     """
-    snapshot_entries = []
-    by_account_entries = []
-    analytics_entries = []
-    series_entries = []
-    remaining_entries = []
-    offsets = {}
-    with _usage_snap_state_lock:
-        for realm, state in _usage_snap_state.items():
-            entry = _usage_cache_snapshot_entry(realm, state)
-            if entry is not None:
-                snapshot_entries.append(entry)
-                offsets["snapshot"] = max(offsets.get("snapshot", 0), state["offset"])
-    with _byacct_state_lock:
-        entry = _usage_cache_by_account_entry(_byacct_state)
-        if entry is not None:
-            by_account_entries.append(entry)
-            offsets["by_account"] = _byacct_state["offset"]
-    with _analytics_state_lock:
-        for realm, state in _analytics_state.items():
-            entry = _usage_cache_analytics_entry(realm, state)
-            if entry is not None:
-                analytics_entries.append(entry)
-                offsets["analytics"] = max(offsets.get("analytics", 0), state["offset"])
-    with _series_state_lock:
-        for realm, state in _series_state.items():
-            entry = _usage_cache_series_entry(realm, state)
-            if entry is not None:
-                series_entries.append(entry)
-                offsets["series"] = max(offsets.get("series", 0), state["offset"])
-    with _remaining_state_lock:
-        entry = _usage_cache_remaining_entry(_remaining_state)
-        if entry is not None:
-            remaining_entries.append(entry)
-            offsets["remaining"] = entry["offset"]
-    if not (snapshot_entries or by_account_entries or analytics_entries
-            or series_entries or remaining_entries):
-        return None
-    payload = {"schema": _USAGE_CACHE_SCHEMA, "written_at": time.time(),
-               "snapshot": snapshot_entries, "by_account": by_account_entries,
-               "analytics": analytics_entries, "series": series_entries,
-               # 新增的一类：老版本读这份文件时会忽略这个键（它只校验 schema
-               # 与自己的几个键），所以不用抬 schema、也就不会让别人的缓存失效。
-               "remaining": remaining_entries}
-    return payload, offsets
+    if kind == "snapshot":
+        entries = []
+        done = 0
+        with _usage_snap_state_lock:
+            for realm, state in _usage_snap_state.items():
+                entry = _usage_cache_snapshot_entry(realm, state)
+                if entry is not None:
+                    entries.append(entry)
+                    done = max(done, state["offset"])
+        return (entries, done) if entries else None
+    if kind == "by_account":
+        with _byacct_state_lock:
+            entry = _usage_cache_by_account_entry(_byacct_state)
+            if entry is None:
+                return None
+            return [entry], _byacct_state["offset"]
+    if kind == "analytics":
+        entries = []
+        done = 0
+        with _analytics_state_lock:
+            for realm, state in _analytics_state.items():
+                entry = _usage_cache_analytics_entry(realm, state)
+                if entry is not None:
+                    entries.append(entry)
+                    done = max(done, state["offset"])
+        return (entries, done) if entries else None
+    if kind == "series":
+        entries = []
+        done = 0
+        with _series_state_lock:
+            for realm, state in _series_state.items():
+                entry = _usage_cache_series_entry(realm, state)
+                if entry is not None:
+                    entries.append(entry)
+                    done = max(done, state["offset"])
+        return (entries, done) if entries else None
+    if kind == "remaining":
+        with _remaining_state_lock:
+            entry = _usage_cache_remaining_entry(_remaining_state)
+            if entry is None:
+                return None
+            return [entry], entry["offset"]
+    return None
 
 
-def _usage_cache_write(payload):
-    """原子写：同目录临时文件 + os.replace。
+def _usage_cache_write_kind(kind, entries):
+    """原子写一类状态的 checkpoint：同目录临时文件 + os.replace。
 
     直接在目标文件上写，崩在中间会留下半份 JSON；加载端虽然能识别（解析失败
     按没有缓存处理），但一份完整的旧文件更省事。不 fsync：这是一份加速件，
@@ -6299,8 +9572,24 @@ def _usage_cache_write(payload):
     排），加载回来必须与冷启动逐字节一致——响应的 JSON 字节里键序是可见的，
     而冷启动折叠出的顺序正是这份插入顺序。排序只留给 _object_digest() 那种
     「只要内容一样就算一样」的指纹。
+
+    盘上「本进程还没碰过」的 realm 条目原样保留：一类里按 realm 分条目，
+    写盘只重写活跃 realm 的那些；不保留的话，重启后先折的 realm 触发一次写盘
+    就会把别的 realm 的旧条目整份清掉，那些 realm 下次请求只能重折（真机
+    实测：重启后先请求 realm=all 再请求 realm=intl，intl 重折 15s）。保留的
+    条目仍要过加载端的逐条校验，位置/指纹对不上照样被拒——宁可多扫一次。
     """
-    path = _usage_cache_path()
+    if kind in ("snapshot", "analytics", "series"):
+        live_realms = {entry.get("realm") for entry in entries}
+        with _usage_cache_lock:
+            old = _usage_cache_read_kind(kind) or []
+        keep = [e for e in old
+                if isinstance(e, dict) and e.get("realm") not in live_realms]
+        if keep:
+            entries = list(entries) + keep
+    payload = {"schema": _USAGE_CACHE_SCHEMA, "kind": kind,
+               "written_at": time.time(), "entries": entries}
+    path = _usage_cache_kind_path(kind)
     tmp = path + ".tmp"
     text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     try:
@@ -6316,11 +9605,20 @@ def _usage_cache_write(payload):
 
 
 def _usage_cache_maybe_save(kind, offset):
-    """一次折叠成功后，按节流阈值决定要不要把三份状态落盘。
+    """一次折叠成功后，按节流阈值决定要不要把「有推进的类」落盘。
 
-    调用点必须在状态锁之外：这里要逐把取三份状态，在状态锁里再取别的状态锁
+    调用点必须在状态锁之外：这里要逐把取状态，在状态锁里再取别的状态锁
     会构成锁序环（snapshot -> analytics 与反向同时存在）。任何异常都吞掉——
     落盘失败只损失一次加速，不能影响这次刷新。
+
+    写盘按类分开（v4）：没推进的类连文件都不重写——旧布局里一份文件装五类，
+    任何一类推进都要整份重写；现在单视图进程只重写自己那一类的几十 KB。
+
+    写哪几类：字节阈值到点的类（progress - checkpointed >= min_bytes）里，写
+    调用方那一类（它刚折完，状态最新）和真正推进过的类；计时器到点而没有任何
+    类到字节阈值时，写所有推进过的类。字节阈值设成 0（测试/探针的强制写）时
+    「到点」对所有折过的类都成立，过滤器把没推进过的那些留在原地——旧布局里
+    它们的内容与盘上逐字节相同，重写只是写放大。
     """
     global _usage_cache_last_attempt
     if not _usage_cache_enabled():
@@ -6337,31 +9635,41 @@ def _usage_cache_maybe_save(kind, offset):
                     _usage_cache_progress[kind] = offset
                 min_bytes = _usage_cache_min_bytes()
                 min_seconds = _usage_cache_min_seconds()
-                due = any(_usage_cache_progress.get(k, 0)
-                          - _usage_cache_checkpointed.get(k, 0) >= min_bytes
-                          for k in _usage_cache_progress)
+                due_kinds = [k for k in _usage_cache_progress
+                             if _usage_cache_progress.get(k, 0)
+                             - _usage_cache_checkpointed.get(k, 0) >= min_bytes]
                 # 计时器分支只在**确有推进**时才允许触发：进度没动时写出的
                 # 是一份与上次逐字节相同的 checkpoint，纯写放大——面板开着
                 # 就每 900s 白写一份 120KB（复现见套件 [7]）。空闲重写对
                 # 「重启后免冷扫」没有任何贡献，只有日志增长才值得落盘。
-                advanced = any(_usage_cache_progress.get(k, 0)
-                               > _usage_cache_checkpointed.get(k, 0)
-                               for k in _usage_cache_progress)
-                if not due and (not advanced
-                                or (now - _usage_cache_last_attempt) < min_seconds):
+                advanced = [k for k in _usage_cache_progress
+                            if _usage_cache_progress.get(k, 0)
+                            > _usage_cache_checkpointed.get(k, 0)]
+                if not due_kinds and (not advanced
+                                      or (now - _usage_cache_last_attempt)
+                                      < min_seconds):
                     return
                 # 记「尝试」而不是「成功」：只读文件系统上失败会一直成立，
                 # 不退避的话每次刷新都去试写一遍。
                 _usage_cache_last_attempt = now
-            collected = _usage_cache_collect()
-            if collected is None:
-                return
-            payload, offsets = collected
-            _usage_cache_write(payload)
-            with _usage_cache_lock:
-                for k, value in offsets.items():
-                    if value > _usage_cache_checkpointed.get(k, 0):
-                        _usage_cache_checkpointed[k] = value
+                write_kinds = [k for k in due_kinds
+                               if k == kind or k in advanced] or advanced
+            # 某一类收集不出东西（状态归零/归属不可复现）就跳过它：其余类照常
+            # 落盘，互不牵连——这是拆文件的意义所在。
+            for advanced_kind in write_kinds:
+                try:
+                    collected = _usage_cache_collect_kind(advanced_kind)
+                    if collected is None:
+                        continue
+                    entries, done = collected
+                    _usage_cache_write_kind(advanced_kind, entries)
+                except Exception as exc:
+                    log("usage aggregate cache write failed (%s): %s"
+                        % (advanced_kind, exc))
+                    continue
+                with _usage_cache_lock:
+                    if done > _usage_cache_checkpointed.get(advanced_kind, 0):
+                        _usage_cache_checkpointed[advanced_kind] = done
     except Exception as exc:
         log("usage aggregate cache write failed: %s" % exc)
 
@@ -6414,14 +9722,19 @@ def runtime_settings_view():
         "model_daily_token_limit": wb_settings.model_daily_token_limit(ACCOUNTS_DIR),
         "pricing_refresh_minutes": wb_settings.pricing_refresh_minutes(ACCOUNTS_DIR),
         "credits_refresh_hours": wb_settings.credits_refresh_hours(ACCOUNTS_DIR),
+        "section_max_height": wb_settings.section_max_height(ACCOUNTS_DIR),
         "ui_language": wb_settings.ui_language(ACCOUNTS_DIR),
         "pricing_variant_inherit": wb_settings.pricing_variant_inherit(ACCOUNTS_DIR),
         "pricing_enabled": wb_settings.pricing_enabled(ACCOUNTS_DIR),
         "auto_switch_product": wb_settings.auto_switch_product(ACCOUNTS_DIR),
         "daily_chat_web": wb_settings.daily_chat_web(ACCOUNTS_DIR),
+        "daily_chat_model": wb_settings.daily_chat_model(ACCOUNTS_DIR),
+        "daily_chat_model_default": wb_accounts.DAILY_CHAT_MODEL,
         "local_web_tools": wb_settings.local_web_tools(ACCOUNTS_DIR),
         "remaining_priority_enabled":
             wb_settings.remaining_priority_enabled(ACCOUNTS_DIR),
+        "egress_backoff_enabled":
+            wb_settings.egress_backoff_enabled(ACCOUNTS_DIR),
         "accounts_collapsed": wb_settings.accounts_collapsed(ACCOUNTS_DIR),
         "accounts_separate_tab": wb_settings.accounts_separate_tab(ACCOUNTS_DIR),
         "key_before_hidden": wb_settings.key_before_hidden(ACCOUNTS_DIR),
@@ -6432,7 +9745,7 @@ def runtime_settings_view():
         "accounts_dir": ACCOUNTS_DIR,
         "usage_dir": USAGE_DIR,
         "settings_file": wb_settings.settings_path(ACCOUNTS_DIR),
-        "version": "1.6.20",
+        "version": "1.7.3",
     }
 def current_account():
     """Account used for display purposes (health / usage summaries)."""
@@ -6596,6 +9909,9 @@ def log(msg, level=None, tag=None):
     sys.stderr.write(f"[wb-proxy] {time.strftime('%H:%M:%S')} {msg}\n")
     sys.stderr.flush()
     add_log_entry(msg, level=level, tag=tag)
+
+# 本地网路工具的多引擎轮换、冷却与失败分类写进看板日志（tag=webtools）
+wb_webtools.set_logger(log)
 
 def get_logs(limit=200, level="", tag="", search="", since_id=0):
     with _LOG_LOCK:
@@ -7308,7 +10624,7 @@ def retry_snapshot():
 def _patch_payload_fingerprint():
     """Identify this source payload without reading any account or settings."""
     directory = os.path.dirname(__file__)
-    names = ('wb_accounts.py', 'wb_ops.py', 'wb_proxy.py', 'wb_stall.py', 'wb_webtools.py')
+    names = ('wb_accounts.py', 'wb_ops.py', 'wb_proxy.py', 'wb_stall.py', 'wb_upstream_pool.py', 'wb_webtools.py')
     records = []
     try:
         for name in names:
@@ -7319,18 +10635,23 @@ def _patch_payload_fingerprint():
         return None
     return hashlib.sha256(''.join(records).encode('ascii')).hexdigest()
 
-
-# Freeze the identity when this source is imported. Replacing files underneath
-# a running interpreter must not claim that interpreter loaded the new code.
 _OPS_PATCH_FINGERPRINT = _patch_payload_fingerprint()
 
+def _single_candidate_error(payload):
+    """The gateway's aggregation/Responses/Messages lifecycles are singular."""
+    if "n" not in payload:
+        return None
+    value = payload["n"]
+    if type(value) is int and value == 1:
+        return None
+    return "Only n=1 is supported by this gateway; omit n or send the integer 1."
 
 def retry_health_snapshot(limit=200):
     try:
         limit = max(1, min(10000, int(limit)))
     except (ValueError, TypeError):
         limit = 200
-    stats = {"retries": retry_snapshot(), "pid": os.getpid(), "ops_patch_id": "v1.6.20-ops.20261012.1",
+    stats = {"retries": retry_snapshot(), "pid": os.getpid(), "ops_patch_id": "v1.7.3-ops.20261014.1",
              "ops_patch_source": "wushuai0802/workbuddy2api-hub-ops-patch",
              "ops_patch_fingerprint": _OPS_PATCH_FINGERPRINT,
              "loops": loop_health_snapshot(),
@@ -7458,8 +10779,27 @@ def _try_loop_continuation(holder, model, failure, reasoning, content=None, call
     return True
 
 
+def _unsupported_stream_choices(frame):
+    if not isinstance(frame, dict):
+        return False
+    choices = frame.get("choices")
+    if choices is None:
+        return False
+    if not isinstance(choices, list) or len(choices) > 1:
+        return True
+    for choice in choices:
+        if not isinstance(choice, dict):
+            return True
+        index = choice.get("index", 0)
+        if type(index) is not int or index != 0:
+            return True
+    return False
+
+
 def _stream_response(upstream):
-    return upstream.raw if isinstance(upstream, _ProbedStream) else upstream
+    while isinstance(upstream, _ProbedStream):
+        upstream = upstream.raw
+    return upstream
 
 
 def _stream_socket(upstream):
@@ -7474,6 +10814,12 @@ def _stream_socket(upstream):
     if sock is None:
         sock = getattr(getattr(response, "_pool_conn", None), "sock", None)
     return sock
+
+
+def _hold_stream_response(upstream):
+    response = _stream_response(upstream)
+    if getattr(response, "_pool_conn", None) is not None and not getattr(response, "_released", False):
+        response._ops_defer_release = True
 
 
 def _interrupt_upstream(upstream):
@@ -7499,6 +10845,9 @@ def _interrupt_upstream(upstream):
 
 
 def _close_upstream(upstream):
+    response = _stream_response(upstream)
+    if getattr(response, "_pool_conn", None) is not None:
+        response._ops_defer_release = False
     try:
         upstream.close()
     except Exception:
@@ -7506,34 +10855,7 @@ def _close_upstream(upstream):
 
 
 _STREAM_GUARD_CODES = {"reasoning_loop_detected", "content_loop_detected", "generation_timeout",
-                       "upstream_choices_unsupported"}
-
-
-def _single_candidate_error(payload):
-    """The gateway's aggregation/Responses/Messages lifecycles are singular."""
-    if "n" not in payload:
-        return None
-    value = payload["n"]
-    if type(value) is int and value == 1:
-        return None
-    return "Only n=1 is supported by this gateway; omit n or send the integer 1."
-
-
-def _unsupported_stream_choices(frame):
-    if not isinstance(frame, dict):
-        return False
-    choices = frame.get("choices")
-    if choices is None:
-        return False
-    if not isinstance(choices, list) or len(choices) > 1:
-        return True
-    for choice in choices:
-        if not isinstance(choice, dict):
-            return True
-        index = choice.get("index", 0)
-        if type(index) is not int or index != 0:
-            return True
-    return False
+                       "upstream_candidate_unsupported", "upstream_choices_unsupported"}
 
 
 def _generation_deadline(holder):
@@ -7656,6 +10978,7 @@ class _GuardedStream:
 
     def __init__(self, upstream, holder):
         self.upstream = upstream
+        _hold_stream_response(upstream)
         self.holder = holder
         holder.pop("loop_evidence", None)
         self.deadline = _generation_deadline(holder)
@@ -7887,8 +11210,18 @@ class _GuardedStream:
                 yield from pending
             raise
 
+    def _observe_prefetched_usage(self, usage):
+        self.received_usage = _prefer_stream_usage(self.received_usage, usage)
+
     def _frames(self):
-        iterator = iter(self.upstream)
+        before_read = self.holder.get("before_upstream_read")
+        if isinstance(self.upstream, _ProbedStream):
+            self.upstream.set_before_read(before_read)
+            self.upstream.set_usage_observer(self._observe_prefetched_usage)
+            iterator = iter(self.upstream)
+        else:
+            iterator = iter_sse_lines(self.upstream, before_read=before_read,
+                                      on_usage=self._observe_prefetched_usage)
         while True:
             if self._timed_out():
                 yield self._failure("generation_timeout")
@@ -7936,7 +11269,7 @@ class _GuardedStream:
                 return
             choices = (frame.get("choices") or []) if isinstance(frame, dict) else []
             if isinstance(frame, dict) and frame.get("usage"):
-                self.received_usage = frame["usage"]
+                self._observe_prefetched_usage(frame["usage"])
             if ((isinstance(frame, dict) and frame.get("error")) or len(choices) > 1 or
                     any(c.get("index", 0) != 0 for c in choices)):
                 self.recovery.block()
@@ -8033,14 +11366,30 @@ class _GuardedStream:
 
 
 class _ProbedStream:
-    def __init__(self, raw, iterator, prefix):
+    def __init__(self, raw, iterator, prefix, read_hook=None, usage_hook=None):
         self.raw = raw
         self.iterator = itertools.chain(prefix, iterator)
+        self.read_hook = read_hook
+        self.usage_hook = usage_hook
+
+    def set_before_read(self, callback):
+        if self.read_hook is not None:
+            self.read_hook[0] = callback
+
+    def set_usage_observer(self, callback):
+        if self.usage_hook is not None:
+            self.usage_hook['notify'] = callback
+            if callback is not None and self.usage_hook['value'] is not None:
+                callback(self.usage_hook['value'])
 
     def __iter__(self):
         return self.iterator
 
     def __getattr__(self, name):
+        if name == "read1":
+            # Reading raw again would skip the prefix and the chunk remainder
+            # already retained by the first-frame reader.
+            raise AttributeError(name)
         return getattr(self.raw, name)
 
     def close(self):
@@ -8063,6 +11412,7 @@ def probe_first_frame(upstream, retry_call=None, tried=None, deadline_at=None, r
     for attempt in range(FIRST_FRAME_MAX_ATTEMPTS):
         timer = None
         try:
+            _hold_stream_response(upstream)
             remaining = deadline_at - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError("first-frame deadline exceeded")
@@ -8072,7 +11422,16 @@ def probe_first_frame(upstream, retry_call=None, tried=None, deadline_at=None, r
             timer = threading.Timer(remaining, _interrupt_upstream, args=(upstream,))
             timer.daemon = True
             timer.start()
-            iterator = iter(upstream)
+            read_hook = [None]
+            usage_hook = {'value': None, 'notify': None}
+            def before_read():
+                if read_hook[0] is not None:
+                    read_hook[0]()
+            def on_usage(value):
+                usage_hook['value'] = _prefer_stream_usage(usage_hook['value'], value)
+                if usage_hook['notify'] is not None:
+                    usage_hook['notify'](usage_hook['value'])
+            iterator = iter_sse_lines(upstream, before_read=before_read, on_usage=on_usage)
             prefix = []
             preamble_bytes = 0
             for raw in iterator:
@@ -8105,13 +11464,13 @@ def probe_first_frame(upstream, retry_call=None, tried=None, deadline_at=None, r
                     raise TimeoutError("first-frame deadline exceeded")
                 if sock is not None:
                     sock.settimeout(upstream_timeouts()[1])
-                return _ProbedStream(upstream, iterator, prefix), account
+                return _ProbedStream(upstream, iterator, prefix, read_hook, usage_hook), account
             # Socket shutdown at the deadline may produce EOF rather than an
             # OSError (notably on Linux). An expired probe is never successful.
             if time.monotonic() >= deadline_at:
                 raise TimeoutError("first-frame deadline exceeded")
             if retry_call is None and not prefix and not require_frame:
-                return _ProbedStream(upstream, iterator, []), account
+                return _ProbedStream(upstream, iterator, [], read_hook, usage_hook), account
             raise ValueError("upstream closed without a response frame")
         except ContentRejected:
             _close_upstream(upstream)
@@ -8195,7 +11554,7 @@ def _make_retry_call(body, session_key, realm):
                 _loop_event("retry_hint_applied")
             else:
                 _loop_event("retry_hint_skipped_shape")
-        # The upstream API returns effort as a third item. Recovery keeps
+        # Public v1.6.17 API returns effort as a third item. Recovery keeps
         # the same request effort; its internal callback contract stays a pair.
         return open_upstream(request_body, session_key=session_key, target_realm=realm,
                              exclude_uids=excluded, deadline_at=deadline_at)[:2]
@@ -8217,6 +11576,9 @@ def clean_chunk(raw):
         if obj["usage"] != before:
             changed = True
     for choice in obj.get("choices") or []:
+        if isinstance(choice, dict) and choice.get("finish_reason") == "":
+            choice["finish_reason"] = None
+            changed = True
         delta = choice.get("delta")
         if not isinstance(delta, dict):
             continue
@@ -8429,29 +11791,6 @@ def sanitize_tool_calls(tool_calls):
         else:
             out.append(tc)
     return out
-def sanitize_messages(messages):
-    out = []
-    for m in messages or []:
-        if isinstance(m, dict):
-            item = dict(m)
-            if "content" in item:
-                item["content"] = sanitize_content(item["content"])
-            if isinstance(item.get("reasoning_content"), str):
-                item["reasoning_content"] = strip_dsml_from_text(
-                    sanitize_text(item["reasoning_content"]))
-            if isinstance(item.get("reasoning"), str):
-                item["reasoning"] = strip_dsml_from_text(sanitize_text(item["reasoning"]))
-            if "tool_calls" in item:
-                item["tool_calls"] = sanitize_tool_calls(item["tool_calls"])
-            out.append(item)
-        else:
-            out.append(m)
-    return out
-
-
-# ---------------------------------------------------------------------------
-# Tool-call pairing repair
-# ---------------------------------------------------------------------------
 DEEPSEEK_V41_MODEL = "deepseek-v4.1-flash"
 DEEPSEEK_TOOL_IMAGE_PLACEHOLDER = (
     "[image omitted: DeepSeek Chat accepts images only in user messages]"
@@ -8574,6 +11913,30 @@ def compact_deepseek_reasoning_history(messages, model):
     return out
 
 
+
+def sanitize_messages(messages):
+    out = []
+    for m in messages or []:
+        if isinstance(m, dict):
+            item = dict(m)
+            if "content" in item:
+                item["content"] = sanitize_content(item["content"])
+            if isinstance(item.get("reasoning_content"), str):
+                item["reasoning_content"] = strip_dsml_from_text(
+                    sanitize_text(item["reasoning_content"]))
+            if isinstance(item.get("reasoning"), str):
+                item["reasoning"] = strip_dsml_from_text(sanitize_text(item["reasoning"]))
+            if "tool_calls" in item:
+                item["tool_calls"] = sanitize_tool_calls(item["tool_calls"])
+            out.append(item)
+        else:
+            out.append(m)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Tool-call pairing repair
+# ---------------------------------------------------------------------------
 def _empty_content(value):
     """True when an assistant message carries no content at all.
 
@@ -8959,6 +12322,33 @@ def normalize_tools(obj):
             norm.append(t)
     obj["tools"] = norm
 # ---------------------------------------------------------------------------
+# Stop Sequence Normalization (avoids code 11101 on a string stop)
+# ---------------------------------------------------------------------------
+def normalize_stop(obj):
+    # OpenAI 把 stop 声明成 string | array，客户端传单个字符串完全合法；本上游的
+    # Go 端却把该字段定死为 []string，收到字符串直接 400：
+    #   Unmarshal chat params failed with error: json: cannot unmarshal string
+    #   into Go struct field Request.stop of type []string   (code 11101)
+    # 实测（deepseek-v4.1-flash，同一条 prompt，同一个上游账号）：
+    #   "stop": "END"     -> 400 / code 11101
+    #   "stop": ["END"]   -> 200
+    # 归一化成数组后语义完全等价：OpenAI 里单字符串就是单元素数组，模型侧看到的
+    # 停止序列一模一样。空字符串 / 空数组 / null / 非法类型一律删字段——它们的实际
+    # 含义都是「没有停止序列」，而空值本身在上游同样会被判参数不合法。
+    if "stop" not in obj:
+        return
+    val = obj["stop"]
+    if isinstance(val, str):
+        val = [val] if val else []
+    elif isinstance(val, (list, tuple)):
+        val = [s for s in val if isinstance(s, str) and s]
+    else:
+        val = []
+    if val:
+        obj["stop"] = val
+    else:
+        obj.pop("stop", None)
+# ---------------------------------------------------------------------------
 # DeepSeek DSML Tool Calls Fallback Parser
 # ---------------------------------------------------------------------------
 TAG_START = r"<[^>]*DSML[^>]*"
@@ -8988,6 +12378,285 @@ def parse_dsml_tool_calls(text):
         })
     clean = (text[:match.start()].strip() + " " + text[match.end():].strip()).strip()
     return tool_calls, clean
+# ---------------------------------------------------------------------------
+# Printed tool calls on the Chat Completions path
+# ---------------------------------------------------------------------------
+# The Responses path has parsed DSML text since the tool_choice="none" fix, but
+# /v1/chat/completions -- the route the desktop client actually uses -- still
+# forwarded upstream `content` verbatim. When the model printed its call instead
+# of emitting structured tool_calls, the client saw plain text, found no call,
+# and the turn just ended: the markup stayed in the transcript and nothing ran.
+# Reported by the user as "it keeps stopping by itself".
+#
+# Two spellings show up in the wild:
+#   1. the full-width DSML form the suite already pins:
+#      <||DSML|| calls><||DSML|| invoke name="run_code"> ... </||DSML|| invoke>
+#   2. a hybrid the model mixes on its own -- a plain opening tag with DSML
+#      closing tags, and the first parameter's close tag swallowed whole:
+#      <run_code><parameter name="code">...</parameter>
+#      <parameter name="description">...</|DSML| parameter>
+#      </run_code></invoke></|DSML| parameter></|DSML| invoke></|DSML| calls>
+#
+# parse_dsml_tool_calls() above only matches (1): it wants a DSML opening tag
+# for the calls block, which (2) never has. The parser below is driven by the
+# <parameter> elements instead, because those are spelled the same way in both
+# shapes and a parameter name is the one thing a call cannot do without.
+LEAK_PARAM_RE = re.compile(
+    r"<\s*(?:\|\s*DSML\s*\|\s*)?(?P<tag>parameter|param|arg|argument)\b"
+    r"(?P<attrs>[^>]*)>"
+    r"(?P<value>.*?)"
+    r"</\s*(?:\|\s*DSML\s*\|\s*)?(?:parameter|param|arg|argument)\s*>",
+    re.DOTALL | re.IGNORECASE,
+)
+LEAK_TAG_RE = re.compile(
+    r"<\s*/?\s*(?:\|\s*DSML\s*\|\s*)?"
+    r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?P<attrs>[^>]*)>"
+)
+LEAK_NAME_ATTR_RE = re.compile(r"""name\s*=\s*["']([^"']*)["']""")
+LEAK_WRAPPER_TAGS = {"calls", "tool_calls", "function_calls", "function_call"}
+LEAK_PARAM_TAGS = {"parameter", "param", "arg", "argument"}
+# First characters of every tag the stream filter has to hold text back for.
+LEAK_TAG_PREFIXES = (
+    "<run_code", "<run_shell", "<invoke", "<parameter", "<param", "<arg",
+    "<argument", "<calls", "<tool_calls", "<function_calls", "<function_call",
+    "<think", "<thinking",
+    "</run_code", "</run_shell", "</invoke", "</parameter", "</param",
+    "</arg", "</argument", "</calls", "</tool_calls", "</function_calls",
+    "</function_call", "</think", "</thinking",
+    "<|dsml|", "</|dsml|",
+)
+
+
+def _normalize_dsml_bars(text):
+    """Fold the full-width spelling of the DSML token back to ASCII bars."""
+    return re.sub(r"\uff5c+\s*DSML\s*\uff5c+", "|DSML|", text)
+
+
+def _strip_spans(text, spans):
+    """Remove every [start, end) span, then collapse the leftover blanks."""
+    if not spans:
+        return text
+    kept = []
+    last = 0
+    for start, end in sorted(spans):
+        if start < last:
+            continue
+        kept.append(text[last:start])
+        last = end
+    kept.append(text[last:])
+    return "".join(kept).strip()
+
+
+def parse_leaked_tool_calls(text):
+    """Recover a tool call the model printed instead of emitting.
+
+    Returns (calls, clean_text) with calls in the same shape as
+    parse_dsml_tool_calls(), or (None, text) when nothing was recognised.
+    """
+    if not text or "<" not in text:
+        return None, text
+    # Fold the full-width spelling first so both shapes go through one walk.
+    original = text
+    text = _normalize_dsml_bars(text)
+    found = []
+    for m in LEAK_PARAM_RE.finditer(text):
+        attr = LEAK_NAME_ATTR_RE.search(m.group("attrs") or "")
+        if not attr or not attr.group(1):
+            continue
+        found.append((m.start(), attr.group(1), m.group("value").strip(), m.span()))
+    if not found:
+        return None, original
+    tags = list(LEAK_TAG_RE.finditer(text))
+    calls = []
+    for start, pname, value, span in found:
+        owner = None
+        for tag in tags:
+            if tag.start() >= start:
+                break
+            if tag.group(0).lstrip().startswith("</"):
+                continue
+            tname = tag.group("name").lower()
+            if tname in LEAK_WRAPPER_TAGS or tname in LEAK_PARAM_TAGS:
+                continue
+            owner = tag
+        name = ""
+        if owner is not None:
+            attr = LEAK_NAME_ATTR_RE.search(owner.group("attrs") or "")
+            name = (attr.group(1) if attr else owner.group("name")).strip()
+        if not name:
+            continue
+        key = owner.start() if owner is not None else None
+        if calls and calls[-1]["open"] == key:
+            calls[-1]["params"][pname] = value
+            calls[-1]["spans"].append(span)
+        else:
+            calls.append({"name": name, "params": {pname: value},
+                          "open": key, "spans": [span]})
+    if not calls:
+        return None, original
+    # Everything from the call's opening tag to the last of its parameters is
+    # markup rather than prose, so the whole region goes away in one piece.
+    regions = []
+    for call in calls:
+        first = call["open"]
+        if first is None:
+            first = min(s for s, _e in call["spans"])
+        last = max(e for _s, e in call["spans"])
+        # Swallow the closing tags that trail the last parameter.
+        while True:
+            nxt = last
+            while nxt < len(text) and text[nxt] in " \t\r\n":
+                nxt += 1
+            m = LEAK_TAG_RE.match(text, nxt)
+            if not m or not m.group(0).lstrip().startswith("</"):
+                break
+            last = m.end()
+        regions.append((first, last))
+    clean = _strip_spans(text, regions)
+    # Wrappers and stray tags the region walk did not cover (<|DSML| calls>,
+    # <think>, ...) are markup too; drop any tag carrying the DSML token.
+    leftover = []
+    for m in LEAK_TAG_RE.finditer(clean):
+        if "DSML" in _normalize_dsml_bars(m.group(0)).upper():
+            leftover.append(m.span())
+        elif m.group("name").lower() in LEAK_WRAPPER_TAGS:
+            leftover.append(m.span())
+    clean = _strip_spans(clean, leftover)
+    return [{
+        "id": _new_id("call_"),
+        "name": call["name"],
+        "arguments": json.dumps(call["params"], ensure_ascii=False),
+    } for call in calls], clean
+
+
+def repair_leaked_tool_calls(message):
+    """Move a printed call out of `content` and into `tool_calls`.
+
+    Only fires when the message carries no structured call: a real tool_calls
+    entry always wins, so a model that emits both is left alone. Returns True
+    when the message changed.
+    """
+    if not isinstance(message, dict):
+        return False
+    existing = message.get("tool_calls")
+    if isinstance(existing, list) and existing:
+        return False
+    content = message.get("content")
+    if not isinstance(content, str) or "<" not in content:
+        return False
+    calls, clean = parse_leaked_tool_calls(content)
+    if not calls:
+        calls, clean = parse_dsml_tool_calls(content)
+    if not calls:
+        return False
+    message["content"] = clean
+    message["tool_calls"] = [{
+        "id": call["id"],
+        "type": "function",
+        "function": {"name": call["name"], "arguments": call["arguments"]},
+    } for call in calls]
+    return True
+
+
+def could_be_leaked_call(tail):
+    """True while `tail` (starting at "<") may still grow into printed markup."""
+    normalized = _normalize_dsml_bars(tail)
+    low = re.sub(r"\uff5c+", "|", normalized).lower()
+    m = LEAK_TAG_RE.match(normalized)
+    if m and any(m.group(0).lower().startswith(p) for p in LEAK_TAG_PREFIXES):
+        return True
+    if len(low) > 96 or ">" in low:
+        return False
+    return any(p.startswith(low) or low.startswith(p) for p in LEAK_TAG_PREFIXES)
+
+
+class LeakedToolCallStreamFilter:
+    """Hold back assistant text that may be a printed tool call.
+
+    /v1/chat/completions forwards text the moment it arrives, so a call the
+    model printed instead of emitting would already be on the wire before the
+    stream ended and anything could parse it. Buffer the text instead: release
+    it as soon as it is clearly prose, convert whatever is left at the end.
+
+    feed(text) returns a list of ("text", str) and ("calls", [call, ...]).
+    """
+
+    MAX_HOLD = 262144
+
+    def __init__(self):
+        self.buf = ""
+
+    def _release_all(self):
+        out, self.buf = self.buf, ""
+        return [("text", out)] if out else []
+
+    def feed(self, text):
+        if not text:
+            return []
+        self.buf += text
+        for idx in range(len(self.buf)):
+            if self.buf[idx] != "<":
+                continue
+            if not could_be_leaked_call(self.buf[idx:]):
+                continue
+            if idx:
+                head, self.buf = self.buf[:idx], self.buf[idx:]
+                return [("text", head)]
+            break
+        else:
+            return self._release_all()
+        if len(self.buf) > self.MAX_HOLD:
+            return self._release_all()
+        return []
+
+    def flush(self):
+        if not self.buf:
+            return []
+        buf, self.buf = self.buf, ""
+        calls, clean = parse_leaked_tool_calls(buf)
+        if not calls:
+            calls, clean = parse_dsml_tool_calls(buf)
+        if not calls:
+            return [("text", buf)]
+        out = []
+        if clean:
+            out.append(("text", clean))
+        out.append(("calls", calls))
+        return out
+
+
+def chat_chunk(model, delta, finish=None, chunk_id="chatcmpl-wb"):
+    """One Chat Completions streaming chunk."""
+    return json.dumps({
+        "id": chunk_id,
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
+    }, ensure_ascii=False)
+
+
+def chat_text_chunk(model, text, chunk_id="chatcmpl-wb"):
+    return chat_chunk(model, {"content": text}, None, chunk_id)
+
+
+def chat_tool_call_chunks(model, calls, chunk_id="chatcmpl-wb"):
+    """Deltas that hand recovered calls over as structured tool calls."""
+    out = []
+    for i, call in enumerate(calls):
+        out.append(chat_chunk(model, {"tool_calls": [{
+            "index": i,
+            "id": call["id"],
+            "type": "function",
+            "function": {"name": call["name"], "arguments": call["arguments"]},
+        }]}, None, chunk_id))
+    return out
+
+
+def chat_finish_chunk(model, reason, chunk_id="chatcmpl-wb"):
+    return chat_chunk(model, {}, reason, chunk_id)
+
+
 def translate_max_completion_tokens(obj):
     alias = obj.pop("max_completion_tokens", None)
     if alias is None:
@@ -9315,6 +12984,8 @@ def build_upstream_body(payload):
     messages = backfill_reasoning_content(
         messages, model, thinking_enabled=thinking_enabled
     )
+    messages = compact_deepseek_reasoning_history(messages, model)
+    messages = clean_deepseek_stalled_history(messages, model)
     if not messages or (messages[0].get("role") != "system"):
         messages = [{"role": "system", "content": SYSTEM_PROMPT}] + messages
     body = dict(payload)
@@ -9335,13 +13006,11 @@ def build_upstream_body(payload):
     repaired, _merged = merge_adjacent_tool_calls(body["messages"])
     repaired, _repacked = repack_tool_result_blocks(repaired)
     repaired, _cleaned = cleanup_orphan_tool_calls(repaired)
-    # Apply the verified history budget first. Scanning old discarded traces
-    # on every tool round would add work proportional to the entire conversation.
-    body["messages"] = clean_deepseek_stalled_history(
-        compact_deepseek_reasoning_history(repaired, model), model)
+    body["messages"] = repaired
     translate_max_completion_tokens(body)
     normalize_tool_choice(body)
     normalize_tools(body)
+    normalize_stop(body)
     if "max_tokens" not in body:
         default_max = model_default_max_output_tokens(model)
         if default_max:
@@ -9588,6 +13257,11 @@ def gateway_hint(status, message):
 MAX_PRODUCT_SWITCHES = 4
 _SWITCH_LOG = {}
 
+#: 出口级退避在单次请求里最多睡这么久（见 wb_egress）：退避阶梯可以到十几秒，
+#: 但把一个客户端请求按住十几秒是不可接受的，所以只睡这个上限；共享计数器仍然
+#: 让并发请求一起变慢（这才是「一次短暂的全局退避」）。
+EGRESS_SLEEP_MAX = 5.0
+
 
 def auto_switch_product_enabled():
     """Whether a 429 may rotate the outbound identity (panel setting, off by default)."""
@@ -9692,6 +13366,22 @@ def is_transient(exc):
     )
     return any(m in t for m in markers)
 
+def exc_detail(exc, limit=180):
+    """异常的可读原因（类型 + 底层文本），而不只是类型名。
+
+    这些行原先只插值 `type(exc).__name__`，于是现场只剩一串 `URLError`：事后
+    分不清那一下到底是 SSL 握手中断、连接被重置还是读超时，而这三者指向完全
+    不同的根因——上游边缘在丢连接 / 连接被重置 / 连接池复用了已死的连接。
+    URLError 的真实原因挂在 `.reason` 上（`str(exc)` 会包一层 `<urlopen error
+    ...>`，`.reason` 才是干净的内层文本），所以优先取 `.reason`，空则退回
+    `str(exc)`，再空则退回类型名，保证这一格永远有内容。
+    """
+    reason = getattr(exc, "reason", None)
+    text = str(reason) if reason is not None else str(exc)
+    text = (text or "").strip()
+    if not text:
+        return type(exc).__name__
+    return ("%s: %s" % (type(exc).__name__, text))[:limit]
 
 # The shapes the upstream uses for a rate limit. A body naming one is a soft
 # limit; it still says nothing about scope, so the caller decides that from the
@@ -9802,6 +13492,34 @@ def rate_limit_is_account_level(detail, reset_at):
     return credential_scope_phrase(detail) is not None
 
 
+#: 上游风控限制（HTTP 403, code 11140「账号存在异常行为，已被限制使用」）
+#: 的账号冷却时长：限制按小时计，2 小时后自然重试，上游解封即自愈——比
+#: 透传给客户端、账号继续被选用好，也比 402 那种「停到本地 04:00」轻。
+RESTRICTED_403_COOLDOWN = 7200.0
+
+#: 识别风控限制 403 的正文特征。内容审核的 403 走降级提示词那条路，二者必须
+#: 分开：对被限制的账号换提示词没有意义。code 匹配用正则（requestId 是 hex，
+#: 裸字符串 "11140" 可能撞上），措辞只收实测的限制用语，不猜。
+_RESTRICTED_403_CODE_RE = re.compile(r'"code"\s*:\s*"?11140"?')
+_RESTRICTION_403_MARKERS = ("unusual activity", "账号存在异常行为", "已被限制")
+
+
+def restriction_is_account_level(detail):
+    """True when a 403 body says the ACCOUNT is restricted, not the content.
+
+    实测正文：{"code":11140,"msg":"request illegal",...,"displayMsg":{"en":
+    "Your account has been restricted due to unusual activity","zh":"账号存在
+    异常行为，已被限制使用"}}。en 在前 zh 在后，短截断也保得住 code 与 en；
+    拿不全的正文宁可漏判回内容审核路径，也不误判。
+    """
+    if not detail:
+        return False
+    if _RESTRICTED_403_CODE_RE.search(detail):
+        return True
+    lowered = detail.lower()
+    return any(marker in lowered for marker in _RESTRICTION_403_MARKERS)
+
+
 def parse_rate_limit_reset(detail):
     """Pull the reset time out of an upstream 429 body, if it names one.
 
@@ -9839,8 +13557,8 @@ def upstream_timeouts():
 
     header covers connect/TLS/first byte; idle bounds each mid-stream
     read, so active data keeps the connection alive while a silent
-    stream fails out and releases its in-flight lease. The ops guard adds
-    a separate shared generation deadline across safe recovery attempts.
+    stream fails out and releases its in-flight lease. There is no
+    total-duration cap, matching the panel project's semantics.
     """
     try:
         cfg = wb_settings.upstream_config(ACCOUNTS_DIR)
@@ -9889,7 +13607,7 @@ def open_upstream(payload, session_key=None, target_realm=None,
     candidate_error = _single_candidate_error(payload)
     if candidate_error:
         raise ValueError(candidate_error)
-    # Refresh the daily guards before picking. The scan underneath is
+    # Refresh the daily token guard before picking. The scan underneath is
     # incremental and TTL-cached, so this is a stat() plus a cached dict on
     # the hot path, and an account parked by any of the guards is skipped
     # like any other unusable one. One call covers all three guards: they
@@ -9924,6 +13642,23 @@ def open_upstream(payload, session_key=None, target_realm=None,
     total = max(1, POOL.count_ready(realm, model=model)) if POOL else 1
     excluded = set(exclude_uids or ())
     tried = set(excluded)
+    # 这一轮请求已经记过账的账号：重试轮（transient_hits 后 tried.clear() 整池
+    # 重轮）会把同一个账号再挑一遍，若每次都记，一次请求就能给同一个账号记上
+    # 好几笔 fails/degrade——池子越空、重轮越频繁，越容易把一个刚抖了一下的
+    # 账号直接推过熔断阈值。一次请求对一个账号最多记一次。
+    charged = set()
+
+    def charge_account(account, message, unknown):
+        """给账号记一笔失败，一次请求最多记一笔（见上面的 charged）。"""
+        if account.uid in charged:
+            return False
+        charged.add(account.uid)
+        if unknown:
+            account.note_unknown_failure(message)
+        else:
+            account.note_failure(message)
+        return True
+
     last_error = None
     last_uid = None
     last_429 = None
@@ -9932,39 +13667,48 @@ def open_upstream(payload, session_key=None, target_realm=None,
     transient_hits = 0
     degraded_retried = False
     auth_refreshed = set()
-    retry_uid = None
     # Read once per request, not per attempt: this is a panel setting, and a
     # settings read on every retry would be pure overhead.
     auto_switch = auto_switch_product_enabled()
     # Panel parity: header/idle timeouts are read once per request, not
     # once per retry, so a settings read never lands in the retry loop.
     header_timeout, idle_timeout = upstream_timeouts()
+    # Same treatment for the egress-level backoff switch (issue #271): one read
+    # per request, and when it is off the retry loop below is byte-for-byte the
+    # old path.
+    egress_backoff = wb_settings.egress_backoff_enabled(ACCOUNTS_DIR)
+    # 同一段出口在一次请求里只记一次：重试轮（tried.clear() 之后整池重轮）会把
+    # 同一个账号 / 同一段出口再挑一遍，若每次都记，一次请求就能把共享计数器推高
+    # 好几步——那正是 issue #271 里「一次请求给同一账号记好几笔」的另一半。已经
+    # 记过的那一段沿用同一段退避，不重复记。
+    egress_wait = {}
+
+    def budget_sleep(seconds):
+        if deadline_at is not None:
+            seconds = min(seconds, max(0., deadline_at - time.monotonic()))
+        if seconds > 0:
+            time.sleep(seconds)
+
+    def charge_egress(url, proxy):
+        key = wb_upstream_pool.egress_key(url, proxy)
+        if key not in egress_wait:
+            egress_wait[key] = wb_egress.note_transient(key)
+        return egress_wait[key]
+
     max_attempts = max(2, total) + 1 + (MAX_PRODUCT_SWITCHES if auto_switch else 0)
-    # Demote only the failing account from the conversation affinity history,
-    # retaining other warm accounts when a retry selects its next candidate.
-    _attempt = -1
-    while _attempt + 1 < max_attempts:
-        _attempt += 1
+    # 每次失败都把【出错的那个账号】从这段对话的历史里降级（demote），而不是
+    # 忘掉整段对话：重选时优先回到还留着这段前缀的暖号（见 SessionAffinity），
+    # 一次大 prompt 的冷启动比重选一次账号贵得多。
+    for _attempt in range(max_attempts):
         if deadline_at is not None and time.monotonic() >= deadline_at:
             raise TimeoutError("upstream connection deadline exceeded")
-        account = None
-        if retry_uid is not None and POOL:
-            # A refreshed account must still pass official quota/admission checks.
-            only_retry = tried | {a.uid for a in POOL.accounts if a.uid != retry_uid}
-            account = POOL.pick_for_session(realm=realm, session_key=session_key,
-                                            exclude=only_retry, model=model,
-                                            page=affinity_page)
-            if account is None:
-                tried.add(retry_uid)
-            retry_uid = None
-        if account is None:
-            account = POOL.pick_for_session(realm=realm, session_key=session_key,
-                                            exclude=tried, model=model,
-                                            page=affinity_page) if POOL else None
+        account = POOL.pick_for_session(realm=realm, session_key=session_key,
+                                        exclude=tried, model=model,
+                                        page=affinity_page) if POOL else None
         if account is None:
             if transient_hits and _attempt < max_attempts - 1:
                 tried = set(excluded)
-                time.sleep(min(1.5 * transient_hits, 3.0))
+                budget_sleep(min(1.5 * transient_hits, 3.0))
                 continue
             break
         if account.realm != realm:
@@ -9982,10 +13726,10 @@ def open_upstream(payload, session_key=None, target_realm=None,
         else:
             attempt_body = upstream_body
         attempt_data = json.dumps(attempt_body, ensure_ascii=False).encode("utf-8")
-        headers = account.headers(purpose="chat")
-        sent_access_token = headers.get("Authorization", "").removeprefix("Bearer ")
         req = urllib.request.Request(chat_url, data=attempt_data, method="POST",
-                                     headers=headers)
+                                     headers=account.headers(purpose="chat"))
+        sent_auth = req.get_header("Authorization", "")
+        failed_token = sent_auth[7:] if sent_auth.startswith("Bearer ") else getattr(account, "access_token", "")
         try:
             timeout = header_timeout
             if deadline_at is not None:
@@ -9993,6 +13737,11 @@ def open_upstream(payload, session_key=None, target_realm=None,
             resp = wb_accounts.urlopen(req, timeout=timeout, proxy=account.proxy)
             _apply_stream_idle_timeout(resp, idle_timeout)
             account.note_success(model=model)
+            if egress_backoff:
+                # This outbound path just served a request, so its transient
+                # streak is over (same rule as the account's note_success).
+                wb_egress.note_success(
+                    wb_upstream_pool.egress_key(chat_url, account.proxy))
             reset_switch_counter(account, model)
             # The third element is the reasoning effort this request ran at: the
             # body is rebuilt per attempt, but the effort is a property of the
@@ -10072,9 +13821,24 @@ def open_upstream(payload, session_key=None, target_realm=None,
                 continue
             if exc.code == 403:
                 try:
-                    detail = exc.read(400).decode("utf-8", "replace")
+                    detail = exc.read(600).decode("utf-8", "replace")
                 except Exception:
                     detail = ""
+                # 先分流：上游风控限制（code 11140「账号存在异常行为，已被限制
+                # 使用」）是账号级的坏，降级提示词救不了，透传给客户端只会让
+                # 一个被限制的账号把对话一次次打死。冷却这个账号、换下一个继
+                # 续；全都试完还是不行才把原因交给客户端。
+                if restriction_is_account_level(detail):
+                    account.note_error("HTTP 403 (account restricted)",
+                                       cooldown=RESTRICTED_403_COOLDOWN,
+                                       single_account=(total <= 1), detail=detail)
+                    log("account %s restricted by upstream (403 11140), "
+                        "cooling %.0fs" % (account.uid[:8], RESTRICTED_403_COOLDOWN))
+                    if session_key and POOL:
+                        POOL.affinity.demote(session_key, account.uid)
+                    last_error = exc
+                    last_403_detail = detail
+                    continue
                 # Panel degrade.go: a content rejection in passthrough/append
                 # mode is usually a system-prompt fingerprint false positive.
                 # Switch to the minimal neutral prompt until next 00:00 CST
@@ -10106,42 +13870,26 @@ def open_upstream(payload, session_key=None, target_realm=None,
                 last_error = exc
                 continue
             if exc.code == 401:
-                try:
-                    exc.close()
-                except Exception:
-                    pass
-                refreshed = False
-                refresh_attempted = False
-                if (account.uid not in auth_refreshed and len(auth_refreshed) < total
-                        and getattr(account, "refresh_token", "")):
+                refresh = getattr(account, "refresh_after_401", None)
+                if (account.uid not in auth_refreshed and callable(refresh) and getattr(account, "refresh_token", "")
+                        and _attempt + 1 < max_attempts):
                     auth_refreshed.add(account.uid)
-                    budget = 30.0
-                    if deadline_at is not None:
-                        budget = min(budget, deadline_at - time.monotonic())
-                        if budget <= 0:
-                            raise TimeoutError("upstream connection deadline exceeded")
+                    exc.close()
+                    retry_bump("auth_refresh_attempt")
                     try:
-                        refresh_attempted = True
-                        retry_bump("auth_refresh_attempt")
-                        refreshed = account.refresh_after_401(sent_access_token, timeout=budget,
-                                                              deadline_at=deadline_at)
-                    except Exception as refresh_exc:
-                        log("account %s refresh after 401 failed (%s)"
-                            % (account.uid[:8], type(refresh_exc).__name__),
-                            level="WARN", tag="auth")
-                if refreshed:
-                    retry_bump("auth_refresh_ready")
-                    retry_bump("auth_401_refresh_success")
-                    tried.discard(account.uid)
-                    retry_uid = account.uid
-                    max_attempts += 1
-                    last_error = exc
-                    log("account %s refreshed after HTTP 401; retrying request"
-                        % account.uid[:8], level="INFO", tag="auth")
-                    continue
-                if refresh_attempted:
+                        budget = 30.0 if deadline_at is None else min(30.0, max(0.0, deadline_at - time.monotonic()))
+                        refreshed = refresh(failed_token, timeout=budget, deadline_at=deadline_at)
+                    except Exception:
+                        refreshed = False
+                    if refreshed:
+                        retry_bump("auth_refresh_ready")
+                        retry_bump("auth_401_refresh_success")  # historical diagnostics alias
+                        # Re-enter normal admission and rebuild auth headers;
+                        # never bypass model cooldown, realm, or session rules.
+                        tried.discard(account.uid)
+                        continue
                     retry_bump("auth_refresh_failed")
-                    retry_bump("auth_401_refresh_failed")
+                    retry_bump("auth_401_refresh_failed")  # historical diagnostics alias
                 log("account %s rejected (HTTP 401), rotating" % account.uid[:8])
                 if session_key and POOL:
                     POOL.affinity.demote(session_key, account.uid)
@@ -10150,9 +13898,26 @@ def open_upstream(payload, session_key=None, target_realm=None,
                                    single_account=(total <= 1))
                 last_error = exc
                 continue
-            if exc.code in (500, 502, 503, 504):
+            if exc.code >= 500:
+                # 一切服务端 5xx（含上游自定义的 550 这类）都按瞬时故障轮转，
+                # 不在已知清单里的也不能把错误原样甩回客户端——换号是默认，
+                # 全试完才交出去。
                 transient_hits += 1
-                account.note_failure("HTTP %d" % exc.code)
+                if egress_backoff and exc.code in (502, 503, 504):
+                    # Gateway-side blips (502/503/504) say the path is unhappy,
+                    # not the credential: charge the egress and back off for
+                    # seconds (issue #271). 500 stays on the account - it can be
+                    # a real fault tied to this credential and needs another look
+                    # before it is moved off the breaker.
+                    wait = charge_egress(chat_url, account.proxy)
+                    log("upstream %s for '%s', backing off the egress %.1fs"
+                        % (exc.code, model, wait))
+                    if session_key and POOL:
+                        POOL.affinity.demote(session_key, account.uid)
+                    last_error = exc
+                    budget_sleep(min(wait, EGRESS_SLEEP_MAX))
+                    continue
+                charge_account(account, "HTTP %d" % exc.code, unknown=False)
                 log("upstream %s for '%s', retrying (fails=%d)"
                     % (exc.code, model, account.fails))
                 if session_key and POOL:
@@ -10165,17 +13930,30 @@ def open_upstream(payload, session_key=None, target_realm=None,
                 POOL.affinity.demote(session_key, account.uid)
             if is_transient(exc):
                 transient_hits += 1
-                account.note_unknown_failure("connection: %s" % type(exc).__name__)
+                if egress_backoff:
+                    # A transport blip is the path's problem, not the account's:
+                    # charge the egress and back off for seconds (issue #271).
+                    # The account's fails/degrade counters are left alone, so a
+                    # few seconds of flakiness no longer parks healthy accounts.
+                    wait = charge_egress(chat_url, account.proxy)
+                    log("account %s: upstream connection hiccup for '%s' (%s), "
+                        "backing off the egress %.1fs"
+                        % (account.uid[:8], model, exc_detail(exc), wait))
+                    last_error = exc
+                    budget_sleep(min(wait, EGRESS_SLEEP_MAX))
+                    continue
+                charge_account(account, "connection: %s" % exc_detail(exc, 120),
+                               unknown=True)
                 # 带上 UID：这一行同时是一次扣分（连续 3 次就把账号熔断 30
                 # 分钟），不写清楚是谁挨的这一下，事后只能看着一串 hiccup 猜
                 # 是哪几个账号被关掉、池子为什么突然空了。
                 log("account %s: upstream connection hiccup for '%s' (%s), "
                     "retrying (degrade=%d)"
-                    % (account.uid[:8], model, type(exc).__name__, account.degrade_count))
+                    % (account.uid[:8], model, exc_detail(exc), account.degrade_count))
                 last_error = exc
-                time.sleep(min(0.6 * transient_hits, 2.0))
+                budget_sleep(min(0.6 * transient_hits, 2.0))
                 continue
-            account.note_unknown_failure(str(exc)[:120])
+            charge_account(account, str(exc)[:120], unknown=True)
             account.note_error(str(exc)[:120], cooldown=60, single_account=(total <= 1))
             last_error = exc
             continue
@@ -10281,6 +14059,93 @@ def estimate_tokens(text):
     other = len(text) - cjk
     return cjk + max(1, int(other / 3.6)) if text else 0
 
+# 每次向流式响应要多少字节。64 KiB 远大于一条 SSE 事件（典型几百字节），
+# 又远小于 http.client 单次 read 的上限，按它切块能把「一行一次 syscall」
+# 摊成「一块一次」，同时不会让首字节延迟变差（见 iter_sse_lines）。
+SSE_READ_BLOCK = 64 * 1024
+
+def _prefer_stream_usage(current, incoming):
+    if not isinstance(incoming, dict):
+        return current
+    if current is None:
+        return incoming
+    try:
+        return incoming if float(incoming.get('total_tokens') or 0) >= float(current.get('total_tokens') or 0) else current
+    except (TypeError, ValueError):
+        return current
+
+
+def _observe_block_usage(lines, callback):
+    if callback is None:
+        return
+    for line in lines:
+        if b'"usage"' not in line:
+            continue
+        try:
+            value = json.loads(strip_data_prefix(line.decode('utf8')))
+        except (ValueError, UnicodeError):
+            continue
+        if isinstance(value, dict) and isinstance(value.get('usage'), dict):
+            callback(value['usage'])
+
+
+def iter_sse_lines(source, block_size=SSE_READ_BLOCK, before_read=None, on_usage=None):
+    """按块读取流式响应并逐行产出，把逐行 read 的 syscall 开销摊掉。
+
+    直接 `for line in resp` 迭代 http.client.HTTPResponse 时，每一行都要走
+    一次 read() syscall，而每次 syscall 都要释放并重新抢回 GIL。一轮流式回复
+    动辄几千条事件，于是进程大部分时间花在二十来个 handler 线程之间来回交接
+    GIL 上，而不是在干活。4 vCPU 真机实测（v1.7.2，15~20 req/s）：10 秒内
+    106 214 次 futex，占全部 syscall 时间的 71%，其中约三分之二来自这条逐行
+    读取路径。
+
+    read1() 每次最多一次底层 syscall，所以按块取回来再在内存里切行，能把
+    syscall 数降一到两个数量级。延迟不变：read1() 一有字节就返回，完整的行
+    立刻产出；只有跨块的那一行需要等下一块。
+
+    产出的行**带换行符**，与直接迭代 response 的形状完全一致，调用方一行都
+    不用改。没有 read1 的对象（列表、文本模式的文件……）退回普通迭代。
+
+    `before_read` 在每个**可能阻塞的 read1 之前**调一次，调用方可以在这里把
+    攒下的写出掉：一个读取块里的事件因此合成一次 write，而下一个字节一到就
+    立刻产出——延迟与逐块写完全一样，只是不再一个 chunk 一次 sendall。
+    """
+    read1 = getattr(source, "read1", None)
+    if read1 is None:
+        if isinstance(source, _ProbedStream):
+            source.set_before_read(before_read)
+            source.set_usage_observer(on_usage)
+            yield from source
+            return
+        iterator = iter(source)
+        while True:
+            if before_read is not None:
+                before_read()
+            try:
+                line = next(iterator)
+            except StopIteration:
+                return
+            yield line
+    buf = b""
+    while True:
+        if before_read is not None:
+            before_read()
+        chunk = read1(block_size)
+        if not chunk:
+            break
+        buf += chunk
+        if b"\n" not in buf:
+            continue
+        head, _, buf = buf.rpartition(b"\n")
+        lines = head.split(b"\n")
+        _observe_block_usage(lines, on_usage)
+        for line in lines:
+            yield line + b"\n"
+    if buf:
+        # 上游没以换行收尾时，最后一行照旧要交出去（迭代 response 也是这个形状）。
+        _observe_block_usage([buf], on_usage)
+        yield buf
+
 def aggregate_stream(raw_iter, model, resp_id, holder=None):
     holder = holder if holder is not None else {}
     holder["model"] = model
@@ -10293,7 +14158,8 @@ def aggregate_stream(raw_iter, model, resp_id, holder=None):
 
 def _aggregate_stream_impl(raw_iter, model, resp_id):
     """Fold an SSE stream into one non-streaming chat.completion object."""
-    content, reasoning, refusal, finish = [], [], [], "stop"
+    content, reasoning, finish = [], [], "stop"
+    refusals = []
     tool_calls_map = {}
     usage = None
     started = time.time()
@@ -10302,7 +14168,7 @@ def _aggregate_stream_impl(raw_iter, model, resp_id):
     scrubber = ReasoningScrubber()
     saw_finish = False
     failed_reason = None
-    for line in raw_iter:
+    for line in iter_sse_lines(raw_iter):
         data = strip_data_prefix(line.decode("utf-8", "replace"))
         if not data or data == "[DONE]":
             if data == "[DONE]":
@@ -10333,7 +14199,7 @@ def _aggregate_stream_impl(raw_iter, model, resp_id):
             if delta.get("content"):
                 content.append(delta["content"])
             if isinstance(delta.get("refusal"), str) and delta["refusal"]:
-                refusal.append(delta["refusal"])
+                refusals.append(delta["refusal"])
             if delta.get("reasoning_content"):
                 safe = scrubber.feed(delta["reasoning_content"])
                 if safe:
@@ -10400,7 +14266,7 @@ def _aggregate_stream_impl(raw_iter, model, resp_id):
         finish = "length"
     full_text = "".join(content)
     dsml_calls, clean_text = parse_dsml_tool_calls(full_text)
-    if not tool_calls_map and dsml_calls:
+    if saw_finish and not failed_reason and not tool_calls_map and dsml_calls:
         for index, call in enumerate(dsml_calls):
             tool_calls_map[index] = {"id": call.get("id") or _new_id("call_"),
                                      "type": "function", "function": {
@@ -10410,10 +14276,15 @@ def _aggregate_stream_impl(raw_iter, model, resp_id):
         clean_text, _ = quarantine_dsml_text(clean_text)
     content[:] = [clean_text]
     message = {"role": "assistant", "content": clean_text}
+    if refusals:
+        message["refusal"] = "".join(refusals)
     if reasoning:
         message["reasoning_content"] = "".join(reasoning)
-    if refusal:
-        message["refusal"] = "".join(refusal)
+    # A call the model printed instead of emitting arrives as `content`. The
+    # Responses path has parsed that shape for a while; this one did not, so the
+    # client saw prose, found no call, and ended the turn with nothing to run.
+    if saw_finish and not failed_reason and not tool_calls_map and repair_leaked_tool_calls(message):
+        finish = "tool_calls"
     # PATCH2-BY-OPS: 二次防御——剔除「无函数名且无参数」的空 tool_call。
     # 即使上游以 tool_calls 数组形式发空占位，也不会泄漏给客户端。
     if tool_calls_map:
@@ -10437,15 +14308,19 @@ def _aggregate_stream_impl(raw_iter, model, resp_id):
         message["tool_calls"] = ordered_tcs
         if finish in ("stop", None):
             finish = "tool_calls"
+    elif message.get("tool_calls"):
+        # A call recovered from `content` counts as a real one, and it also
+        # overrides a "length" the upstream reported for the same turn: the call
+        # came through whole, so the turn did not really run out of room.
+        finish = "tool_calls"
     elif finish == "tool_calls":
         # 占位被全部过滤掉，无实际工具调用，降级为正常结束，防止客户端无限挂起等待
         finish = "stop"
     if usage is None or (usage.get("total_tokens") or 0) == 0:
         full_c = "".join(content)
         full_r = "".join(reasoning)
-        full_refusal = "".join(refusal)
-        if full_c or full_r or full_refusal:
-            comp = estimate_tokens(full_c) + estimate_tokens(full_r) + estimate_tokens(full_refusal)
+        if full_c or full_r:
+            comp = estimate_tokens(full_c) + estimate_tokens(full_r)
             prompt_est = max(1, comp // 2)
             usage = {
                 "prompt_tokens": prompt_est,
@@ -10592,12 +14467,30 @@ def _is_custom_tool(tool):
     return isinstance(tool, dict) and str(tool.get("type") or "").lower() == "custom"
 
 
-def custom_tool_names(tools):
-    """Names of tools declared as freeform/custom in a Responses request."""
+def custom_tool_names(tools, _depth=0):
+    """Names of tools declared as freeform/custom in a Responses request.
+
+    递归进 namespace：新版 Codex Desktop 把自由格式工具嵌在 functions 命名
+    空间里（exec 的 type 就是 "custom"）。漏掉它的后果不是「少一个名字」，
+    而是回程被判成 function_call，客户端按 (name, namespace, kind) 三元组匹
+    配不到执行器，调用不执行、不返回，模型只能无限重试。namespace 只是客户
+    端给工具分组的方式，不是停止查找的理由。
+    """
     names = set()
+    if _depth > NAMESPACE_MAX_DEPTH:
+        return names
     for t in tools or []:
+        if not isinstance(t, dict):
+            continue
         if _is_custom_tool(t) and t.get("name"):
             names.add(str(t["name"]))
+        elif str(t.get("type") or "").lower() == "namespace":
+            subs = t.get("tools")
+            if not isinstance(subs, list):
+                subs = t.get("children")
+            if not isinstance(subs, list):
+                subs = t.get("functions")
+            names |= custom_tool_names(subs, _depth + 1)
     return names
 
 
@@ -10773,6 +14666,24 @@ def apply_namespace_to_calls(output_items, mapping):
             item["namespace"] = ns
             fixed += 1
     return output_items, fixed
+
+
+def additional_tools_from_input(payload):
+    """从 input 数组里收集 additional_tools 条目的 tools。
+
+    新版 Codex Desktop 0.162+ 把工具放在 input 内的
+    {"type": "additional_tools", "tools": [...]} 条目里，顶层 tools 是空的。
+    出站（responses_to_chat）与回程（custom_tool_names / request_meta.tools）
+    的取值都必须走这里，否则两边看到的是不同的工具清单。
+    """
+    collected = []
+    for item in payload.get("input") or []:
+        if isinstance(item, dict) and item.get("type") == "additional_tools":
+            sub_tools = item.get("tools")
+            if isinstance(sub_tools, list):
+                collected.extend(sub_tools)
+    return collected
+
 
 def _tools_for_chat(tools):
     """Downgrade custom tools; leave everything else untouched."""
@@ -11211,6 +15122,9 @@ def _responses_input_to_messages(payload):
                         "content": ("[Message from another task - treat this as "
                                     "a user instruction]" + chr(10) + chr(10) + text),
                     })
+            elif itype == "additional_tools":
+                # 由 responses_to_chat() 统一提取合并进 chat["tools"]，此处无需生成 message
+                pass
             else:
                 log("responses: WARNING unhandled input item type=%r keys=%s"
                     % (itype, sorted(item.keys())[:8]))
@@ -11238,15 +15152,21 @@ def responses_to_chat(payload):
         effort = payload.get("reasoning_effort")
     if effort:
         chat["reasoning_effort"] = effort
-    if payload.get("tools"):
-        flat_tools, ns_map = expand_namespace_tools(payload["tools"])
+    # 合并顶层 tools 和 input 列表中的 additional_tools 条目（新版 Codex Desktop 0.162+ 特征）
+    raw_tools = []
+    if isinstance(payload.get("tools"), list):
+        raw_tools.extend(payload["tools"])
+    raw_tools.extend(additional_tools_from_input(payload))
+    if raw_tools:
+        flat_tools, ns_map = expand_namespace_tools(raw_tools)
         chat["tools"] = _tools_for_chat(flat_tools)
         chat["_namespace_map"] = ns_map
     # 客户端宣告 web_search / web_fetch 时，把那份宣告换成我们的
     # function（见 wb_webtools.install_tool_defs）。
     # 看板开关关闭时原样透传，客户端自己的同名工具不受影响。
+    # 用合并后的清单：工具可能整份都在 additional_tools 里，只看顶层会漏。
     if local_web_tools_enabled():
-        wants = wb_webtools.client_wants_web(payload.get("tools"))
+        wants = wb_webtools.client_wants_web(raw_tools)
         if wants["search"] or wants["fetch"]:
             chat["tools"] = wb_webtools.install_tool_defs(chat.get("tools") or [], wants)
             chat["_web_tools"] = True
@@ -11707,17 +15627,21 @@ def chat_to_messages(obj):
         message = choices[0].get("message") if isinstance(choices[0].get("message"), dict) else {}
         finish = choices[0].get("finish_reason") or ""
     content = []
+    # The upstream thinking trace becomes a native thinking block so clients
+    # such as Claude Code can render it; the request side drops incoming
+    # thinking blocks, so nothing unsigned ever reaches the upstream.
+    reasoning = _anthropic_text(message.get("reasoning_content"))
+    if reasoning:
+        content.append({"type": "thinking", "thinking": reasoning})
     text = message.get("content")
     if isinstance(text, list):
         text = "".join(_anthropic_block_text(part) for part in text if isinstance(part, dict))
     text = _anthropic_text(text)
     if text:
         content.append({"type": "text", "text": text})
-    refusal = _anthropic_text(message.get("refusal"))
-    if refusal:
-        # Messages has no dedicated refusal block: preserve its text and mark
-        # the terminal as refusal even when Chat ended with ordinary stop.
-        content.append({"type": "text", "text": refusal})
+    if isinstance(message.get("refusal"), str) and message["refusal"].strip():
+        content.append({"type": "text", "text": message["refusal"]})
+        finish = "refusal"
     tool_calls = message.get("tool_calls")
     if isinstance(tool_calls, list):
         for call in tool_calls:
@@ -11736,7 +15660,7 @@ def chat_to_messages(obj):
         "role": "assistant",
         "model": _anthropic_text(obj.get("model")),
         "content": content,
-        "stop_reason": "refusal" if refusal else _anthropic_stop_reason(finish),
+        "stop_reason": _anthropic_stop_reason(finish),
         "stop_sequence": None,
         "usage": _anthropic_usage(obj.get("usage")),
     }
@@ -11766,13 +15690,14 @@ def stream_messages_events(raw_iter, model, holder=None):
         "id": "",
         "model": model,
         "stop": "end_turn",
+        "thinking_open": False,
+        "thinking_idx": None,
         "text_open": False,
         "text_idx": None,
         "next": 0,
         "tools": {},
         "tool_order": [],
         "usage": None,
-        "refusal": False,
     }
 
     def usage_payload():
@@ -11798,18 +15723,35 @@ def stream_messages_events(raw_iter, model, holder=None):
             }
         })
 
-    def ensure_text():
-        if state["text_open"]:
-            return None
-        state["text_idx"] = state["next"]
-        state["next"] += 1
-        state["text_open"] = True
-        return anthropic_sse_frame("content_block_start", {
-            "index": state["text_idx"],
-            "content_block": {"type": "text", "text": ""},
-        })
+    def ensure_thinking():
+        frames = []
+        if not state["thinking_open"]:
+            state["thinking_idx"] = state["next"]
+            state["next"] += 1
+            state["thinking_open"] = True
+            frames.append(anthropic_sse_frame("content_block_start", {
+                "index": state["thinking_idx"],
+                "content_block": {"type": "thinking", "thinking": ""},
+            }))
+        return frames
 
-    for line in raw_iter:
+    def ensure_text():
+        frames = []
+        if not state["text_open"]:
+            if state["thinking_open"]:
+                state["thinking_open"] = False
+                frames.append(anthropic_sse_frame(
+                    "content_block_stop", {"index": state["thinking_idx"]}))
+            state["text_idx"] = state["next"]
+            state["next"] += 1
+            state["text_open"] = True
+            frames.append(anthropic_sse_frame("content_block_start", {
+                "index": state["text_idx"],
+                "content_block": {"type": "text", "text": ""},
+            }))
+        return frames
+
+    for line in iter_sse_lines(raw_iter):
         if state["done"] or state["failed"]:
             break
         data = strip_data_prefix(line.decode("utf-8", "replace"))
@@ -11844,25 +15786,26 @@ def stream_messages_events(raw_iter, model, holder=None):
             continue
         choice = choices[0] if isinstance(choices[0], dict) else {}
         delta = choice.get("delta") if isinstance(choice.get("delta"), dict) else {}
-        text = delta.get("content")
-        if isinstance(text, str) and text:
-            frame = ensure_text()
-            if frame:
+        # Upstream thinking trace (deepseek-style reasoning_content) becomes
+        # native thinking blocks so the client can display the reasoning.
+        reason = delta.get("reasoning_content")
+        if isinstance(reason, str) and reason:
+            for frame in ensure_thinking():
                 yield frame
             yield anthropic_sse_frame("content_block_delta", {
-                "index": state["text_idx"],
-                "delta": {"type": "text_delta", "text": text},
+                "index": state["thinking_idx"],
+                "delta": {"type": "thinking_delta", "thinking": reason},
             })
-        refusal = delta.get("refusal")
-        if isinstance(refusal, str) and refusal:
+        for text in (delta.get("content"), delta.get("refusal")):
+            if isinstance(text, str) and text:
+                for frame in ensure_text():
+                    yield frame
+                yield anthropic_sse_frame("content_block_delta", {
+                    "index": state["text_idx"],
+                    "delta": {"type": "text_delta", "text": text},
+                })
+        if isinstance(delta.get("refusal"), str) and delta["refusal"].strip():
             state["refusal"] = True
-            frame = ensure_text()
-            if frame:
-                yield frame
-            yield anthropic_sse_frame("content_block_delta", {
-                "index": state["text_idx"],
-                "delta": {"type": "text_delta", "text": refusal},
-            })
         for call in delta.get("tool_calls") or []:
             if not isinstance(call, dict):
                 continue
@@ -11882,6 +15825,9 @@ def stream_messages_events(raw_iter, model, holder=None):
                 entry["name"] = _anthropic_text(fn.get("name"))
             args = fn.get("arguments") if fn.get("arguments") is not None else ""
             if not entry["opened"] and (entry["id"] or entry["name"] or args):
+                if state["thinking_open"]:
+                    state["thinking_open"] = False
+                    yield anthropic_sse_frame("content_block_stop", {"index": state["thinking_idx"]})
                 if state["text_open"]:
                     state["text_open"] = False
                     yield anthropic_sse_frame("content_block_stop", {"index": state["text_idx"]})
@@ -11906,13 +15852,16 @@ def stream_messages_events(raw_iter, model, holder=None):
                 })
         finish = choice.get("finish_reason")
         if finish:
-            state["stop"] = "refusal" if state["refusal"] else _anthropic_stop_reason(finish)
+            state["stop"] = "refusal" if state.get("refusal") else _anthropic_stop_reason(finish)
     if state["failed"]:
         return
     if not state["started"]:
         start = ensure_start(None)
         if start:
             yield start
+    if state["thinking_open"]:
+        state["thinking_open"] = False
+        yield anthropic_sse_frame("content_block_stop", {"index": state["thinking_idx"]})
     if state["text_open"]:
         state["text_open"] = False
         yield anthropic_sse_frame("content_block_stop", {"index": state["text_idx"]})
@@ -12067,6 +16016,38 @@ def _write_stream_frame(handler, frame):
         raise _ClientStreamClosed() from exc
 
 
+class _BufferedStreamWriter:
+    """Flush a bounded batch before a blocking upstream read or a terminal."""
+    LIMIT = 64 * 1024
+
+    def __init__(self, handler):
+        self.handler = handler
+        self.parts = []
+        self.size = 0
+
+    def write(self, frame):
+        if not frame:
+            return
+        if self.size + len(frame) > self.LIMIT:
+            self.flush()
+        if len(frame) >= self.LIMIT:
+            _write_stream_frame(self.handler, frame)
+            return
+        self.parts.append(frame)
+        self.size += len(frame)
+
+    def flush(self):
+        if self.parts:
+            frame = b"".join(self.parts)
+            self.parts.clear()
+            self.size = 0
+            _write_stream_frame(self.handler, frame)
+
+    def discard(self):
+        self.parts.clear()
+        self.size = 0
+
+
 def _attempt_recorder(holder, model, fp, t_start, stream=True, usage_field="usage"):
     def record(outcome=None):
         if holder.get("usage_recorded"):
@@ -12108,12 +16089,14 @@ def _stream_chat_events(upstream, model, holder):
     try:
         while True:
             current = _GuardedStream(current, holder)
-            text, reason, refusal = [], [], []
+            text, reason = [], []
             holder["text_parts"], holder["reason_parts"] = text, reason
             holder["usage_this_round"] = None
             holder["round_accounted"] = False
             holder["usage_recorded"] = False
             scrubber = ReasoningScrubber()
+            leak_filter = LeakedToolCallStreamFilter()
+            native_tools = False
             held_finish, finish, saw_finish = None, "stop", False
             for raw in current:
                 line = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
@@ -12141,6 +16124,8 @@ def _stream_chat_events(upstream, model, holder):
                 terminal = False
                 for choice in frame.get("choices") or []:
                     delta = choice.get("delta") or {}
+                    if isinstance(delta.get("refusal"), str) and delta["refusal"].strip():
+                        holder["client_content_seen"] = True
                     if delta.get("reasoning_content"):
                         safe = scrubber.feed(delta["reasoning_content"])
                         delta["reasoning_content"] = safe
@@ -12148,17 +16133,17 @@ def _stream_chat_events(upstream, model, holder):
                             reason.append(safe)
                     if delta.get("content"):
                         text.append(delta["content"])
+                        actions = leak_filter.feed(delta["content"])
+                        delta["content"] = "".join(value for kind, value in actions if kind == "text")
                         if str(delta["content"]).strip():
                             holder["client_content_seen"] = True
-                    if isinstance(delta.get("refusal"), str) and delta["refusal"]:
-                        refusal.append(delta["refusal"])
-                        holder["client_refusal_seen"] = True
                     calls = delta.get("tool_calls") or []
                     legacy = delta.get("function_call") or {}
                     if any(c.get("id") or (c.get("function") or {}).get("name") or
                            (c.get("function") or {}).get("arguments") for c in calls) or (
                                isinstance(legacy, dict) and (legacy.get("name") or legacy.get("arguments"))):
                         holder["client_tool_calls_seen"] = True
+                        native_tools = True
                     if choice.get("finish_reason"):
                         finish = choice["finish_reason"]
                         saw_finish, terminal = True, True
@@ -12179,9 +16164,23 @@ def _stream_chat_events(upstream, model, holder):
                 yield _chat_frame(holder, {"reasoning_content": tail})
             if not saw_finish and not holder.get("incomplete_reason"):
                 holder["incomplete_reason"] = "upstream_truncated"
+            if not holder.get("incomplete_reason"):
+                # Never synthesize tools after a guard error or truncated
+                # transport; native calls take precedence over printed copies.
+                actions = leak_filter._release_all() if native_tools else leak_filter.flush()
+                for kind, value in actions:
+                    if kind == "text" and value:
+                        holder["client_content_seen"] = True
+                        yield _chat_frame(holder, {"content": value})
+                    elif kind == "calls":
+                        holder["client_tool_calls_seen"] = True
+                        held_finish = finish = "tool_calls"
+                        for payload in chat_tool_call_chunks(model, value):
+                            frame = json.loads(payload)
+                            yield _chat_frame(holder, frame["choices"][0]["delta"])
             usage = holder.get("usage_this_round")
             if not usage or not usage.get("total_tokens"):
-                completion = estimate_tokens("".join(text + reason + refusal))
+                completion = estimate_tokens("".join(text + reason))
                 prompt = max(1, estimate_tokens(str((holder.get("base_body") or {}).get("messages") or "")))
                 usage = {"prompt_tokens": prompt, "completion_tokens": completion,
                          "total_tokens": prompt + completion,
@@ -12196,7 +16195,7 @@ def _stream_chat_events(upstream, model, holder):
                 ledger[uid] = sum_usage(ledger.get(uid), usage)
             gate = reasoning_only_turn(text, holder.get("client_tool_calls_seen"), finish,
                                        holder.get("incomplete_reason"))
-            gate = gate and not holder.get("client_content_seen") and not holder.get("client_refusal_seen")
+            gate = gate and not holder.get("client_content_seen")
             holder["thinking_only"] = bool(gate)
             _close_upstream(current)
             if _try_loop_continuation(holder, model, holder.get("incomplete_reason"),
@@ -12214,8 +16213,7 @@ def _stream_chat_events(upstream, model, holder):
                 holder["incomplete_reason"] = holder.get("continuation_failure_code") or (
                     "reasoning_only_turn" if reason else "empty_output_turn")
             _finish_loop_retry(holder, not holder.get("incomplete_reason") and finish != "length" and
-                               bool(holder.get("client_content_seen") or holder.get("client_tool_calls_seen") or
-                                    holder.get("client_refusal_seen")))
+                               bool(holder.get("client_content_seen") or holder.get("client_tool_calls_seen")))
             if holder.get("incomplete_reason"):
                 yield from _chat_error_frames(holder, holder["incomplete_reason"])
             else:
@@ -12312,8 +16310,7 @@ def _aggregate_with_recovery(upstream, model, account, holder):
             message = ((obj.get("choices") or [{}])[0].get("message") or {})
             finish = ((obj.get("choices") or [{}])[0].get("finish_reason") or "stop")
             failure = obj.get("_ops_failure")
-            gate = reasoning_only_turn(message.get("content"), message.get("tool_calls"), finish, failure)
-            gate = gate and not message.get("refusal") and not holder.get("ops_refusal_seen")
+            gate = reasoning_only_turn(message.get("content") or message.get("refusal"), message.get("tool_calls"), finish, failure)
             _close_upstream(current)
             if _try_loop_continuation(holder, model, failure, message.get("reasoning_content", ""),
                                       (message.get("content") or "").strip(), message.get("tool_calls")):
@@ -12332,7 +16329,7 @@ def _aggregate_with_recovery(upstream, model, account, holder):
             if failure == "reasoning_loop_detected" and holder.get("continuation_failure_code"):
                 obj["_ops_failure"] = holder["continuation_failure_code"]
             _finish_loop_retry(holder, not obj.get("_ops_failure") and finish != "length" and
-                               bool(message.get("content") or message.get("tool_calls") or message.get("refusal")))
+                               bool(message.get("content") or message.get("tool_calls")))
             return obj, account
     finally:
         _close_upstream(current)
@@ -13074,7 +17071,7 @@ class Handler(BaseHTTPRequestHandler):
             super().finish()
         except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
             pass
-    server_version = "wb-proxy/1.6.20"
+    server_version = "wb-proxy/1.7.3"
     def log_message(self, fmt, *args):
         # 静默过滤前端看板高频定时心跳的正常 200 GET 请求（/logs、/usage、/accounts 轮询等）
         # 避免自增死循环刷屏与日志污染。遇 4xx/5xx 异常或所有非 GET 业务操作依然如实记录。
@@ -13569,6 +17566,13 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
         query = parse_qs(parsed.query)
+        # The standalone configurator, for clients on machines that do not run
+        # the gateway. Served before the panel gate and deliberately without a
+        # session: the machines that need it are exactly the ones that cannot
+        # pass the loopback check, and the body is public source code (the
+        # same wb_agents.py shipped in the repository, no secrets inside).
+        if path == "/agents/cli":
+            return self._get_agents_cli()
         if self._is_panel_route(path) and not self._panel_ok():
             return self._error(401, "panel password required", "invalid_request_error")
         if path in ("/", "/dashboard", "/ui"):
@@ -14418,6 +18422,32 @@ class Handler(BaseHTTPRequestHandler):
                 wb_settings.set_credits_refresh_hours(ACCOUNTS_DIR, hours)
             if CREDITS_REFRESHER:
                 CREDITS_REFRESHER.wake()
+        if "section_max_height" in payload:
+            # Panel window height cap in pixels; 0 turns the cap off. bool is an
+            # int subclass and must be rejected explicitly - true would
+            # otherwise store 1 and shrink every window to a sliver.
+            raw = payload.get("section_max_height")
+            if isinstance(raw, bool) or raw is None:
+                return self._error(400, "section_max_height must be a whole number",
+                                   "invalid_request_error")
+            try:
+                number = int(raw)
+            except (TypeError, ValueError, OverflowError):
+                # OverflowError: a JSON payload may carry Infinity (1e400),
+                # which int() refuses - answer 400, not a 500.
+                return self._error(400, "section_max_height must be a whole number",
+                                   "invalid_request_error")
+            # A fractional count is refused rather than truncated: int(-0.5) is
+            # 0, which would slip past the negative check and silently turn the
+            # cap off.
+            if float(raw) != number:
+                return self._error(400, "section_max_height must be a whole number",
+                                   "invalid_request_error")
+            if number < 0:
+                return self._error(400, "section_max_height cannot be negative",
+                                   "invalid_request_error")
+            reply["section_max_height"] = \
+                wb_settings.set_section_max_height(ACCOUNTS_DIR, number)
         if "ui_language" in payload:
             # Instance-wide default language. The dashboard overrides this per
             # browser with localStorage; this value is the fallback when no
@@ -14461,6 +18491,17 @@ class Handler(BaseHTTPRequestHandler):
                                    "invalid_request_error")
             wb_settings.set_daily_chat_web(ACCOUNTS_DIR, raw)
             reply["daily_chat_web"] = raw
+        if "daily_chat_model" in payload:
+            raw = payload.get("daily_chat_model") or ""
+            # Empty clears the override back to the built-in id. Anything else
+            # has to look like a model id; a stray value here would be sent
+            # upstream on every daily run.
+            if not isinstance(raw, str) or len(raw) > 64 or \
+                    (raw and not re.match(r"^[A-Za-z0-9._:-]+$", raw)):
+                return self._error(400, "daily_chat_model must be a model id or empty",
+                                   "invalid_request_error")
+            wb_settings.set_daily_chat_model(ACCOUNTS_DIR, raw)
+            reply["daily_chat_model"] = raw
         if "local_web_tools" in payload:
             raw = payload.get("local_web_tools")
             if not isinstance(raw, bool):
@@ -14475,6 +18516,15 @@ class Handler(BaseHTTPRequestHandler):
                                    "invalid_request_error")
             wb_settings.set_remaining_priority_enabled(ACCOUNTS_DIR, raw)
             reply["remaining_priority_enabled"] = raw
+        if "egress_backoff_enabled" in payload:
+            # 出口级瞬时失败退避（issue #271）：与 remaining_priority_enabled
+            # 同一形状——严格 JSON 布尔，字符串 "false" 会是真值。
+            raw = payload.get("egress_backoff_enabled")
+            if not isinstance(raw, bool):
+                return self._error(400, "egress_backoff_enabled must be true or false",
+                                   "invalid_request_error")
+            wb_settings.set_egress_backoff_enabled(ACCOUNTS_DIR, raw)
+            reply["egress_backoff_enabled"] = raw
             if not raw and POOL is not None:
                 # 关掉就立刻清掉池里上一次推的权重，不等下一个请求；打开则
                 # 由下一个请求照常推（此刻就算推也要先折一次剩余估算，没必要
@@ -14731,6 +18781,32 @@ class Handler(BaseHTTPRequestHandler):
             pass
         return models
 
+    def _get_agents_cli(self):
+        """Serve wb_agents.py so a remote machine can fetch the configurator.
+
+        No panel session and no loopback check on purpose: the callers are
+        other machines, which is the whole point of the CLI (it writes the
+        config files on the machine it runs on). The file carries no secrets
+        - it is byte-identical to the copy in the repository.
+        """
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "wb_agents.py")
+        try:
+            with open(path, "rb") as fh:
+                body = fh.read()
+        except OSError as exc:
+            return self._error(500, "wb_agents.py unavailable: %s" % exc)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Disposition",
+                         'inline; filename="wb_agents.py"')
+        self.send_header("Content-Length", str(len(body)))
+        if cors_origin_allowed(self.path):
+            self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(body)
+        return
+
     def _get_agents(self):
         if not self._agents_client_allowed():
             # 远程看板（服务端 / Docker / OpenWrt）：一键配置改的是网关所在
@@ -14800,8 +18876,8 @@ class Handler(BaseHTTPRequestHandler):
         models = payload.get("models")
         if not models:
             # Fall back to the gateway's discovered catalog so clients that embed
-            # model definitions (OpenCode, DSH, Crush) receive the full model list
-            # even when the front-end omitted the field.
+            # model definitions (OpenCode, DSH, Crush, ZCode) receive the full
+            # model list even when the front-end omitted the field.
             models = self._agents_models()
         if not isinstance(models, list):
             return self._error(400, "models must be a list",
@@ -15527,9 +19603,27 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(404, "no such account")
             log("account %s %s"
                 % (uid[:8], "enabled" if payload.get("enabled") else "disabled"))
+        if "weight" in payload:
+            try:
+                weight = int(payload.get("weight"))
+            except (TypeError, ValueError):
+                return self._error(400, "weight must be an integer between 1 and 100")
+            if not 1 <= weight <= 100:
+                return self._error(400, "weight out of range (1-100)")
+            updated = POOL.set_weight(uid, weight)
+            if updated is None:
+                return self._error(404, "no such account")
+            log("account %s weight set to %d" % (uid[:8], weight))
+        if "note" in payload:
+            updated = POOL.set_note(uid, payload.get("note"))
+            if updated is None:
+                return self._error(404, "no such account")
+            log("account %s note set (%d chars)"
+                % (uid[:8], len(updated.get("note") or "")))
         if updated is None:
             return self._error(
-                400, "nothing to update: pass 'enabled', 'proxy' or 'proxySlot'"
+                400,
+                "nothing to update: pass 'enabled', 'proxy', 'proxySlot', 'weight' or 'note'"
             )
         return self._json(200, {"account": updated})
 
@@ -15595,10 +19689,10 @@ class Handler(BaseHTTPRequestHandler):
         })
 
     def _handle_responses(self, payload):
-        """Serve /v1/responses by translating to chat completions upstream."""
         candidate_error = _single_candidate_error(payload)
         if candidate_error:
             return self._error(400, candidate_error, "invalid_request_error")
+        """Serve /v1/responses by translating to chat completions upstream."""
         # The gateway is stateless: it keeps no store of previous responses,
         # so it cannot replay a prior turn. Silently ignoring the field would
         # answer a follow-up as if it were a fresh conversation - the client
@@ -15613,12 +19707,19 @@ class Handler(BaseHTTPRequestHandler):
                 "instead, or use a stateless client.",
                 "invalid_request_error")
         session_key = extract_session_key(self.headers, payload)
-        custom_names = custom_tool_names(payload.get("tools"))
+        # 工具可能在顶层，也可能整份在 input 的 additional_tools 条目里。回程
+        # 的两处取值（custom_names 判定条目类型、request_meta 回显工具清单）
+        # 必须和 responses_to_chat() 出站合并后的清单一致，否则两边看到的
+        # 是不同工具集合，回程类型判错 → 客户端匹配不到执行器。
+        all_tools = payload.get("tools")
+        all_tools = list(all_tools) if isinstance(all_tools, list) else []
+        all_tools.extend(additional_tools_from_input(payload))
+        custom_names = custom_tool_names(all_tools)
         chat_req = responses_to_chat(payload)
         ns_map = chat_req.pop("_namespace_map", None)
         # Echo these back on the response object; see chat_to_response.
         request_meta = {
-            "tools": payload.get("tools") or [],
+            "tools": all_tools,
             "tool_choice": payload.get("tool_choice", "auto"),
             "parallel_tool_calls": payload.get("parallel_tool_calls", True),
         }
@@ -15627,9 +19728,10 @@ class Handler(BaseHTTPRequestHandler):
         t_start = time.time()
         fp = prompt_fingerprint(chat_req.get("messages"))
         log(
-            "responses: model=%s stream=%s msgs=%d effort=%r custom_tools=%s"
+            "responses: model=%s stream=%s msgs=%d effort=%r tools=%d/%d custom_tools=%s"
             % (model, want_stream, len(chat_req.get("messages") or []),
                chat_req.get("reasoning_effort"),
+               len(chat_req.get("tools") or []), len(all_tools),
                sorted(custom_names) or "-")
         )
         try:
@@ -15727,6 +19829,8 @@ class Handler(BaseHTTPRequestHandler):
                   "account_usage": {}}
         holder.update(key_id=self._key_id(), effort=effort)
         holder["record_attempt"] = _attempt_recorder(holder, model, fp, t_start)
+        writer = _BufferedStreamWriter(self)
+        holder["before_upstream_read"] = writer.flush
         first_ms = None
         wall = None
         outcome = None
@@ -15748,8 +19852,9 @@ class Handler(BaseHTTPRequestHandler):
                 for frame in stream_responses_events(upstream, model, holder):
                     if first_ms is None:
                         first_ms = int((time.time() - t_start) * 1000)
-                    _write_stream_frame(self, clean_responses_frame(frame))
-                # 每一轮的 token 都是真的花掉的，记帐要加总
+                    writer.write(clean_responses_frame(frame))
+                writer.flush()
+                # 每一輪的 token 都是真的花掉的，記帳要加總
                 total_usage = sum_usage(total_usage, holder.get("usage"))
                 ledger = holder["account_usage"]
                 ledger[account.uid] = sum_usage(ledger.get(account.uid), holder.get("usage"))
@@ -15781,20 +19886,23 @@ class Handler(BaseHTTPRequestHandler):
                     raise RuntimeError("web follow-up failed its first-frame probe")
             if total_usage:
                 holder["total_usage"] = total_usage
+            writer.flush()
         except _ClientStreamClosed:
             outcome = "client_aborted"
         except Exception as exc:
             holder["incomplete_reason"] = "upstream_stream_error"
             outcome = "upstream_aborted"
             try:
+                writer.flush()
                 if not holder.get("terminal_sent"):
                     self.wfile.write(_response_failed_frame(holder, model, "upstream_stream_error"))
                 self.wfile.flush()
             except Exception:
                 pass
         finally:
-            # 代跑多轮时 upstream 会被换掉，外层的 with 只认得最开始那一条，
-            # 最后一条要在这里收掉。
+            writer.discard()
+            # 代跑多輪時 upstream 會被換掉，外層的 with 只認得最開始那一條，
+            # 最後一條要在這裡收掉。
             _close_upstream(upstream)
             # A prepared continuation may exist when the downstream disconnects
             # while its final reasoning/output-item events are being flushed.
@@ -15828,7 +19936,7 @@ class Handler(BaseHTTPRequestHandler):
                   "retry_call": _make_retry_call(base_body, session_key, realm) if base_body else None}
         holder.update(key_id=self._key_id(), effort=effort)
         holder["record_attempt"] = _attempt_recorder(holder, model, fp, t_start, stream=False)
-        # 开关关闭时不拦同名呼叫：那是客户端自己的工具。
+        # 開關關閉時不攔同名呼叫：那是客戶端自己的工具。
         web_tools = web_tools_active(base_body)
         while True:
             try:
@@ -15892,10 +20000,10 @@ class Handler(BaseHTTPRequestHandler):
         return self._json(200, {"input_tokens": _anthropic_estimate_chat_tokens(chat)})
 
     def _handle_messages(self, payload):
-        """Serve an Anthropic Messages request through the chat pipeline."""
         candidate_error = _single_candidate_error(payload)
         if candidate_error:
             return self._anthropic_error(400, candidate_error, "invalid_request_error")
+        """Serve an Anthropic Messages request through the chat pipeline."""
         try:
             chat_req = messages_to_chat(payload)
         except ValueError as exc:
@@ -16023,12 +20131,15 @@ class Handler(BaseHTTPRequestHandler):
         holder["record_attempt"] = _attempt_recorder(holder, model, fp, t_start,
                                                     usage_field="usage_this_round")
         protected = _stream_chat_events(upstream, model, holder)
+        writer = _BufferedStreamWriter(self)
+        holder["before_upstream_read"] = writer.flush
         first_ms = None
         try:
             for frame in stream_messages_events(protected, model):
                 if first_ms is None:
                     first_ms = int((time.time() - t_start) * 1000)
-                _write_stream_frame(self, frame)
+                writer.write(frame)
+            writer.flush()
         except (_ClientStreamClosed, BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             wall = int((time.time() - t_start) * 1000)
             account = holder.get("account") or account
@@ -16047,6 +20158,7 @@ class Handler(BaseHTTPRequestHandler):
                          ttft_ms=first_ms, fp=fp, outcome="upstream_aborted",
                          key=self._key_id(), effort=effort)
             try:
+                writer.flush()
                 self.wfile.write(anthropic_sse_frame("error", {
                     "error": {"type": "api_error", "message": str(exc)}}))
                 self.wfile.flush()
@@ -16054,6 +20166,7 @@ class Handler(BaseHTTPRequestHandler):
                 pass
             return
         finally:
+            writer.discard()
             protected.close()
             _close_upstream(holder.pop("continue_upstream", None))
             _finish_loop_retry(holder, False)
@@ -16156,6 +20269,11 @@ class Handler(BaseHTTPRequestHandler):
         payload = self._payload_or_error(allow_list=(path == "/accounts/import"))
         if payload is None:
             return
+        if not is_account_route and "n" in payload and (
+                type(payload["n"]) is not int or payload["n"] != 1):
+            error = self._anthropic_error if is_messages_route else self._error
+            return error(400, "Only a single candidate is supported; omit n or use integer n=1.",
+                         "invalid_request_error")
         if is_account_route:
             return self._handle_accounts(path, payload)
         if is_messages_route:
@@ -16183,11 +20301,11 @@ class Handler(BaseHTTPRequestHandler):
             _chat_slots.release()
 
     def _dispatch_chat_post(self, path, payload):
+        # 先挡背景请求：Codex 自己发的（记忆整理／环境建议／自动复核）
+        # 不算「使用者实际使用」，一律本地拒绝，不碰上游。
         candidate_error = _single_candidate_error(payload)
         if candidate_error:
             return self._error(400, candidate_error, "invalid_request_error")
-        # 先挡背景请求：Codex 自己发的（记忆整理／环境建议／自动复核）
-        # 不算「使用者实际使用」，一律本地拒绝，不碰上游。
         if BLOCK_BACKGROUND_REQUESTS:
             reason = background_request_reason(payload)
             if reason:
@@ -16233,8 +20351,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(400, key_blocked, "invalid_request_error")
             deadline_at = time.monotonic() + FIRST_FRAME_DEADLINE
             upstream, account, effort = open_upstream(payload, session_key=session_key,
-                                              target_realm=req_realm, deadline_at=deadline_at,
-                                              prebuilt_body=forwarded)
+                                              target_realm=req_realm, deadline_at=deadline_at, prebuilt_body=forwarded)
             upstream, replacement = probe_first_frame(
                 upstream, retry_call=_make_retry_call(payload, session_key, req_realm),
                 tried=[account.uid], deadline_at=deadline_at)
@@ -16313,24 +20430,29 @@ class Handler(BaseHTTPRequestHandler):
         holder.update(key_id=self._key_id(), effort=effort)
         holder["record_attempt"] = _attempt_recorder(
             holder, model, fp, t_start, usage_field="usage_this_round")
+        writer = _BufferedStreamWriter(self)
+        holder["before_upstream_read"] = writer.flush
         first_ms = None
         outcome = None
         try:
             for frame in _stream_chat_events(upstream, model, holder):
                 if first_ms is None:
                     first_ms = int((time.time() - t_start) * 1000)
-                _write_stream_frame(self, frame)
+                writer.write(frame)
+            writer.flush()
         except _ClientStreamClosed:
             outcome = "client_aborted"
         except Exception:
             holder["incomplete_reason"] = "upstream_stream_error"
             try:
                 for frame in _chat_error_frames(holder, "upstream_stream_error"):
-                    _write_stream_frame(self, frame)
-                _write_stream_frame(self, b"data: [DONE]\n\n")
+                    writer.write(frame)
+                writer.write(b"data: [DONE]\n\n")
+                writer.flush()
             except _ClientStreamClosed:
                 pass
         finally:
+            writer.discard()
             _close_upstream(upstream)
             pending = holder.pop("continue_upstream", None)
             if pending is not None:
@@ -16425,7 +20547,8 @@ def _parse_cli_args():
     return args
 
 def _apply_cli_overrides(args):
-    global USAGE_DIR, USAGE_LOG, LIMIT_EVENTS_FILE, ESTIMATE_DAILY_FILE
+    global USAGE_DIR, USAGE_LOG, LIMIT_EVENTS_FILE, ESTIMATE_DAILY_FILE, \
+        RECENT_INDEX_FILE
     # LAN mode binds every interface. The key is generated below, once
     # ACCOUNTS_DIR is resolved, so it can be persisted and reused.
     if args.lan and args.host == "127.0.0.1":
@@ -16442,6 +20565,9 @@ def _apply_cli_overrides(args):
         LIMIT_EVENTS_FILE = os.path.join(USAGE_DIR, "limit-events.jsonl")
         # 按天归档的估算数据同理（少了它，跨天归档会一直写默认目录/ENOENT）。
         ESTIMATE_DAILY_FILE = os.path.join(USAGE_DIR, "estimate-daily.json")
+        # recent 的行偏移索引同理（漏掉它，换目录后索引写到旧目录，
+        # 新目录每次冷启动都要重扫一遍日志）。
+        RECENT_INDEX_FILE = os.path.join(USAGE_DIR, "usage-recent-index.json")
     # 账号活动历史与用量日志同目录，并且要在任何后台线程起来之前定下来：调度器
     # 的第一轮巡检不能落在 --usage-dir 生效之前，否则记录会写进默认目录。
     wb_activity.set_data_dir(USAGE_DIR)

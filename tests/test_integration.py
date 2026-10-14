@@ -688,17 +688,17 @@ class IntegrationTests(unittest.TestCase):
         compressor = zlib.compressobj(wbits=-zlib.MAX_WBITS)
         raw = compressor.compress(payload) + compressor.flush()
         self.assertEqual(web._decompress(raw, "deflate"), payload)
-        rss = '<rss><channel><item><title>Python</title><link>https://python.org</link><description>Release</description></item></channel></rss>'
-        with mock.patch.object(web, "_http_get", side_effect=['<div class="anomaly-modal">challenge</div>', rss]), mock.patch.dict(os.environ, {"WB_OPS_BING_FALLBACK": "1"}):
+        bing = '<li class="b_algo"><h2><a href="https://python.org">Python</a></h2><p>Release</p></li>'
+        pages = [(b'<div class="anomaly-modal">challenge</div>', 200, 'text/html', 'utf-8'), (bing.encode(), 200, 'text/html', 'utf-8')]
+        with mock.patch.object(web, "_open_url", side_effect=pages), mock.patch.object(web, "_chain_for", return_value=['duckduckgo','bing']), mock.patch.object(web, "_cooling", return_value=False), mock.patch.dict(os.environ, {"WB_OPS_BING_FALLBACK": "1"}):
             result = web.search("python release")
         self.assertIn("https://python.org", result)
         self.assertNotIn("No results", result)
 
     def test_codec_expansion_is_bounded(self):
-        with mock.patch.object(web, "_HTTP_MAX_BYTES", 64):
-            for encoded, codec in ((gzip.compress(b"x" * 1000), "gzip"), (zlib.compress(b"x" * 1000), "deflate")):
-                with self.assertRaises(ValueError):
-                    web._decompress(encoded, codec)
+        for encoded, codec in ((gzip.compress(b"x" * 1000), "gzip"), (zlib.compress(b"x" * 1000), "deflate")):
+            with self.assertRaises(ValueError):
+                web._decompress(encoded, codec, limit=64)
 
     def test_http_get_requests_only_supported_encodings(self):
         headers = email.message.Message()
@@ -708,16 +708,16 @@ class IntegrationTests(unittest.TestCase):
         response.__enter__.return_value = response
         response.headers = headers
         response.read.return_value = gzip.compress(b"hello")
-        opener = mock.MagicMock()
+        opener = mock.Mock()
         opener.open.return_value = response
         with mock.patch.object(web.urllib.request, "build_opener", return_value=opener):
-            self.assertEqual(web._http_get("https://example.com"), "hello")
+            self.assertEqual(web._open_url("https://example.com")[0], b"hello")
         self.assertNotIn("br", opener.open.call_args.args[0].get_header("Accept-encoding"))
 
     def test_custom_search_backend_does_not_leak_to_bing(self):
-        with mock.patch.dict(os.environ, {"WB_SEARCH_ENDPOINT": "https://custom.example/search"}), mock.patch.object(web, "_http_get", return_value="blocked"), mock.patch.object(web, "_search_bing") as bing:
+        with mock.patch.dict(os.environ, {"WB_SEARCH_ENDPOINT": "https://custom.example/search", "WB_OPS_BING_FALLBACK":"0"}), mock.patch.object(web, "_chain_for", return_value=['duckduckgo','bing']), mock.patch.object(web, "_cooling", return_value=False), mock.patch.object(web, "_run_engine", return_value={'state':'blocked','detail':'challenge'}) as run:
             web.search("private query")
-        bing.assert_not_called()
+        self.assertEqual([c.args[0] for c in run.call_args_list], ['duckduckgo'])
 
 
 class LoopDetectorTests(unittest.TestCase):

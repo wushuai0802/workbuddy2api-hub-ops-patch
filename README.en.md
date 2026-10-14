@@ -1,78 +1,39 @@
 # WorkBuddy2API-Hub Ops Patch
 
-[中文](README.md) · [Installation and rollback](docs/INSTALL.md) · [Patch details](docs/PATCHES.md) · [Verification scope](docs/VERIFICATION.md)
+[中文](README.md) · [Install and rollback](docs/INSTALL.md) · [Patch scope](docs/PATCHES.md) · [Verification](docs/VERIFICATION.md)
 
-An unofficial, inspectable and reversible source patch for [workbuddy2api-hub](https://github.com/ardeyouxipianyi/workbuddy2api-hub), focused on DeepSeek reasoning repetition, tool-result image errors, expired authentication and streaming failures.
+Release **v1.7.3-ops.20261014.1**, targeting upstream **v1.7.3** at `c7dad8fe32316d47ce4f0ff260bb7ac7802b8a94`. Python 3.11+ is required.
 
-DeepSeek v4.1 Flash can repeat “Let me go.” and “Hmm.” many times among otherwise different reasoning text. The new bounded mixed-stall detector handles high-density instances that the existing repetition detector may miss. An occasional phrase during useful work is allowed.
+[Download ZIP and SHA256SUMS.txt](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.7.3-ops.20261014.1): `workbuddy2api-hub-v1.7.3-wushuai0802-ops-20261014-r1.zip`.
 
-## Release and compatibility
+This version rebases the supplied v1.7.2 bundle onto the exact v1.7.3 source and retains our mixed-stall guard, reasoning-alias budget, tool-image compatibility, refusals, bounded refresh, and pooled connection ownership. It preserves upstream additional-tools/custom namespace support, Anthropic thinking, DSML fallback, block I/O and shared TLS contexts.
 
-- Release: **v1.6.20-ops.20261012.1**, dated 2026-10-12.
-- [Download the ZIP and SHA256SUMS.txt](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.6.20-ops.20261012.1).
-- Archive: `workbuddy2api-hub-v1.6.20-wushuai0802-ops-20261012-r1.zip`.
-- Exact upstream baseline: **v1.6.20**, commit **`cb6a844588705ea01388be2b9df1f0cbbbcde357`**.
-- Python **3.11+** is required. Docker users must build an image from the patched exact upstream source.
+The installer replaces `wb_proxy.py`, `wb_accounts.py`, `wb_webtools.py` and `wb_upstream_pool.py`, adds `wb_ops.py` and `wb_stall.py`, and checks all unchanged dependencies. It does not modify account data, API keys, configuration or usage, and does not deploy.
 
-This is a patch bundle, not a complete gateway, account bundle, prebuilt image or arbitrary-version overlay. The installer rejects unknown patches and mismatched or mixed source trees.
+## Install
 
-This release fixes the shared 401-refresh deadline, divergent reasoning aliases bypassing the history budget, and refusals incorrectly triggering empty-turn recovery. Mixed-stall detection now also covers an established leading-thinking content view. These adapters explicitly support `n=1`; other candidate counts fail before contacting upstream. Health diagnostics identify the patch source and runtime payload fingerprint.
-
-To upgrade an earlier v1.6.20 patch, apply this bundle to a separate clean pinned source tree and rebuild. Retain the [previous release](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.6.20-ops.20261011.1) and deployment rather than forcing an overlay.
-
-For upstream v1.6.19, use the [historical r2 release](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.6.19-ops.20261011.2) and the instructions at its tag. The bundles target different baselines and cannot be used interchangeably.
-
-## Included protections
-
-| Group | Behavior |
-| --- | --- |
-| Loop and deadline guards | Detect high-confidence reasoning/content repetition within one generation; use a shared 300-second generation deadline by default. |
-| Mixed-stall guard | Detect dense repeated short action sentences and Hmm in DeepSeek v4.1 Flash reasoning using bounded windows. |
-| One safe recovery | Share at most one recovery between eligible empty turns and pure-reasoning loops. Never automatically replay after content or a tool trace. |
-| Reasoning history | Apply a default 65,536-character outgoing old-reasoning budget, exact failed-prefix quarantine and confirmed repeated-Hmm cleanup. |
-| Tool-result image compatibility | Replace DeepSeek v4.1 Flash tool-result images with explanatory text to handle the associated `11133` error. |
-| HTTP 401 refresh | Attempt a bounded credential refresh and retry after upstream authentication rejection. |
-| Answer and stream repairs | Trusted-boundary answer recovery, DSML cleanup, first-frame validation, explicit truncation errors and bounded reasoning buffering. |
-| Prompt, web and diagnostics | Keep passthrough instructions after 403 by default; bound web decompression, provide configurable search fallback and bounded diagnostics. |
-
-See [patch details](docs/PATCHES.md) for scope and configuration. Sign-in scheduling, account/cache affinity, upstream 429 handling and empty-function placeholders are upstream capabilities, not claims of original work here.
-
-## Quick start
-
-Run in your own working directory:
+Prepare separate clean pinned sources, keep the previous deployment and backups, and verify first:
 
 ~~~sh
-git clone --depth 1 --branch v1.6.20-ops.20261012.1 https://github.com/wushuai0802/workbuddy2api-hub-ops-patch.git ops-patch-v1620
-git clone --depth 1 --branch v1.6.20 https://github.com/ardeyouxipianyi/workbuddy2api-hub.git workbuddy2api-hub-v1.6.20
-git -C workbuddy2api-hub-v1.6.20 rev-parse HEAD
-python3 -B ops-patch-v1620/apply.py --verify-package
-python3 -B ops-patch-v1620/apply.py --target ./workbuddy2api-hub-v1.6.20 --dry-run
+git clone --depth 1 --branch v1.7.3-ops.20261014.1 https://github.com/wushuai0802/workbuddy2api-hub-ops-patch.git ops-patch-v173
+git clone --depth 1 --branch v1.7.3 https://github.com/ardeyouxipianyi/workbuddy2api-hub.git workbuddy2api-hub-v1.7.3
+git -C workbuddy2api-hub-v1.7.3 rev-parse HEAD
+python3 -B ops-patch-v173/apply.py --verify-package
+python3 -B ops-patch-v173/apply.py --target ./workbuddy2api-hub-v1.7.3 --dry-run
 ~~~
 
-Check the full upstream commit above. A successful dry run changes nothing. Follow [INSTALL.md](docs/INSTALL.md) to back up your own configuration, data and previous image, stop the target service, apply the patch and rebuild only your gateway service.
+Use [INSTALL.md](docs/INSTALL.md) to stop the one intended service, apply, rebuild and recreate it with its original parameters. Earlier patched trees are not overlays; do not delete state or checksum metadata to bypass a refusal. The [previous v1.6.20 release](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.6.20-ops.20261012.1) remains available.
 
-Only `wb_proxy.py`, `wb_webtools.py` and `wb_accounts.py` are replaced; `wb_ops.py` and `wb_stall.py` are added. The installer does not modify account data, settings, usage, keys, ports or routing, and does not deploy anything. Do not force it past a refusal or copy one module into a live container. For unknown existing patches, use a separate clean baseline and retain the old deployment.
+Requests explicitly support integer `n=1`. Eligible empty/pure-reasoning recovery shares one attempt and a 300-second default deadline; visible content, refusal and tool traces forbid replay. Equal reasoning aliases count once, divergent aliases both count against the 65536-character budget. Leading-thinking mixed detection stays separate from ordinary prose and quoted/code examples.
 
-## Upstream v1.6.20 and migration
-
-The rebase retains v1.6.20's panel sorting, daily activity and sign-in history, update checks, remaining-usage estimates, persistent account limits, connection reuse and polling/statistics improvements. Its panel 401 polling fix is separate from this patch's model-request credential refresh. Core reasoning-loop, safe-empty-recovery, tool-image and reasoning-history protections remain part of this patch. See the [official v1.6.20 changelog](https://github.com/ardeyouxipianyi/workbuddy2api-hub/blob/v1.6.20/docs/CHANGELOG.md).
-
-- The upstream request-body default is now **16 MiB**, down from 50 MiB. This patch retains it. For larger JSON histories, explicitly set `WB_MAX_PAYLOAD_BYTES=52428800` to restore 50 MiB after considering concurrent-request memory use.
-- The mainland streak manager can perform automatic makeup sign-ins, redemption and lottery draws. Makeup sign-ins and draws consume applicable cards/available attempts; review your enabled scheduled tasks before upgrading.
-- Remaining-usage priority scheduling is off by default. Enabling it sends more requests to accounts near exhaustion and may reach limits sooner.
-- Client one-click configuration is unavailable in Docker/OpenWrt server deployments; it writes client configuration on the gateway's own machine.
-- To upgrade from the v1.6.19 patch, prepare a fresh exact v1.6.20 source tree and apply this bundle. Retain the previous image, configuration and data.
+A response whose wire body was read in one block retains its connection lease until buffered frames are checked. Valid completion returns it to the pool; loops/timeouts discard it. Already received usage is preserved on failure. Authentication refresh uses a separate non-pooled connection, one HTTP attempt, a 1MiB cap and a shared deadline capped at30seconds. OS DNS cannot be forcibly cancelled, but a late lookup cannot send expired credentials.
 
 ## Verification and limits
 
-The earlier v1.6.19 component evaluation covered 132 real reasoning blocks, published only as anonymous aggregate results, and detected 3 anomalous blocks including the two longest repetition blocks. Ten negative-case categories, 100 independent short tool rounds and 12 focused regression groups passed. These historical results do not establish v1.6.20 migration compatibility; see [VERIFICATION.md](docs/VERIFICATION.md) for this release and connection-pool coverage. No original conversations, accounts or credentials are included.
+56 focused groups passed locally on Windows/Python3.14.7. CI checks Linux3.11/3.12 and Windows3.11; use actual workflow results linked by [VERIFICATION.md](docs/VERIFICATION.md). Tests use synthetic data and loopback HTTP, with external Python sockets denied. They do not establish online recovery rate or guarantee business progress over independent tool rounds.
 
-No paid model requests or online long-session replay were made for this release, and we do not claim the entire upstream test suite is green. See [VERIFICATION.md](docs/VERIFICATION.md).
+Upstream v1.7.3 improves streaming I/O, custom namespace tools, panel layout, timeout settings, international activity and recent-usage visibility. Earlier1.7 updates include account failure/backoff handling, weights/notes, web engines and cache improvements. Request-body default remains16MiB; use explicit configuration for larger histories. Upgrades can rebuild checkpoint caches while preserving append-only history.
 
-This does not guarantee that all loops or phrases disappear. It guards one upstream generation at a time; repeated successful tool rounds are not automatically treated as a loop. Outgoing-history cleanup does not alter the client's stored conversation or prevent credit exhaustion. Health checks and offline tests do not prove your deployment's actual conversation behavior.
+`/health/retry` reports source and a payload fingerprint frozen at import, comparable with `BASELINE.json`. Original authentication remains in force. Report versions, protocol, codes and minimal synthetic examples; exclude credentials, complete configuration and private conversations.
 
-## Attribution and license
-
-Upstream: [ardeyouxipianyi/workbuddy2api-hub](https://github.com/ardeyouxipianyi/workbuddy2api-hub), MIT. This repository is also distributed under [MIT](LICENSE), retaining upstream attribution.
-
-After an upstream upgrade, the patch must be rebased and verified against that exact version. Switching to an official image removes these local code changes. When reporting issues, include versions, protocol, error code and redacted reproduction steps; exclude account files, API keys, complete configuration, private histories and credential-bearing images.
+Derived from [WorkBuddy2API-Hub](https://github.com/ardeyouxipianyi/workbuddy2api-hub), MIT, retaining attribution in [LICENSE](LICENSE), [NOTICE.md](NOTICE.md) and [THIRD-PARTY-zh.md](THIRD-PARTY-zh.md).
