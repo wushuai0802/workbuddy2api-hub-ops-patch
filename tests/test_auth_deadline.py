@@ -37,6 +37,19 @@ def account():
 
 
 class DeadlineBudgetTests(unittest.TestCase):
+    def test_cold_tls_context_past_deadline_never_connects(self):
+        clock = [100.0]
+        def cold_context():
+            clock[0] += .3
+            return mock.Mock()
+        with mock.patch.object(accounts.time, 'monotonic', side_effect=lambda: clock[0]), \
+                mock.patch.object(accounts.wb_upstream_pool, 'shared_ssl_context', side_effect=cold_context), \
+                mock.patch.object(accounts.socket, 'getaddrinfo') as resolve:
+            credential = account()
+            self.assertFalse(credential.refresh_after_401('synthetic-old', timeout=.2, deadline_at=100.2))
+        resolve.assert_not_called()
+        self.assertEqual(credential.access_token, 'synthetic-old')
+
     def test_transient_failure_has_one_attempt_and_no_backoff(self):
         clock, calls = [100.0], []
 
@@ -355,6 +368,10 @@ class DeadlineSocketTests(unittest.TestCase):
                 self.assertEqual(routes, [expected, expected])
 
     def test_tls_handshake_after_proxy_connect_uses_original_deadline(self):
+        # Measure the socket/TLS handshake phase. CA-store initialization is
+        # shared and may be slow on Windows; the separate cold-context test
+        # ensures it cannot lead to a late connection or credential send.
+        accounts.wb_upstream_pool.shared_ssl_context()
         credential = account()
         credential.proxy = self.url("")
         cfg = dict(accounts.get_realm_config("intl"), chat_upstream="https://127.0.0.1:443")

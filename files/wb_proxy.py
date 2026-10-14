@@ -11029,6 +11029,7 @@ class _GuardedStream:
         self.expired = threading.Event()
         self.timer = None
         self.closed = False
+        self.socket_deadline_limited = False
         self.reason = ReasoningLoopGuard()
         mixed_enabled = (str(holder.get("model") or "").strip().lower().rsplit("/", 1)[-1] == DEEPSEEK_V41_MODEL
                          and (holder.get("base_body") or {}).get("n", 1) == 1
@@ -11069,7 +11070,10 @@ class _GuardedStream:
         if self.deadline is not None:
             sock = _stream_socket(upstream)
             if sock is not None:
-                sock.settimeout(min(upstream_timeouts()[1], max(.001, self.deadline - time.monotonic())))
+                remaining = max(.001, self.deadline - time.monotonic())
+                idle = upstream_timeouts()[1]
+                self.socket_deadline_limited = remaining <= idle
+                sock.settimeout(min(idle, remaining))
             self.timer = threading.Timer(max(0, self.deadline - time.monotonic()), self._expire)
             self.timer.daemon = True
             self.timer.start()
@@ -11317,7 +11321,11 @@ class _GuardedStream:
                         yield self._failure("reasoning_loop_detected")
                 return
             except Exception as exc:
-                if self._timed_out():
+                # Windows clocks/socket timers can disagree by one tick. If
+                # the socket was explicitly limited by this absolute budget,
+                # its TimeoutError is the deadline firing, even just before
+                # the watchdog/monotonic comparison observes the boundary.
+                if self._timed_out() or (self.socket_deadline_limited and isinstance(exc, socket.timeout)):
                     yield self._failure("generation_timeout")
                     return
                 if isinstance(exc, _SSELimitError):

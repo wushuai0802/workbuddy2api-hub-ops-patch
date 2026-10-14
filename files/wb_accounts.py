@@ -247,7 +247,13 @@ def _deadline_json(url, data, method, headers, deadline_at, proxy):
     def factory(cls):
         def new_connection(*args, **kwargs):
             owner.remaining()
+            if cls is _DeadlineHTTPSConnection and kwargs.get('context') is None:
+                # Share verified CA policy, never the refresh connection/socket.
+                # Avoid reloading the Windows certificate store per refresh.
+                kwargs['context'] = wb_upstream_pool.shared_ssl_context()
+                owner.remaining()
             connection = cls(*args, **kwargs)
+            owner.remaining()
             connection._refresh_deadline = owner
             connection._create_connection = owner.connect
             return connection
@@ -256,6 +262,12 @@ def _deadline_json(url, data, method, headers, deadline_at, proxy):
         def http_open(self, req):
             return self.do_open(factory(_DeadlineHTTPConnection), req)
     class HTTPSHandler(urllib.request.HTTPSHandler):
+        def __init__(self):
+            # Python 3.14's HTTPSHandler eagerly builds a CA context, even for
+            # HTTP-only openers. Defer it to the checked HTTPS connection
+            # factory and use the same verified shared context as chat.
+            urllib.request.AbstractHTTPHandler.__init__(self)
+            self._context = None
         def https_open(self, req):
             return self.do_open(factory(_DeadlineHTTPSConnection), req, context=self._context)
     class NoRedirect(urllib.request.HTTPRedirectHandler):

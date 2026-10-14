@@ -146,7 +146,8 @@ class AuthRefreshTests(unittest.TestCase):
             self.run_request([a], deadline_at=time.monotonic() + .02)
         self.assertEqual(len(self.calls), 1)
         self.assertGreater(a.budgets[0], 0)
-        self.assertLessEqual(a.budgets[0], .02)
+        # Subtracting two absolute timestamps can add a few floating-point ulps.
+        self.assertLessEqual(a.budgets[0], .02 + 1e-12)
 
     def real_account(self):
         return accounts_mod.Account({"uid": "test-real", "realm": "intl",

@@ -2,6 +2,7 @@
 import io
 import json
 import os
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -171,6 +172,27 @@ class ReviewRegressionTests(unittest.TestCase):
         self.assertIn(USAGE, [f['usage'] for f in frames if f.get('usage')])
         self.assertTrue(any(f.get('error',{}).get('code')=='generation_timeout' for f in frames))
         self.assertEqual(source.reads, 1)
+
+    def test_deadline_limited_socket_timeout_is_not_an_idle_transport_error(self):
+        class EarlyTimeout(ChunkSource):
+            def __init__(self):
+                super().__init__([])
+                self.fp = SimpleNamespace(_sock=mock.Mock())
+            def read1(self, size):
+                raise TimeoutError('socket timer fired before monotonic tick')
+        for budget, deadline_error in [(1, True), (300, False)]:
+            source = EarlyTimeout()
+            with mock.patch.object(wb, 'upstream_timeouts', return_value=(30, 120)):
+                guard = wb._GuardedStream(source, {'model': MODEL, 'base_body': BODY,
+                                          'generation_deadline': wb.time.monotonic()+budget})
+            try:
+                if deadline_error:
+                    self.assertIn(b'generation_timeout', b''.join(guard))
+                else:
+                    with self.assertRaises(TimeoutError):
+                        list(guard)
+            finally:
+                guard.close()
 
     def test_sse_limit_failure_has_one_error_terminal_and_keeps_consumed_usage(self):
         wire = chunk({'role':'assistant'})+chunk(usage=USAGE)+b'data: '+b'x'*200000

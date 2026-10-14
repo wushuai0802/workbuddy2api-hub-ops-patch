@@ -4,7 +4,7 @@
 
 2026-10-14，Windows/Python3.14.7下58组focused回归通过：
 
-- r2引用/用量/SSE回归18项：六协议引用示例、分片一致/闭合后真循环、转义/所有格/未闭合预算/长行、leading-thinking、结构化句旁的混合复读、正文/推理循环用量、客户端取消、异常候选、transport、deadline、行/事件字节上限与大帧UTF-8/CRLF。
+- r2引用/用量/SSE回归19项：六协议引用示例、分片一致/闭合后真循环、转义/所有格/未闭合预算/长行、leading-thinking、结构化句旁的混合复读、正文/推理循环用量、客户端取消、异常候选、transport、deadline/空闲socket超时区分、行/事件字节上限与大帧UTF-8/CRLF。
 - 新观察回归17项：重复失败且参数变化、100轮新证据/正常轮询、用户任务范围/配对/模型/大结果/并行隔离、六路径request/attempt、一次恢复、取消/失败、默认只观察、重启/窗口筛选、轮换/并发/隐私、关闭写入、写入失败不中断业务及坏数据过滤。
 
 - 保留此前循环/混合、历史/图片、401、首帧、缓冲、拒答、六路径和安装器回归。
@@ -13,6 +13,8 @@
 - 官方分块、共享TLS、命名空间/自定义工具、stop归一化、失败去重/出口退避、权重/备注、活跃任务、闭/冷窗口、价表指纹、bytes预过滤和最近索引合同。
 
 第一次移植回归暴露首帧/守卫辅助函数接线、连接提前归池、保留Responses内容索引/content_filter语义及旧测试接口变化，均在部署前处理。Messages原生thinking的存在由新协议合同保留，未为了旧测试移除。没有移除有效失败断言。
+
+r2的Windows3.11检查另外验证：socket按生成期限设置时，其提前一个时钟tick的TimeoutError仍按generation_timeout终止，空闲超时不误分类；401刷新使用共享正常验证TLS Context，连接仍独立。TLS握手计时夹具先准备CA上下文，新增冷初始化超期不DNS/连接/发送凭据的合同；原0.5秒握手断言保留。401余额浮点比较只容许1e-12秒减法舍入，不增加重试或放宽实际期限。
 
 CI矩阵为Linux/Python3.11、3.12和Windows/Python3.11，使用同一runner；[实际状态](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/actions/workflows/tests.yml)以本版提交对应run为准。
 
