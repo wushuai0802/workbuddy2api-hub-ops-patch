@@ -34,7 +34,7 @@ class BuildIdentityTests(unittest.TestCase):
     def test_same_version_different_payload_changes_identity(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory)
-            for name in ('wb_proxy.py', 'wb_accounts.py', 'wb_webtools.py', 'wb_ops.py', 'wb_stall.py', 'wb_upstream_pool.py'):
+            for name in ('wb_proxy.py', 'wb_accounts.py', 'wb_webtools.py', 'wb_ops.py', 'wb_stall.py', 'wb_upstream_pool.py', 'wb_observe.py'):
                 (source / name).write_bytes(('# synthetic ' + name + '\n').encode())
             fingerprint = self.identity_function(source)
             before = fingerprint()
@@ -44,7 +44,7 @@ class BuildIdentityTests(unittest.TestCase):
     def test_crlf_checkout_is_same_payload(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory)
-            for name in ('wb_proxy.py', 'wb_accounts.py', 'wb_webtools.py', 'wb_ops.py', 'wb_stall.py', 'wb_upstream_pool.py'):
+            for name in ('wb_proxy.py', 'wb_accounts.py', 'wb_webtools.py', 'wb_ops.py', 'wb_stall.py', 'wb_upstream_pool.py', 'wb_observe.py'):
                 (source / name).write_bytes(b'# synthetic\n')
             fingerprint = self.identity_function(source)
             before = fingerprint()

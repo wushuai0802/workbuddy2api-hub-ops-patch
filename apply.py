@@ -18,8 +18,8 @@ import uuid
 STATE = ".ops-patch-state.json"
 BACKUPS = ".ops-patch-backups"
 LOCK = ".ops-patch.lock"
-FILES = {"wb_proxy.py", "wb_webtools.py", "wb_accounts.py", "wb_ops.py", "wb_stall.py", "wb_upstream_pool.py"}
-NEW_FILES = {"wb_ops.py", "wb_stall.py"}
+FILES = {"wb_proxy.py", "wb_webtools.py", "wb_accounts.py", "wb_ops.py", "wb_stall.py", "wb_upstream_pool.py", "wb_observe.py"}
+NEW_FILES = {"wb_ops.py", "wb_stall.py", "wb_observe.py"}
 DEPENDENCIES = {
     "dashboard.html", "wb_activity.py", "wb_agents.py",
     "wb_atrest.py", "wb_catalog.py", "wb_egress.py", "wb_fingerprint.py", "wb_identity.py",
@@ -149,7 +149,7 @@ class Bundle:
         if not all(is_digest(value) for value in self.dependencies.values()):
             raise ValueError("invalid dependency checksums")
         if {name for name in listed if name.startswith("files/")} != {"files/" + name for name in FILES}:
-            raise ValueError("payload scope must contain exactly the six patch modules")
+            raise ValueError("payload scope must contain exactly the seven patch modules")
         self.payload = {}
         for name, entry in self.files.items():
             if (not isinstance(entry, dict) or not is_digest(entry.get("patched_sha256"))

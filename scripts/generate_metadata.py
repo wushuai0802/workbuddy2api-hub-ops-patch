@@ -9,9 +9,9 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[1]
 COMMIT = 'c7dad8fe32316d47ce4f0ff260bb7ac7802b8a94'
 TAG = 'v1.7.3'
-PATCH_ID = 'v1.7.3-ops.20261014.1'
+PATCH_ID = 'v1.7.3-ops.20261014.2'
 PATCH_SOURCE = 'wushuai0802/workbuddy2api-hub-ops-patch'
-MODULES = ('wb_proxy.py', 'wb_webtools.py', 'wb_accounts.py', 'wb_ops.py', 'wb_stall.py', 'wb_upstream_pool.py')
+MODULES = ('wb_proxy.py', 'wb_webtools.py', 'wb_accounts.py', 'wb_ops.py', 'wb_stall.py', 'wb_upstream_pool.py', 'wb_observe.py')
 PUBLIC_DIRS = ('files', 'tests', 'docs', 'scripts', 'patches', '.github')
 PUBLIC_ROOT = ('README.md', 'README.en.md', 'LICENSE', 'NOTICE.md', 'THIRD-PARTY-zh.md', 'CHANGELOG.md',
                'release-notes.md', '.gitignore', '.gitattributes', 'apply.py', 'BASELINE.json')

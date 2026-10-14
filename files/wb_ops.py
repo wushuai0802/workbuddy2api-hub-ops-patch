@@ -8,6 +8,7 @@ import threading
 import time
 import struct
 from collections import Counter, deque
+from wb_stall import _Safety
 
 UPSTREAM_IDLE_TIMEOUT = 120
 FIRST_FRAME_MAX_ATTEMPTS = 3
@@ -502,12 +503,15 @@ class ReasoningLoopGuard:
         self.detail = ""
         self.conservative = conservative
         self.line = ""
+        self.context_prefix = ""
+        self.context_chars = 0
         self.line_blocked = False
         self.fence = None
         self.scanned = 0
         self.fast = FastStallGuard(conservative)
         self.total_chars = 0
         self.rule = ""
+        self.safety = _Safety()
 
     def _check(self, candidate):
         detail = detect_reasoning_loop(candidate[-REASON_LOOP_TAIL:], self.conservative)
@@ -520,7 +524,18 @@ class ReasoningLoopGuard:
         stripped = self.line.lstrip()
         match = re.match(r"(`{3,}|~{3,})", stripped)
         marker = match.group(1) if match else None
-        safe = _prose_line(self.line)
+        context = self.safety if complete else self.safety.copy()
+        protected = context.protected(self.context_prefix, structured=True)
+        if complete and self.context_chars > len(self.context_prefix):
+            # Keep the closing boundary of a long quoted line without retaining
+            # the whole line or rescanning it at every checkpoint.
+            tail_start = self.context_chars - len(self.line)
+            missing = max(0, tail_start - len(self.context_prefix))
+            if context.quote is not None:
+                context.quote_chars += missing
+            suffix = self.line[max(0, len(self.context_prefix)-tail_start):]
+            protected = context.protected(suffix, structured=True) or protected
+        safe = "" if protected else _prose_line(self.line)
         # Latch structured lines at deterministic checkpoints so a long code
         # prefix cannot fall out of the bounded window and become prose.
         if self.line.strip() and not safe:
@@ -546,6 +561,8 @@ class ReasoningLoopGuard:
                 elif self.line.strip():
                     self.fast.reset()
             self.line = ""
+            self.context_prefix = ""
+            self.context_chars = 0
             self.line_blocked = False
         if self.hit or self.fence or marker:
             return self.hit
@@ -576,6 +593,9 @@ class ReasoningLoopGuard:
                     return True
             else:
                 self.line = (self.line + char)[-REASON_LOOP_TAIL:]
+                self.context_chars += 1
+                if len(self.context_prefix) < REASON_LOOP_TAIL:
+                    self.context_prefix += char
             if self.scanned >= 64:
                 self.scanned = 0
                 if self._line_state():
@@ -653,7 +673,7 @@ class LeakedThinkingGuard:
                     self.pending = self.pending[-len(self.tag):]
                     if self._feed_view(prefix):
                         return True
-                if self.guard.fence is None:
+                if self.guard.fence is None and self.guard.safety.quote is None:
                     self._feed_view("", final=True)
                     self.pending, self.state = "", "done"
                     return self.hit

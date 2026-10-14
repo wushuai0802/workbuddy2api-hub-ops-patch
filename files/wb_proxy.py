@@ -83,6 +83,7 @@ import wb_prompt
 import wb_modelsdev
 import wb_probes
 import wb_updates
+import wb_observe
 IS_WINDOWS = os.name == "nt"
 
 # ---- 一键配置客户端（wb_agents）的可用性判定（issue #246）----
@@ -739,6 +740,9 @@ def record_usage(model, usage, stream=None, elapsed_ms=None, ttft_ms=None, gen_m
         row["cache_hit_pct"] = round(fields.get("cached_tokens", 0) * 100.0
                                      / fields["prompt_tokens"], 1)
     _persist_usage(row, "usage persist failed")
+    observation = wb_observe.CURRENT.get()
+    if observation is not None:
+        observation.finish_attempt(outcome, usage)
     try:
         t_tokens = fields.get("total_tokens", 0)
         dur = f" {elapsed_ms:.0f}ms" if elapsed_ms is not None else ""
@@ -820,6 +824,9 @@ def record_error(model, status, message, elapsed_ms=None, account=None,
     if effort:
         row["reasoning_effort"] = effort
     _persist_usage(row, "error persist failed")
+    observation = wb_observe.CURRENT.get()
+    if observation is not None:
+        observation.finish_attempt(outcome, usage, reason=message)
     dur = f" {elapsed_ms:.0f}ms" if elapsed_ms is not None else ""
     log(f"request error: model={model}{dur} status={status} msg={str(message)[:180]}", level="ERROR", tag="chat")
     return row
@@ -10624,7 +10631,7 @@ def retry_snapshot():
 def _patch_payload_fingerprint():
     """Identify this source payload without reading any account or settings."""
     directory = os.path.dirname(__file__)
-    names = ('wb_accounts.py', 'wb_ops.py', 'wb_proxy.py', 'wb_stall.py', 'wb_upstream_pool.py', 'wb_webtools.py')
+    names = ('wb_accounts.py', 'wb_observe.py', 'wb_ops.py', 'wb_proxy.py', 'wb_stall.py', 'wb_upstream_pool.py', 'wb_webtools.py')
     records = []
     try:
         for name in names:
@@ -10636,6 +10643,23 @@ def _patch_payload_fingerprint():
     return hashlib.sha256(''.join(records).encode('ascii')).hexdigest()
 
 _OPS_PATCH_FINGERPRINT = _patch_payload_fingerprint()
+_OPS_PATCH_ID = "v1.7.3-ops.20261014.2"
+_OBSERVATION_STORE = None
+_OBSERVATION_STORE_LOCK = threading.Lock()
+
+
+def _observation_store():
+    global _OBSERVATION_STORE
+    path = os.path.join(USAGE_DIR, "ops-observations.jsonl")
+    with _OBSERVATION_STORE_LOCK:
+        if _OBSERVATION_STORE is None or _OBSERVATION_STORE.path != path:
+            _OBSERVATION_STORE = wb_observe.ObservationStore(path)
+        return _OBSERVATION_STORE
+
+
+def _track_response(protocol, stream):
+    return wb_observe.tracked_response(protocol, stream, lambda: _observation_store(),
+                                      lambda: (_OPS_PATCH_ID, _OPS_PATCH_FINGERPRINT))
 
 def _single_candidate_error(payload):
     """The gateway's aggregation/Responses/Messages lifecycles are singular."""
@@ -10646,17 +10670,21 @@ def _single_candidate_error(payload):
         return None
     return "Only n=1 is supported by this gateway; omit n or send the integer 1."
 
-def retry_health_snapshot(limit=200):
+def retry_health_snapshot(limit=200, since=None, until=None, model=None):
     try:
         limit = max(1, min(10000, int(limit)))
     except (ValueError, TypeError):
         limit = 200
-    stats = {"retries": retry_snapshot(), "pid": os.getpid(), "ops_patch_id": "v1.7.3-ops.20261014.1",
+    stats = {"retries": retry_snapshot(), "pid": os.getpid(), "ops_patch_id": _OPS_PATCH_ID,
              "ops_patch_source": "wushuai0802/workbuddy2api-hub-ops-patch",
              "ops_patch_fingerprint": _OPS_PATCH_FINGERPRINT,
              "loops": loop_health_snapshot(),
              "process_started": _RETRY_STARTED_AT, "turns": 0,
-             "reasoning_only": 0, "empty_output": 0, "failed": 0,
+             "reasoning_only": 0, "empty_output": 0, "failed": 0, "client_aborted": 0, "upstream_aborted": 0,
+             "legacy_window": {"scope": "last_usage_rows", "limit": limit,
+                               "token_classification": "heuristic_not_business_success", "since": None, "until": None},
+             "observations": _observation_store().snapshot(
+                 since=_RETRY_STARTED_AT if since is None else since, until=time.time() if until is None else until, model=model),
              "recent_retry_log": [row for row in list(LOG_BUFFER)
                                   if row.get("tag") == "retry"][-40:]}
     try:
@@ -10669,7 +10697,20 @@ def retry_health_snapshot(limit=200):
             row = json.loads(line)
         except ValueError:
             continue
-        if row.get("error"):
+        if not isinstance(row, dict):
+            continue
+        at = row.get("at")
+        if isinstance(at, (int, float)) and math.isfinite(at):
+            window = stats["legacy_window"]
+            window["since"] = min(window["since"], at) if window["since"] is not None else at
+            window["until"] = max(window["until"], at) if window["until"] is not None else at
+        outcome = row.get("outcome")
+        if outcome == "client_aborted":
+            stats["client_aborted"] += 1
+            continue
+        if outcome == "upstream_aborted":
+            stats["upstream_aborted"] += 1
+        if row.get("error") or outcome in ("failed", "upstream_aborted"):
             stats["failed"] += 1
             continue
         stats["turns"] += 1
@@ -10721,7 +10762,7 @@ def _loop_event(kind, rule=None, chars=None, metrics=None, reason=None):
     # Fixed integer-only schema: no text, IDs, field values, or dynamic labels.
     if isinstance(metrics, dict):
         for key in ("buffered_chars", "buffered_bytes", "buffered_storage_bytes", "trigger_storage_bytes", "buffered_frames", "buffered_items", "buffered_records", "buffered_ms",
-                    "content_chars", "closed_boundary", "loop_hit",
+                    "content_chars", "closed_boundary", "loop_hit", "paired_rounds", "repeated_results", "distinct_arguments",
                     "trigger_bytes", "trigger_chars", "window_chars", "window_lines",
                     "intent_lines", "dominant_count", "distinct_intents", "received_chars",
                     "path", "neutral_lines", "neutral_dominant_count", "substantive_lines", "substantive_chars"):
@@ -10733,6 +10774,9 @@ def _loop_event(kind, rule=None, chars=None, metrics=None, reason=None):
         if rule:
             _LOOP_STATS["rule_" + str(event.get("rule", "other"))] += 1
         _LOOP_EVENTS.append(event)
+    observation = wb_observe.CURRENT.get()
+    if observation is not None:
+        observation.signal(kind, metrics)
 
 
 def loop_health_snapshot():
@@ -10855,7 +10899,7 @@ def _close_upstream(upstream):
 
 
 _STREAM_GUARD_CODES = {"reasoning_loop_detected", "content_loop_detected", "generation_timeout",
-                       "upstream_candidate_unsupported", "upstream_choices_unsupported"}
+                       "upstream_candidate_unsupported", "upstream_choices_unsupported", "upstream_sse_limit"}
 
 
 def _generation_deadline(holder):
@@ -11006,6 +11050,16 @@ class _GuardedStream:
         self.received_cjk = 0
         self.reason_cjk = 0
         self.received_usage = None
+        holder["ops_received_usage"] = None
+        holder["ops_usage_source"] = "missing"
+        self.observation = wb_observe.CURRENT.get()
+        if self.observation is not None:
+            self.observation.begin(holder)
+        if not holder.get("ops_progress_observed") and os.environ.get("WB_OPS_PROGRESS_OBSERVE", "1").lower() not in ("0", "false", "off"):
+            holder["ops_progress_observed"] = True
+            signal = wb_observe.progress_signal((holder.get("base_body") or {}).get("messages"), holder.get("model"))
+            if signal:
+                _loop_event(signal["kind"], metrics=signal)
         self.reason_scrubber = ReasoningScrubber()
         self.content_scrubber = ReasoningScrubber()
         self.protocol_tail = ""
@@ -11124,19 +11178,29 @@ class _GuardedStream:
                     _reasoning_buffer_boundary(data, detail)
                     data = {}
                 code = (data.get("error") or {}).get("code")
-                if code == "reasoning_loop_detected":
-                    if pending:
+                if code in _STREAM_GUARD_CODES:
+                    if pending and code == "reasoning_loop_detected":
                         _loop_event("reasoning_buffer_discarded", chars=pending_chars,
                                     metrics=buffer_metrics(), reason="loop")
+                        pending.clear()
+                    elif pending:
+                        released("error")
+                        yield from pending
                         pending.clear()
                     # The withheld generation still consumed tokens. Preserve
                     # provider usage or explicitly estimate the entire attempt.
                     completion = self.received_cjk + max(1, int((self.received_chars-self.received_cjk)/3.6))
                     reasoning = self.reason_cjk + max(1, int((self.reason_chars-self.reason_cjk)/3.6))
                     prompt = max(1, estimate_tokens(str((self.holder.get("base_body") or {}).get("messages") or "")))
-                    usage = self.received_usage or {"prompt_tokens": prompt, "completion_tokens": completion,
-                             "total_tokens": prompt+completion, "completion_tokens_details": {"reasoning_tokens": reasoning}}
-                    yield ("data: " + json.dumps({"choices": [], "usage": usage}) + "\n\n").encode()
+                    usage = self.received_usage
+                    if usage is None and self.received_chars:
+                        usage = {"prompt_tokens": prompt, "completion_tokens": completion,
+                                 "total_tokens": prompt+completion, "completion_tokens_details": {"reasoning_tokens": reasoning}}
+                        self.holder["ops_usage_source"] = "estimated"
+                        if self.observation is not None:
+                            self.observation.usage(usage, 'estimated')
+                    if usage is not None:
+                        yield ("data: " + json.dumps({"choices": [], "usage": usage}) + "\n\n").encode()
                     yield raw
                     return
                 choices = data.get("choices") or []
@@ -11208,10 +11272,17 @@ class _GuardedStream:
             if pending:
                 released("transport_error")
                 yield from pending
+            if self.received_usage is not None:
+                yield ("data: " + json.dumps({"choices": [], "usage": self.received_usage}) + "\n\n").encode()
             raise
 
     def _observe_prefetched_usage(self, usage):
         self.received_usage = _prefer_stream_usage(self.received_usage, usage)
+        self.holder["ops_received_usage"] = self.received_usage
+        if self.received_usage is not None:
+            self.holder["ops_usage_source"] = "provider"
+            if self.observation is not None:
+                self.observation.usage(self.received_usage)
 
     def _frames(self):
         before_read = self.holder.get("before_upstream_read")
@@ -11245,9 +11316,12 @@ class _GuardedStream:
                         _loop_event("reasoning_loop_detected", "mixed-stall", self.reason.total_chars, metrics=metrics)
                         yield self._failure("reasoning_loop_detected")
                 return
-            except Exception:
+            except Exception as exc:
                 if self._timed_out():
                     yield self._failure("generation_timeout")
+                    return
+                if isinstance(exc, _SSELimitError):
+                    yield self._failure("upstream_sse_limit")
                     return
                 raise
             if self._timed_out():
@@ -11276,6 +11350,8 @@ class _GuardedStream:
                 self.holder["ops_tool_seen"] = True  # uncertain protocol: no replay
             for choice in choices:
                 delta = choice.get("delta") or {}
+                if self.observation is not None:
+                    self.observation.saw(delta)
                 for field in ("content", "reasoning_content", "refusal"):
                     value = str(delta.get(field) or "")
                     cjk = sum(1 for c in value if '\u4e00' <= c <= '\u9fff' or '\u3400' <= c <= '\u4dbf')
@@ -11475,8 +11551,10 @@ def probe_first_frame(upstream, retry_call=None, tried=None, deadline_at=None, r
         except ContentRejected:
             _close_upstream(upstream)
             raise
-        except Exception:
+        except Exception as exc:
             _close_upstream(upstream)
+            if isinstance(exc, _SSELimitError):
+                raise
             if retry_call is None:
                 raise
             if attempt + 1 >= FIRST_FRAME_MAX_ATTEMPTS or time.monotonic() >= deadline_at:
@@ -14064,6 +14142,33 @@ def estimate_tokens(text):
 # 摊成「一块一次」，同时不会让首字节延迟变差（见 iter_sse_lines）。
 SSE_READ_BLOCK = 64 * 1024
 
+
+class _SSELimitError(ValueError):
+    """A protocol-size violation is terminal and never a retry trigger."""
+
+
+class _SSELimits:
+    def __init__(self):
+        def limit(name, default):
+            try:
+                value = int(os.environ.get(name, default))
+            except (ValueError, TypeError):
+                value = default
+            return max(1024, min(64 * 1024 * 1024, value))
+        self.line = limit("WB_OPS_SSE_MAX_LINE_BYTES", 4 * 1024 * 1024)
+        self.event = limit("WB_OPS_SSE_MAX_EVENT_BYTES", 8 * 1024 * 1024)
+        self.event_bytes = 0
+
+    def check(self, line):
+        if len(line) > self.line:
+            raise _SSELimitError("upstream_sse_limit: line exceeds byte budget")
+        if not line.strip():
+            self.event_bytes = 0
+        else:
+            self.event_bytes += len(line)
+            if self.event_bytes > self.event:
+                raise _SSELimitError("upstream_sse_limit: event exceeds byte budget")
+
 def _prefer_stream_usage(current, incoming):
     if not isinstance(incoming, dict):
         return current
@@ -14110,6 +14215,7 @@ def iter_sse_lines(source, block_size=SSE_READ_BLOCK, before_read=None, on_usage
     攒下的写出掉：一个读取块里的事件因此合成一次 write，而下一个字节一到就
     立刻产出——延迟与逐块写完全一样，只是不再一个 chunk 一次 sendall。
     """
+    limits = _SSELimits()
     read1 = getattr(source, "read1", None)
     if read1 is None:
         if isinstance(source, _ProbedStream):
@@ -14125,33 +14231,55 @@ def iter_sse_lines(source, block_size=SSE_READ_BLOCK, before_read=None, on_usage
                 line = next(iterator)
             except StopIteration:
                 return
+            data = line.encode("utf8") if isinstance(line, str) else line
+            for part in data.splitlines(keepends=True):
+                limits.check(part)
+            _observe_block_usage(data.split(b'\n'), on_usage)
             yield line
-    buf = b""
+    buf, searched = bytearray(), 0
     while True:
         if before_read is not None:
             before_read()
         chunk = read1(block_size)
         if not chunk:
             break
-        buf += chunk
-        if b"\n" not in buf:
-            continue
-        head, _, buf = buf.rpartition(b"\n")
-        lines = head.split(b"\n")
+        buf.extend(chunk)
+        lines, start = [], 0
+        try:
+            while True:
+                end = buf.find(b'\n', searched)
+                if end < 0:
+                    break
+                line = bytes(buf[start:end+1])
+                limits.check(line)
+                lines.append(line)
+                start = searched = end + 1
+            if len(buf) - start > limits.line:
+                raise _SSELimitError("upstream_sse_limit: line exceeds byte budget")
+        except _SSELimitError:
+            _observe_block_usage(lines, on_usage)
+            raise
+        if start:
+            del buf[:start]
+        searched = len(buf)
         _observe_block_usage(lines, on_usage)
-        for line in lines:
-            yield line + b"\n"
+        yield from lines
     if buf:
         # 上游没以换行收尾时，最后一行照旧要交出去（迭代 response 也是这个形状）。
-        _observe_block_usage([buf], on_usage)
-        yield buf
+        line = bytes(buf)
+        limits.check(line)
+        _observe_block_usage([line], on_usage)
+        yield line
 
 def aggregate_stream(raw_iter, model, resp_id, holder=None):
     holder = holder if holder is not None else {}
     holder["model"] = model
     guarded = _GuardedStream(raw_iter, holder)
     try:
-        return _aggregate_stream_impl(guarded, model, resp_id)
+        result = _aggregate_stream_impl(guarded, model, resp_id)
+        if holder.get("ops_received_usage") is not None:
+            result["usage"] = holder["ops_received_usage"]
+        return result
     finally:
         guarded.close()
 
@@ -16013,6 +16141,9 @@ def _write_stream_frame(handler, frame):
         handler.wfile.write(frame)
         handler.wfile.flush()
     except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError) as exc:
+        observation = wb_observe.CURRENT.get()
+        if observation is not None:
+            observation.client_aborted = True
         raise _ClientStreamClosed() from exc
 
 
@@ -16048,6 +16179,11 @@ class _BufferedStreamWriter:
         self.size = 0
 
 
+def _saved_attempt_usage(holder, field="usage"):
+    """Provider usage already consumed wins over an adapter estimate."""
+    return holder.get("ops_received_usage") if holder.get("ops_received_usage") is not None else holder.get(field)
+
+
 def _attempt_recorder(holder, model, fp, t_start, stream=True, usage_field="usage"):
     def record(outcome=None):
         if holder.get("usage_recorded"):
@@ -16055,7 +16191,7 @@ def _attempt_recorder(holder, model, fp, t_start, stream=True, usage_field="usag
         account = holder.get("account")
         uid = getattr(account, "uid", None) or holder.get("account_uid")
         outcome = {"retry": "failed", "web_tool_followup": "completed"}.get(outcome, outcome or "completed")
-        record_usage(model, holder.get(usage_field), stream=stream,
+        record_usage(model, _saved_attempt_usage(holder, usage_field), stream=stream,
                      elapsed_ms=int((time.time() - t_start) * 1000), fp=fp,
                      account=uid, outcome=outcome,
                      key=holder.get("key_id"), effort=holder.get("effort"))
@@ -17584,7 +17720,20 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/health/retry":
             if not self._authorized():
                 return
-            return self._json(200, retry_health_snapshot((query.get("limit") or [200])[0]))
+            try:
+                window = {}
+                for name in ('since', 'until'):
+                    if name in query:
+                        value = float(query[name][0])
+                        if not math.isfinite(value) or value < 0:
+                            raise ValueError('invalid time')
+                        window[name] = value
+                if window.get('since', 0) > window.get('until', time.time()):
+                    raise ValueError('invalid window')
+            except (ValueError, TypeError, IndexError):
+                return self._error(400, 'since/until must be finite Unix timestamps in chronological order', 'invalid_request_error')
+            return self._json(200, retry_health_snapshot((query.get("limit") or [200])[0],
+                              model=(query.get('model') or [None])[0], **window))
         if path == "/realm":
             return self._get_realm()
         if path in ("/v1/models", "/models"):
@@ -19795,6 +19944,7 @@ class Handler(BaseHTTPRequestHandler):
                 base_body=chat_req, session_key=session_key, realm=req_realm,
                 effort=effort)
 
+    @_track_response('responses', True)
     def _responses_stream_response(self, upstream, model, custom_names, request_meta, fp, account, t_start, namespace_map=None, base_body=None, session_key=None, realm=None, effort=None):
         retry_call = _make_retry_call(base_body, session_key, realm) if base_body else None
         try:
@@ -19915,13 +20065,14 @@ class Handler(BaseHTTPRequestHandler):
         details = dict(elapsed_ms=wall, stream=True, ttft_ms=first_ms,
                        gen_ms=(wall - first_ms) if first_ms is not None else None,
                        fp=fp, account=account.uid, key=self._key_id(), effort=effort)
-        usage = None if holder.get("usage_recorded") else holder.get("usage")
+        usage = None if holder.get("usage_recorded") else _saved_attempt_usage(holder)
         if failed:
             record_error(model, 502, failed, usage=usage, outcome="upstream_aborted", **details)
         elif not holder.get("usage_recorded"):
                 record_usage(model, usage, outcome=outcome or "completed", **details)
         return
 
+    @_track_response('responses', False)
     def _responses_nonstream_response(self, upstream, model, custom_names, request_meta, fp, account, t_start, namespace_map=None, base_body=None, session_key=None, realm=None, effort=None):
         # 跟串流那条一样：客户端宣告 web_search / web_fetch 时由反代代跑。
         # 中间那几轮对客户端不可见，最后才组成一个 Responses 物件回传；不这样
@@ -19943,7 +20094,7 @@ class Handler(BaseHTTPRequestHandler):
                 chat_obj, account = _aggregate_with_recovery(upstream, model, account, holder)
             except Exception as exc:
                 account = holder.get("account") or account
-                record_error(model, 502, str(exc),
+                record_error(model, 502, str(exc), usage=_saved_attempt_usage(holder),
                              elapsed_ms=int((time.time() - t_start) * 1000),
                              account=account.uid, key=self._key_id(), effort=effort)
                 return self._error(502, f"upstream stream error: {exc}")
@@ -19973,7 +20124,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(502, "web tool follow-up failed: %s" % exc)
             sources = holder.get("web_sources") or sources
         wall = int((time.time() - t_start) * 1000)
-        local_usage = None if holder.get("usage_recorded") else holder.get("usage")
+        local_usage = None if holder.get("usage_recorded") else _saved_attempt_usage(holder)
         chat_obj["usage"] = holder.get("total_usage") or chat_obj.get("usage")
         result = chat_to_response(chat_obj, model, custom_names, request_meta, namespace_map,
                                   sources=sources)
@@ -20080,6 +20231,7 @@ class Handler(BaseHTTPRequestHandler):
                 base_body=chat_req, session_key=session_key,
                 realm=req_realm, effort=effort)
 
+    @_track_response('messages', False)
     def _messages_nonstream_response(self, upstream, model, fp, account, t_start,
                                      base_body=None, session_key=None, realm=None,
                                      effort=None):
@@ -20105,7 +20257,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, result)
         except Exception as exc:
             wall = int((time.time() - t_start) * 1000)
-            record_error(model, 502, "messages upstream error: %s" % exc,
+            record_error(model, 502, "messages upstream error: %s" % exc, usage=_saved_attempt_usage(holder),
                          elapsed_ms=wall, account=account.uid, key=self._key_id(), effort=effort)
             return self._anthropic_error(502, "upstream stream error: %s" % exc)
         finally:
@@ -20114,6 +20266,7 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 pass
 
+    @_track_response('messages', True)
     def _messages_stream_response(self, upstream, model, fp, account, t_start,
                                   base_body=None, session_key=None, realm=None,
                                   session_meta=None, effort=None):
@@ -20143,7 +20296,7 @@ class Handler(BaseHTTPRequestHandler):
         except (_ClientStreamClosed, BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             wall = int((time.time() - t_start) * 1000)
             account = holder.get("account") or account
-            record_usage(model, None if holder.get("usage_recorded") else holder.get("usage_this_round"), stream=True, elapsed_ms=wall,
+            record_usage(model, None if holder.get("usage_recorded") else _saved_attempt_usage(holder, "usage_this_round"), stream=True, elapsed_ms=wall,
                          ttft_ms=first_ms,
                          gen_ms=(wall - first_ms) if first_ms is not None else None,
                          fp=fp, account=account.uid,
@@ -20154,7 +20307,7 @@ class Handler(BaseHTTPRequestHandler):
             account = holder.get("account") or account
             record_error(model, 502, "messages stream aborted: %s" % exc,
                          elapsed_ms=wall, account=account.uid,
-                         usage=None if holder.get("usage_recorded") else holder.get("usage_this_round"), stream=True,
+                         usage=None if holder.get("usage_recorded") else _saved_attempt_usage(holder, "usage_this_round"), stream=True,
                          ttft_ms=first_ms, fp=fp, outcome="upstream_aborted",
                          key=self._key_id(), effort=effort)
             try:
@@ -20178,10 +20331,10 @@ class Handler(BaseHTTPRequestHandler):
         account = holder.get("account") or account
         if holder.get("incomplete_reason"):
             record_error(model, 502, holder["incomplete_reason"],
-                         usage=None if holder.get("usage_recorded") else holder.get("usage_this_round"), stream=True, elapsed_ms=wall,
+                         usage=None if holder.get("usage_recorded") else _saved_attempt_usage(holder, "usage_this_round"), stream=True, elapsed_ms=wall,
                          account=account.uid, key=self._key_id(), effort=effort)
             return
-        record_usage(model, holder.get("usage_this_round"), stream=True, elapsed_ms=wall,
+        record_usage(model, _saved_attempt_usage(holder, "usage_this_round"), stream=True, elapsed_ms=wall,
                      ttft_ms=first_ms,
                      gen_ms=(wall - first_ms) if first_ms is not None else None,
                      fp=fp, account=account.uid, key=self._key_id(), effort=effort)
@@ -20402,6 +20555,7 @@ class Handler(BaseHTTPRequestHandler):
     def _scrub_stream_line(data):
         return clean_chunk(data)
 
+    @_track_response('chat', True)
     def _chat_stream_response(self, upstream, model, fp, account, t_start,
                               base_body=None, session_key=None, realm=None, effort=None):
         callback = _make_retry_call(base_body, session_key, realm) if base_body else None
@@ -20463,13 +20617,14 @@ class Handler(BaseHTTPRequestHandler):
         details = dict(stream=True, elapsed_ms=wall, ttft_ms=first_ms,
                        gen_ms=(wall - first_ms) if first_ms is not None else None,
                        fp=fp, account=account.uid, key=self._key_id(), effort=effort)
-        usage = None if holder.get("usage_recorded") else holder.get("usage_this_round")
+        usage = None if holder.get("usage_recorded") else _saved_attempt_usage(holder, "usage_this_round")
         if failed:
             record_error(model, 502, failed, usage=usage, outcome="upstream_aborted", **details)
         elif not holder.get("usage_recorded"):
             record_usage(model, usage, outcome=outcome or "completed", **details)
         return
 
+    @_track_response('chat', False)
     def _chat_nonstream_response(self, upstream, model, fp, account, t_start,
                                  base_body=None, session_key=None, realm=None, effort=None):
         holder = {"base_body": base_body, "account": account,
@@ -20480,7 +20635,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             result, account = _aggregate_with_recovery(upstream, model, account, holder)
         except Exception as exc:
-            record_error(model, 502, str(exc), elapsed_ms=int((time.time() - t_start) * 1000),
+            record_error(model, 502, str(exc), usage=_saved_attempt_usage(holder), elapsed_ms=int((time.time() - t_start) * 1000),
                          account=account.uid, key=self._key_id(), effort=effort)
             return self._error(502, f"upstream stream error: {exc}")
         wall = int((time.time() - t_start) * 1000)

@@ -2,20 +2,20 @@
 
 [中文](README.md) · [Install and rollback](docs/INSTALL.md) · [Patch scope](docs/PATCHES.md) · [Verification](docs/VERIFICATION.md)
 
-Release **v1.7.3-ops.20261014.1**, targeting upstream **v1.7.3** at `c7dad8fe32316d47ce4f0ff260bb7ac7802b8a94`. Python 3.11+ is required.
+Release **v1.7.3-ops.20261014.2**, targeting upstream **v1.7.3** at `c7dad8fe32316d47ce4f0ff260bb7ac7802b8a94`. Python 3.11+ is required.
 
-[Download ZIP and SHA256SUMS.txt](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.7.3-ops.20261014.1): `workbuddy2api-hub-v1.7.3-wushuai0802-ops-20261014-r1.zip`.
+[Download ZIP and SHA256SUMS.txt](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.7.3-ops.20261014.2): `workbuddy2api-hub-v1.7.3-wushuai0802-ops-20261014-r2.zip`.
 
 This version rebases the supplied v1.7.2 bundle onto the exact v1.7.3 source and retains our mixed-stall guard, reasoning-alias budget, tool-image compatibility, refusals, bounded refresh, and pooled connection ownership. It preserves upstream additional-tools/custom namespace support, Anthropic thinking, DSML fallback, block I/O and shared TLS contexts.
 
-The installer replaces `wb_proxy.py`, `wb_accounts.py`, `wb_webtools.py` and `wb_upstream_pool.py`, adds `wb_ops.py` and `wb_stall.py`, and checks all unchanged dependencies. It does not modify account data, API keys, configuration or usage, and does not deploy.
+The installer replaces four upstream modules and adds `wb_ops.py`, `wb_stall.py` and `wb_observe.py`, checking all unchanged dependencies. It preserves accounts, keys, configuration and usage and does not deploy. The running gateway writes a separate bounded observation log, disabled with `WB_OPS_OBSERVE=0`.
 
 ## Install
 
 Prepare separate clean pinned sources, keep the previous deployment and backups, and verify first:
 
 ~~~sh
-git clone --depth 1 --branch v1.7.3-ops.20261014.1 https://github.com/wushuai0802/workbuddy2api-hub-ops-patch.git ops-patch-v173
+git clone --depth 1 --branch v1.7.3-ops.20261014.2 https://github.com/wushuai0802/workbuddy2api-hub-ops-patch.git ops-patch-v173
 git clone --depth 1 --branch v1.7.3 https://github.com/ardeyouxipianyi/workbuddy2api-hub.git workbuddy2api-hub-v1.7.3
 git -C workbuddy2api-hub-v1.7.3 rev-parse HEAD
 python3 -B ops-patch-v173/apply.py --verify-package
@@ -30,7 +30,9 @@ A response whose wire body was read in one block retains its connection lease un
 
 ## Verification and limits
 
-56 focused groups passed locally on Windows/Python3.14.7. CI checks Linux3.11/3.12 and Windows3.11; use actual workflow results linked by [VERIFICATION.md](docs/VERIFICATION.md). Tests use synthetic data and loopback HTTP, with external Python sockets denied. They do not establish online recovery rate or guarantee business progress over independent tool rounds.
+58 focused groups passed locally on Windows/Python3.14.7. CI checks Linux3.11/3.12 and Windows3.11; see [VERIFICATION.md](docs/VERIFICATION.md). Tests use synthetic data and loopback HTTP with external Python sockets denied; they do not establish online task completion.
+
+r2 protects quoted repetition examples, preserves already-consumed provider usage across guard failure, transport errors and cancellation, and bounds SSE lines/events (4/8MiB defaults). A request-local history observer reports repeated tool results without blocking or replaying tools. It does not combine sessions or infer generic shell-command progress. Durable metrics distinguish requests from guarded attempts and legal-output recovery from business completion, with explicit time/version/protocol grouping and retention limits.
 
 Upstream v1.7.3 improves streaming I/O, custom namespace tools, panel layout, timeout settings, international activity and recent-usage visibility. Earlier1.7 updates include account failure/backoff handling, weights/notes, web engines and cache improvements. Request-body default remains16MiB; use explicit configuration for larger histories. Upgrades can rebuild checkpoint caches while preserving append-only history.
 

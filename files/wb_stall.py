@@ -18,6 +18,7 @@ MAX_SENTENCES = 128
 MAX_WINDOW_CHARS = 8192
 MAX_LINE_CHARS = 2048
 CHECKPOINT_CHARS = 64
+MAX_QUOTE_CHARS = 65536
 
 _SUBSTANTIVE, _ACTION, _HMM, _NEUTRAL = range(4)
 _BOUNDARY = re.compile(r"[.!?。！？]+")
@@ -99,13 +100,15 @@ class _Safety:
     def __init__(self):
         self.fence = None
         self.quote = None
+        self.quote_chars = 0
 
     def copy(self):
         result = _Safety()
         result.fence, result.quote = self.fence, self.quote
+        result.quote_chars = self.quote_chars
         return result
 
-    def protected(self, line):
+    def protected(self, line, structured=False):
         marker = _FENCE.match(line)
         if marker and self.quote is None:
             token = marker.group(1)
@@ -117,8 +120,25 @@ class _Safety:
             return True
         if self.fence is not None:
             return True
+        if (structured and self.quote is None and not line.lstrip().startswith(('"', "'", "“", "‘"))
+                and _STRUCTURED.search(line)):
+            # Quotes embedded in code/data are not prose quotation boundaries.
+            return True
         quoted = self.quote is not None
+        escaped = False
         for index, char in enumerate(line):
+            if self.quote is not None:
+                self.quote_chars += 1
+                if self.quote_chars > MAX_QUOTE_CHARS:
+                    # An unmatched quote cannot exempt the rest of a generation.
+                    self.quote, self.quote_chars = None, 0
+                    quoted = False
+            if escaped:
+                escaped = False
+                continue
+            if char == '\\':
+                escaped = True
+                continue
             if char not in ('"', "'", "“", "”", "‘", "’"):
                 continue
             before = line[index - 1] if index else ""
@@ -145,8 +165,10 @@ class _Safety:
             quoted = True
             if self.quote is None:
                 self.quote = {"“": "”", "‘": "’"}.get(char, char)
+                self.quote_chars = 0
             elif char == self.quote:
                 self.quote = None
+                self.quote_chars = 0
         return (quoted or line.startswith(("    ", "\t")) or
                 bool(_LINE_STRUCTURED.search(line)) or bool(_EXAMPLE.search(line)))
 

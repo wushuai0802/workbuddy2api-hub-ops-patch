@@ -25,17 +25,21 @@
       "base_sha256": "35242c3dc95a262180f41e1fbf6a8e05b10bb151725be2d829fa7266236b1b82",
       "patched_sha256": "ce07ef842cfb74409047cc5d1a043a147ea13856f244f681d95554d923941d8e"
     },
+    "wb_observe.py": {
+      "base_sha256": null,
+      "patched_sha256": "fe682395074953282719fd7271e241ed555bc25f0bab61b195e9fa15ed4d4532"
+    },
     "wb_ops.py": {
       "base_sha256": null,
-      "patched_sha256": "f96adec91a888cf47fe016eafa2fcca2872d949700bd79fe3f6e6d5434203cf0"
+      "patched_sha256": "2ab6baf4424c3c83198d0f2eb59fe10e94ee0bc508e9c96c5e2e3caee3e3a6d7"
     },
     "wb_proxy.py": {
       "base_sha256": "c7520bbf66413b57068e593271b22a8c672cd9f321f5f4fbb6410117cb45fe35",
-      "patched_sha256": "cd982afeef9cfc5b9f6980abe00a8ae8b254307bfdc3d0a5fd5b27feef5509d8"
+      "patched_sha256": "850973d986c5904d782a70bb3036245ec49e54573347191881ded53b5b499ada"
     },
     "wb_stall.py": {
       "base_sha256": null,
-      "patched_sha256": "a0667651178b149e2a6e978c5fad6f1d44183f564c1821a79713216bbd3adbcb"
+      "patched_sha256": "626c8d2d011a9aeb73ef182e31150c7d16b56ad409088cbdb35865eb66fadfc9"
     },
     "wb_upstream_pool.py": {
       "base_sha256": "3eb6320b20d66eea2fc254b5dc85412a02ba6fe00252741fa53286f0306d050f",
@@ -46,9 +50,9 @@
       "patched_sha256": "f3a09e170e9393592179638378781b72be075fb6c9596e847db01e4e11b154da"
     }
   },
-  "patch_id": "v1.7.3-ops.20261014.1",
+  "patch_id": "v1.7.3-ops.20261014.2",
   "patch_source": "wushuai0802/workbuddy2api-hub-ops-patch",
-  "payload_fingerprint": "470764de5e3126478073aa44c89d7e6b9101e11dcb771672c654a184241437ce",
+  "payload_fingerprint": "f2e8995925fb65ae65f2819b51137bb67465a57305a249799273cc746435c65f",
   "python_requires": ">=3.11",
   "repository": "https://github.com/ardeyouxipianyi/workbuddy2api-hub",
   "schema_version": 1,

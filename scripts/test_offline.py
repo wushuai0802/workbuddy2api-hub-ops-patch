@@ -21,7 +21,7 @@ from apply import Bundle
 
 PATCH_SUITES = ('test_installer.py', 'test_wb_stall.py', 'test_mixed_stall_proxy.py', 'test_keepalive_guard.py',
                 'test_auth_deadline.py', 'test_proxy_boundaries.py', 'test_leaked_mixed_stall.py',
-                'test_guarded_sse_batching.py', 'test_v1617.py', 'test_v172.py',
+                'test_guarded_sse_batching.py', 'test_review_fixes.py', 'test_progress_observe.py', 'test_v1617.py', 'test_v172.py',
                 'test_build_identity.py', 'test_dated_guards.py', 'test_observability.py',
                 '_test_401_refresh.py', '_test_deepseek_multimodal.py', '_test_deepseek_reasoning_compaction.py',
                 'test_integration.py', 'test_loop_recovery.py', 'test_reasoning_recovery.py',

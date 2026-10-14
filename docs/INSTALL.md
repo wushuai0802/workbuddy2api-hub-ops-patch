@@ -1,10 +1,10 @@
 # 安装、升级与回滚
 
-本包 `v1.7.3-ops.20261014.1` 只支持官方v1.7.3 / `c7dad8fe32316d47ce4f0ff260bb7ac7802b8a94`。以下路径、Compose参数和服务名需要按自己的部署填写。Python3.11+，Linux/macOS示例；Windows使用同一安装器参数及完整路径。
+本包 `v1.7.3-ops.20261014.2` 只支持官方v1.7.3 / `c7dad8fe32316d47ce4f0ff260bb7ac7802b8a94`。以下路径、Compose参数和服务名需要按自己的部署填写。Python3.11+，Linux/macOS示例；Windows使用同一安装器参数及完整路径。
 
 ## 核对输入
 
-[Release下载](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.7.3-ops.20261014.1)含ZIP和SHA256SUMS.txt；ZIP顶层目录为`workbuddy2api-hub-ops-patch/`。
+[Release下载](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.7.3-ops.20261014.2)含ZIP和SHA256SUMS.txt；ZIP顶层目录为`workbuddy2api-hub-ops-patch/`。
 
 ~~~sh
 sha256sum -c SHA256SUMS.txt
@@ -17,6 +17,8 @@ python3 -B "$PATCH_DIR/apply.py" --target "$TARGET_DIR" --dry-run
 ~~~
 
 SHA必须匹配上述完整提交；预检通过只代表可以应用，尚未部署。已有旧补丁或未知改动时，另建准确干净源码，保留旧部署。不删除状态/备份或重写校验绕过拒绝。回滚旧源码补丁使用其原版本安装器；当前安装器不能卸载旧包。
+
+这也适用于v1.7.3-r1→r2：新增observe模块必须整体安装，不直接覆盖旧已安装树。运行时新生成的独立`usage/ops-observations.jsonl`不属于安装器修改范围；它有界轮换且可用`WB_OPS_OBSERVE=0`关闭，不改写原usage历史。
 
 ## 保存部署与数据
 
