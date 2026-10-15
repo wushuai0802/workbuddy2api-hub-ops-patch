@@ -21,7 +21,16 @@ SIGNALS = frozenset(('reasoning_loop_detected', 'content_loop_detected', 'genera
                      'upstream_sse_limit', 'upstream_choices_unsupported',
                      'upstream_candidate_unsupported', 'progress_repeated_failure',
                      'progress_repeated_result', 'reasoning_stall_observed',
-                     'retry_started', 'retry_recovered', 'retry_failed'))
+                     'retry_started', 'retry_recovered', 'retry_failed',
+                     'retry_blocked_output_or_protocol', 'retry_budget_exhausted', 'retry_cooldown',
+                     'retry_disabled', 'retry_open_failed', 'retry_hint_applied', 'retry_hint_skipped_shape'))
+GUARD_KINDS = frozenset(('reasoning_loop_detected', 'content_loop_detected', 'generation_timeout',
+                         'upstream_sse_limit', 'upstream_choices_unsupported', 'upstream_candidate_unsupported'))
+GUARD_RULES = frozenset(('fast-period', 'fast-intent', 'exact', 'churn', 'mixed-stall'))
+GUARD_METRICS = frozenset(('received_chars', 'window_chars', 'window_lines', 'intent_lines',
+                          'dominant_count', 'distinct_intents', 'distinct_phrases', 'short_phrases',
+                          'repeated_phrases', 'path', 'neutral_lines', 'neutral_dominant_count',
+                          'substantive_lines', 'substantive_chars', 'content_seen', 'tool_seen', 'refusal_seen'))
 OUTCOMES = frozenset(('completed', 'failed', 'client_aborted', 'upstream_aborted', 'unknown'))
 REASONS = SIGNALS | frozenset(('none', 'upstream_stream_error', 'first_frame_probe_failed',
                              'upstream_truncated', 'reasoning_only_turn', 'empty_output_turn',
@@ -69,6 +78,16 @@ def usage_fields(usage):
         value = usage.get(detail)
         output[field] = _number(value.get(key)) if isinstance(value, dict) else _number(usage.get(field))
     return output
+
+
+def clean_guard_detail(value):
+    if not isinstance(value, dict) or value.get('kind') not in GUARD_KINDS:
+        return None
+    detail = {'kind': value['kind'], 'rule': value.get('rule') if value.get('rule') in GUARD_RULES else 'unknown'}
+    for key in GUARD_METRICS:
+        if key in value and isinstance(value[key], int) and not isinstance(value[key], bool):
+            detail[key] = int(_number(value[key]))
+    return detail
 
 
 def progress_signal(messages, model):
@@ -177,6 +196,8 @@ def clean_record(row):
                   'paired_rounds', 'repeated_results', 'distinct_arguments'):
         if field in row:
             result[field] = int(_number(row[field]))
+    details = row.get('guard_details')
+    result['guard_details'] = [clean for value in details[-8:] if (clean := clean_guard_detail(value))] if isinstance(details, list) else []
     return result
 
 
@@ -305,7 +326,7 @@ class RequestObservation:
             self.current.update(outcome='failed', reason='upstream_stream_error')
         row = dict(self.base, phase='attempt', started=time.time(), attempt=len(self.attempts)+self.overflow+1,
                    outcome='unknown', reason='none', final_kind='empty', usage=None,
-                   usage_source='missing', signals=Counter())
+                   usage_source='missing', signals=Counter(), guard_details=[])
         self.current = row
         if len(self.attempts) < 32:
             self.attempts.append(row)
@@ -332,12 +353,19 @@ class RequestObservation:
         if self.current is not None and isinstance(value, dict):
             self.current['usage'], self.current['usage_source'] = value, source
 
-    def signal(self, kind, metrics=None):
+    def signal(self, kind, metrics=None, rule=None, chars=None):
         if kind not in SIGNALS:
             return
         self.signals[kind] += 1
         if self.current is not None:
             self.current['signals'][kind] += 1
+            if kind in GUARD_KINDS:
+                detail = dict(metrics or {}, kind=kind, rule=rule)
+                if chars is not None:
+                    detail['received_chars'] = chars
+                clean = clean_guard_detail(detail)
+                if clean:
+                    self.current['guard_details'] = (self.current['guard_details'] + [clean])[-4:]
         if kind.startswith('progress_') and isinstance(metrics, dict):
             self.progress = {k: int(_number(metrics.get(k))) for k in
                              ('paired_rounds', 'repeated_results', 'distinct_arguments')}
@@ -347,6 +375,8 @@ class RequestObservation:
             self.begin({})
         if self.current['usage_source'] != 'provider' and isinstance(usage, dict):
             self.usage(usage, 'estimated')
+        if reason == 'none' and outcome in ('failed', 'upstream_aborted') and self.current['guard_details']:
+            reason = self.current['guard_details'][-1]['kind']
         self.current.update(outcome=outcome if outcome in OUTCOMES else 'unknown',
                             reason=reason_code(reason), settled=True)
         self.last_outcome, self.last_reason = self.current['outcome'], self.current['reason']
@@ -368,7 +398,8 @@ class RequestObservation:
                        final_kind=last.get('final_kind', 'unknown'), signals=self.signals,
                        attempts=len(self.attempts)+self.overflow, attempts_overflow=self.overflow,
                        failed_attempts=sum(r['outcome'] in ('failed', 'upstream_aborted') for r in self.attempts),
-                       recovery_with_output=int(recovered), usage=usage, usage_source=source, **self.progress)
+                       recovery_with_output=int(recovered), usage=usage, usage_source=source,
+                       guard_details=[d for a in self.attempts for d in a['guard_details']][-8:], **self.progress)
         return self.attempts+[request]
 
 

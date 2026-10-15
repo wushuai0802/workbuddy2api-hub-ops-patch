@@ -27,11 +27,16 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
       - name: Fetch the pinned official baseline
         run: |
           git clone --no-checkout https://github.com/ardeyouxipianyi/workbuddy2api-hub.git ../workbuddy-upstream
-          git -C ../workbuddy-upstream checkout --detach c7dad8fe32316d47ce4f0ff260bb7ac7802b8a94
+          git -C ../workbuddy-upstream checkout --detach 762982531fae2d58aacfaa78c989a873f06206df
       - name: Verify the package
         run: python apply.py --verify-package
       - name: Run synthetic offline tests
         run: python scripts/test_offline.py --upstream ../workbuddy-upstream --output .work/verification
+      - name: Run synthetic dashboard tests
+        run: python scripts/test_dashboard.py --upstream ../workbuddy-upstream --output .work/dashboard

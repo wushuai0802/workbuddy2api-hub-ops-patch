@@ -66,6 +66,7 @@ import wb_atrest
 import wb_catalog
 import wb_egress
 import wb_ipintel
+import wb_logstore
 import wb_pricing
 import wb_settings
 import wb_upstream_pool
@@ -408,6 +409,16 @@ def login_rate_limit_key(peer_ip, headers):
         return via_chain
     return peer_ip
 _models_cache = {"intl": {"at": 0.0, "data": None}, "cn": {"at": 0.0, "data": None}}
+#: 目录来源追踪（面板展示用）：每个 realm 最近一次构建/刷新清单的出处。
+#: source 取值见 catalog_meta()；fetched_at 是网关拿到这批数据的时刻；
+#: file_mtime 是桌面缓存文件自己的写入时刻（仅配置文件来源，可能远早于
+#: fetched_at——那正是「清单是不是新鲜」的证据）。与 _models_cache 同批更新。
+_catalog_meta = {}
+#: 目录落盘存档：每次成功从上游 /v3/config 拉到清单就写一份响应体副本，纯留档
+#: （网关自己不读它）。与 usage 一样运行时产生、在 .gitignore 里，不参与提交
+#: 与更新；覆盖目录用 WB_PROXY_CATALOG_DIR。
+CATALOG_CACHE_DIR = os.environ.get("WB_PROXY_CATALOG_DIR") \
+    or os.path.join(os.path.dirname(os.path.abspath(__file__)), "catalog")
 # Usage accounting: every upstream response carries a usage block, and the
 # proxy also records one JSONL line per request. Defaults to a folder next to
 # this script; override with --usage-dir or WB_PROXY_USAGE_DIR.
@@ -828,7 +839,12 @@ def record_error(model, status, message, elapsed_ms=None, account=None,
     if observation is not None:
         observation.finish_attempt(outcome, usage, reason=message)
     dur = f" {elapsed_ms:.0f}ms" if elapsed_ms is not None else ""
-    log(f"request error: model={model}{dur} status={status} msg={str(message)[:180]}", level="ERROR", tag="chat")
+    # 账号与终态也带上看板日志。上面那段本来就把 account 写进了 JSONL，但日志
+    # 行一直没打出来——出错时最想知道的「哪个账号、什么终态」反而要回去翻
+    # usage.jsonl，而 chat done 那条早就有 acct= 了，两侧不对称。
+    acc_tag = f" acct={account[:8]}" if account else ""
+    log(f"request error: model={model}{dur}{acc_tag} status={status} outcome={outcome} msg={str(message)[:180]}",
+        level="ERROR", tag="chat")
     return row
 def _pct(values, q):
     """Nearest-rank percentile (no interpolation) - good enough for latency."""
@@ -6911,29 +6927,55 @@ _USAGE_DAY_SNAPSHOT_FIELDS = tuple(
     if isinstance(v, (int, float)) and not isinstance(v, bool) and k != "started")
 
 
+def _usage_keep_setting(key):
+    """面板设的聚合保留值（没设过 / 读不出来返回 None）。
+
+    环境变量始终优先（现场调、测试里来回切），面板设置只在没有环境变量时
+    生效——与 upstream_timeouts() 读 header_timeout_seconds 同一条路子。
+    """
+    try:
+        cfg = wb_settings.usage_config(ACCOUNTS_DIR)
+    except Exception:
+        return None
+    value = cfg.get(key)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        return None
+    return value
+
+
 def _usage_day_keep_days():
-    """日桶保留天数，默认 32；WB_USAGE_DAY_KEEP_DAYS 可调。
+    """日桶保留天数，默认 32；WB_USAGE_DAY_KEEP_DAYS 优先，其次面板设置。
 
     每次调用都读环境变量，理由与 WB_USAGE_CACHE 相同（现场调、测试里来回切）。
     """
-    try:
-        return max(1, int(os.environ.get("WB_USAGE_DAY_KEEP_DAYS",
-                                         _USAGE_DAY_KEEP_DAYS)))
-    except (TypeError, ValueError):
-        return _USAGE_DAY_KEEP_DAYS
+    raw = os.environ.get("WB_USAGE_DAY_KEEP_DAYS")
+    if raw is not None:
+        try:
+            return max(1, int(raw))
+        except (TypeError, ValueError):
+            return _USAGE_DAY_KEEP_DAYS
+    return _usage_keep_setting("day_keep_days") or _USAGE_DAY_KEEP_DAYS
 
 
 def _usage_hour_keep_days():
-    """小时桶保留天数，默认 2；WB_USAGE_HOUR_KEEP_DAYS 可调。
+    """小时桶保留天数，默认 2；WB_USAGE_HOUR_KEEP_DAYS 优先，其次由面板的
+    「小时层保留」折算（向上取整到整天）。
 
-    同 _usage_day_keep_days：每次调用都读环境变量。取值再小也保留一天
-    （max(1, ...)）：小时层至少要能服务「今天的整点窗口」，否则等于没建。
+    两个状态各有一条小时层保留线（snapshot 按天，analytics 按小时），面板只
+    暴露一个「小时层保留（小时）」，所以这里跟着它走，免得调了一个另一个不动。
+    取值再小也保留一天（max(1, ...)）：小时层至少要能服务「今天的整点窗口」，
+    否则等于没建。
     """
-    try:
-        return max(1, int(os.environ.get("WB_USAGE_HOUR_KEEP_DAYS",
-                                         _USAGE_HOUR_KEEP_DAYS)))
-    except (TypeError, ValueError):
-        return _USAGE_HOUR_KEEP_DAYS
+    raw = os.environ.get("WB_USAGE_HOUR_KEEP_DAYS")
+    if raw is not None:
+        try:
+            return max(1, int(raw))
+        except (TypeError, ValueError):
+            return _USAGE_HOUR_KEEP_DAYS
+    hours = _usage_keep_setting("hour_keep_hours")
+    if hours:
+        return max(1, (hours + 23) // 24)
+    return _USAGE_HOUR_KEEP_DAYS
 
 
 def _usage_day_buckets_enabled():
@@ -6958,16 +7000,18 @@ _USAGE_HOUR_KEEP_HOURS = 48
 
 
 def _usage_hour_keep_hours():
-    """小时子表保留小时数，默认 48；WB_USAGE_HOUR_KEEP_HOURS 可调。
+    """小时子表保留小时数，默认 48；WB_USAGE_HOUR_KEEP_HOURS 优先，其次面板设置。
 
     每次调用都读环境变量，理由与 WB_USAGE_DAY_KEEP_DAYS 相同（现场调、测试
     里来回切）。
     """
-    try:
-        return max(1, int(os.environ.get("WB_USAGE_HOUR_KEEP_HOURS",
-                                         _USAGE_HOUR_KEEP_HOURS)))
-    except (TypeError, ValueError):
-        return _USAGE_HOUR_KEEP_HOURS
+    raw = os.environ.get("WB_USAGE_HOUR_KEEP_HOURS")
+    if raw is not None:
+        try:
+            return max(1, int(raw))
+        except (TypeError, ValueError):
+            return _USAGE_HOUR_KEEP_HOURS
+    return _usage_keep_setting("hour_keep_hours") or _USAGE_HOUR_KEEP_HOURS
 
 
 def _local_day_key(ts):
@@ -8746,18 +8790,27 @@ def _usage_cache_analytics_hours_ok(hours):
 
 
 def _usage_cache_analytics_day_ok(bucket):
-    """analytics 的日桶：窗口形状 maps + at（本地午夜）+ hours 子表。
+    """analytics 的日桶：窗口形状 maps + at（本地午夜）+ 可选的 hours 子表。
 
-    小时层要靠 at 与小时子表回答自定义窗口，两者缺一这份状态就只能服务
-    按日对齐的窗口——旧版本写下的日桶（没有这两个键）因此在这里被拒，
-    升级后 analytics 整体重折一次（一次性代价），小时层立刻就有历史可借；
-    snapshot/series 等其余四份状态照旧采用，不受影响。
+    hours 缺席是合法状态，不是损坏：剪枝线（_prune_day_buckets 的 hours_keep
+    一段）会把保留窗口之外的旧天的小时表摘掉，本地午夜落在不存在的小时里那天
+    也会被摘掉；只折窗口半的日桶在「这天没有小时表」时照旧回答按日对齐的窗口，
+    而整点窗口本来就由求和侧按 hours is None 退回整段扫描
+    （_analytics_window_from_hours），所以采纳仍然正确。与
+    _usage_cache_snapshot_ok / _usage_cache_series_bucket_ok 对 hours 的容忍
+    同一套规矩。
+
+    at 则必须留着：旧版本写下的日桶没有这个键（也就没有小时层），在这里被拒，
+    升级后 analytics 整体重折一次、小时层立刻就有历史可借。只放任 hours 缺席，
+    这次一次性代价就不会被剪枝线反复引燃——否则只要还在折新行，剪枝线天天把旧天
+    的小时表摘掉，整份状态就天天被判废、每次进程启动都要付一次全量重折。
     """
     if not isinstance(bucket, dict):
         return False
     if not _usage_cache_number(bucket.get("at")):
         return False
-    if not _usage_cache_analytics_hours_ok(bucket.get("hours")):
+    hours = bucket.get("hours")
+    if hours is not None and not _usage_cache_analytics_hours_ok(hours):
         return False
     return _usage_cache_analytics_window_ok(bucket)
 
@@ -9742,17 +9795,22 @@ def runtime_settings_view():
             wb_settings.remaining_priority_enabled(ACCOUNTS_DIR),
         "egress_backoff_enabled":
             wb_settings.egress_backoff_enabled(ACCOUNTS_DIR),
+        "log_db_enabled": wb_settings.log_db_enabled(ACCOUNTS_DIR),
+        "log_db_max_rows": wb_settings.log_db_max_rows(ACCOUNTS_DIR),
+        "log_db_max_days": wb_settings.log_db_max_days(ACCOUNTS_DIR),
+        "log_db_max_bytes": wb_settings.log_db_max_bytes(ACCOUNTS_DIR),
         "accounts_collapsed": wb_settings.accounts_collapsed(ACCOUNTS_DIR),
         "accounts_separate_tab": wb_settings.accounts_separate_tab(ACCOUNTS_DIR),
         "key_before_hidden": wb_settings.key_before_hidden(ACCOUNTS_DIR),
         "hidden_pages": wb_settings.hidden_pages(ACCOUNTS_DIR),
         "update_check_enabled": wb_settings.update_check_enabled(ACCOUNTS_DIR),
         "upstream": wb_settings.upstream_config(ACCOUNTS_DIR),
+        "usage": wb_settings.usage_config(ACCOUNTS_DIR),
         "prompt": wb_settings.prompt_config(ACCOUNTS_DIR),
         "accounts_dir": ACCOUNTS_DIR,
         "usage_dir": USAGE_DIR,
         "settings_file": wb_settings.settings_path(ACCOUNTS_DIR),
-        "version": "1.7.3",
+        "version": "1.7.5",
     }
 def current_account():
     """Account used for display purposes (health / usage summaries)."""
@@ -9868,6 +9926,55 @@ LOG_BUFFER = deque(maxlen=2000)
 _LOG_LOCK = threading.Lock()
 _LOG_COUNTER = 0
 
+# 日志级别与模块的自动归类。调用点显式传了 level/tag 就用传的，没传才按内容猜。
+#
+# 级别：早先只认英文关键字，而本仓大量日志是中文——定价侧的「抓取失败，继续用
+# 上一版价格」「首次抓取异常」全被判成 INFO，看板上按 ERROR 筛选根本看不到它们。
+# 中文关键字补上后这些才落到正确的级别。英文侧同样收紧了几个明显的漏网（"fail"
+# 只认 "failed"，"fail:" 这种短标签一直没被认出来）。
+_LOG_ERROR_HINTS = (
+    "error", "exception", "failed", "fail:", "reject", "traceback", "errno", "fatal",
+    "11-128", "11101", "11140",
+    "失败", "异常", "错误", "拒绝", "不可用", "无效",
+)
+_LOG_WARN_HINTS = (
+    "warn", "warning", "retry", "timeout", "throttl",
+    "重试", "超时", "告警", "警告", "降级", "限流",
+)
+# 模块：顺序即优先级，越靠前越先判定。新增的 pricing / egress / upstream /
+# update / usage / webtools 都是从原先那个大杂烩 "system" 里拆出来的——这些
+# 模块本来就在打日志，只是推断规则不认识它们的词，于是一律归到 system，事后
+# 想按模块看某一类问题时筛不出来。原有类别（chat/scheduler/tasks/accounts/
+# catalog/auth/settings）的相对顺序保持不变，避免改变既有日志的归类。
+_LOG_TAG_HINTS = (
+    ("chat", ("chat:", "chat done", "request error", "/v1/chat",
+              "/chat/completions", "responses")),
+    ("scheduler", ("scheduler", "调度器")),
+    ("tasks", ("task", "任务", "打卡", "签到", "猫猫", "travel", "growth")),
+    ("accounts", ("account", "账号", "pool", "imported")),
+    ("pricing", ("pricing", "定价", "取价", "价格", "price", "抓取")),
+    ("egress", ("egress", "出口", "槽位", "proxy slot", "mihomo")),
+    ("upstream", ("upstream", "上游")),
+    ("webtools", ("webtool", "web tool", "本地网络工具")),
+    ("catalog", ("model", "catalog", "模型")),
+    ("auth", ("auth", "token", "oauth")),
+    ("settings", ("settings", "设置")),
+    ("update", ("更新", "release")),
+    ("usage", ("usage", "用量")),
+    ("agents", ("agents", "智能体")),
+)
+
+# 可选的 SQLite 落库（默认关闭）。None = 还没初始化（模块 import 期），启动时按
+# settings 建好，之后由面板开关驱动 wb_logstore.LogStore.configure()。关闭时它
+# 要么是 None、要么 enabled=False，整条日志路径与上游一字不差：只写内存环形
+# 缓冲，不建库、不落盘。
+LOG_STORE = None
+
+
+def _log_db_active():
+    return LOG_STORE is not None and LOG_STORE.enabled
+
+
 def add_log_entry(msg, level=None, tag=None):
     global _LOG_COUNTER
     ts = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -9875,28 +9982,18 @@ def add_log_entry(msg, level=None, tag=None):
     msg_str = str(msg).rstrip()
     if not level:
         lower = msg_str.lower()
-        if any(k in lower for k in ("error", "exception", "failed", "11128", "11101", "11140", "traceback", "errno", "fatal")):
+        if any(k in lower for k in _LOG_ERROR_HINTS):
             level = "ERROR"
-        elif any(k in lower for k in ("warn", "warning", "retry", "timeout")):
+        elif any(k in lower for k in _LOG_WARN_HINTS):
             level = "WARN"
         else:
             level = "INFO"
     if not tag:
         lower = msg_str.lower()
-        if "chat:" in lower or "chat done" in lower or "/v1/chat" in lower or "/chat/completions" in lower or "responses" in lower:
-            tag = "chat"
-        elif "scheduler" in lower or "调度器" in lower:
-            tag = "scheduler"
-        elif "task" in lower or "任务" in lower or "打卡" in lower or "猫猫" in lower or "travel" in lower:
-            tag = "tasks"
-        elif "account" in lower or "账号" in lower or "pool" in lower or "imported" in lower:
-            tag = "accounts"
-        elif "model" in lower or "catalog" in lower or "模型" in lower:
-            tag = "catalog"
-        elif "auth" in lower or "token" in lower or "oauth" in lower:
-            tag = "auth"
-        elif "settings" in lower or "设置" in lower:
-            tag = "settings"
+        for candidate, hints in _LOG_TAG_HINTS:
+            if any(k in lower for k in hints):
+                tag = candidate
+                break
         else:
             tag = "system"
     with _LOG_LOCK:
@@ -9910,6 +10007,9 @@ def add_log_entry(msg, level=None, tag=None):
             "msg": msg_str,
         }
         LOG_BUFFER.append(entry)
+    # 落库在锁外：append 只是入队，但没必要把持锁时间拉长到调用 queue.put。
+    if _log_db_active():
+        LOG_STORE.append(entry)
     return entry
 
 def log(msg, level=None, tag=None):
@@ -9921,6 +10021,17 @@ def log(msg, level=None, tag=None):
 wb_webtools.set_logger(log)
 
 def get_logs(limit=200, level="", tag="", search="", since_id=0):
+    # 落库开启时以数据库为准：它是完整历史（受保留上限约束），而内存环形缓冲
+    # 只留最新 2000 条，拿它回答会看不到刚过去的窗口。查询失败或超时就退回内存，
+    # 面板宁可少看历史，也不能因为日志库出问题而整页空白。
+    if _log_db_active():
+        try:
+            stored = LOG_STORE.query(limit=limit, level=level, tag=tag,
+                                     search=search, since_id=since_id)
+        except Exception:
+            stored = None
+        if stored is not None:
+            return stored
     with _LOG_LOCK:
         items = list(LOG_BUFFER)
     if since_id > 0:
@@ -9941,6 +10052,40 @@ def get_logs(limit=200, level="", tag="", search="", since_id=0):
 def clear_logs():
     with _LOG_LOCK:
         LOG_BUFFER.clear()
+    if _log_db_active():
+        try:
+            LOG_STORE.clear()
+        except Exception:
+            pass
+
+
+def apply_log_db_settings():
+    """Read the panel's log-database settings into the live store.
+
+    Called once at startup (after USAGE_DIR is settled) and again on every
+    settings save, so flipping the switch or editing a cap takes effect at once
+    without a restart. Also pulls the id counter up to whatever the database
+    already holds, so ids stay monotonic across a restart and the panel's
+    `since_id` incremental fetch keeps working.
+    """
+    global _LOG_COUNTER
+    if LOG_STORE is None:
+        return False
+    LOG_STORE.configure(
+        wb_settings.log_db_enabled(ACCOUNTS_DIR),
+        max_rows=wb_settings.log_db_max_rows(ACCOUNTS_DIR),
+        max_days=wb_settings.log_db_max_days(ACCOUNTS_DIR),
+        max_bytes=wb_settings.log_db_max_bytes(ACCOUNTS_DIR),
+    )
+    if LOG_STORE.enabled:
+        try:
+            highest = LOG_STORE.max_id()
+        except Exception:
+            highest = 0
+        with _LOG_LOCK:
+            if highest > _LOG_COUNTER:
+                _LOG_COUNTER = highest
+    return LOG_STORE.enabled
 
 # ---------------------------------------------------------------------------
 # upstream helpers
@@ -10037,10 +10182,11 @@ def merge_catalog(primary, realm=None, extras=False):
         source_static = list(wb_catalog.STATIC_INTL_MODELS) + list(wb_catalog.STATIC_CN_MODELS)
     else:
         source_static = getattr(wb_catalog, "STATIC_CN_MODELS" if r == "cn" else "STATIC_INTL_MODELS", wb_catalog.STATIC_MODELS)
+    primary_ids = set(m for m, _ in (primary or []))
     for item in source_static:
         mid = item.get("id")
-        # First catalog wins for a shared id, so the intl entry is not
-        # overwritten by its cn counterpart when both are merged.
+        if mid == "hy4-preview-f" and "hy4-preview" in primary_ids and "hy4-preview-f" not in primary_ids:
+            continue
         if mid and is_chat_model(mid) and mid not in merged:
             merged[mid] = dict(item)
     for mid, meta in primary or []:
@@ -10056,9 +10202,11 @@ def merge_catalog(primary, realm=None, extras=False):
         elif mid not in merged:
             merged[mid] = {}
     order = CN_UI_ORDER if r == "cn" else INTL_UI_ORDER
-    out = []
     if r == "all":
         order = list(INTL_UI_ORDER) + [m for m in CN_UI_ORDER if m not in INTL_UI_ORDER]
+    if primary_ids:
+        order = [("hy4-preview" if (m == "hy4-preview-f" and "hy4-preview" in primary_ids and "hy4-preview-f" not in primary_ids) else m) for m in order]
+    out = []
     seen = set()
     for mid in order:
         if mid in merged and mid not in seen:
@@ -10071,8 +10219,12 @@ def merge_catalog(primary, realm=None, extras=False):
         # not enough: it also carries legacy entries the picker may not show.
         for mid, _meta in primary or []:
             if mid in merged and mid not in seen:
+                item = merged[mid]
+                # 无倍率模型隐藏：未配置有效 credits（内置表无、远程 meta 也无）不进入对外目录
+                if not item.get("credits"):
+                    continue
                 seen.add(mid)
-                out.append((mid, merged[mid]))
+                out.append((mid, item))
     return out
 _catalog_lock = threading.Lock()
 
@@ -10108,6 +10260,20 @@ def note_bundled_reasoning(realm, live, entries):
     shown = ", ".join(missing[:6]) + (" ..." if len(missing) > 6 else "")
     log("catalog    : bundled table fills in reasoning controls the live "
         "catalogue omits for %d model(s): %s" % (len(missing), shown))
+def catalog_meta(realm=None):
+    """The provenance of the last list built for a realm, for the panel.
+
+    {"source": "remote" | "endpoint" | "cache" | "legacy" | "bundled",
+     "fetched_at": unix seconds when the gateway obtained the batch,
+     "file_mtime": unix seconds of the desktop cache file's own write
+                   (only for the config-file sources), else None}
+    """
+    r = realm or CURRENT_REALM
+    with _lock:
+        meta = _catalog_meta.get(r)
+        return dict(meta) if meta else None
+
+
 def fetch_models(realm=None):
     r = realm or CURRENT_REALM
     with _lock:
@@ -10122,16 +10288,33 @@ def fetch_models(realm=None):
             c = _models_cache.get(r) or {"at": 0.0, "data": None}
             if c["data"] and time.time() - c["at"] < 300:
                 return c["data"]
-        live, extras = curated_live_sources(r)
+        live, extras, source = curated_live_sources(r)
         if not live and r in ("intl", "all"):
             # The narrow endpoint is not the desktop catalogue, so it keeps the
             # old whitelist behaviour: only names the order table knows.
             live = [(m, {}) for m in fetch_endpoint_models()]
             extras = False
+            if live:
+                source = "endpoint"
         entries = merge_catalog(live, realm=r, extras=extras)
         note_bundled_reasoning(r, live, entries)
+        if not live:
+            # 没有任何活数据：清单完全来自内置快照（硬编码兜底）。
+            source = "bundled"
+        elif source in ("remote", "endpoint"):
+            # 记下「这个 realm 今天已经从 API 拿到过目录」，每日兜底循环据此
+            # 跳过（见 catalog_daily_pass）。
+            note_remote_catalog(r)
+        file_mtime = None
+        if source in ("cache", "legacy") and r in ("intl", "cn"):
+            try:
+                file_mtime = os.path.getmtime(product_config_path(r))
+            except OSError:
+                file_mtime = None
         with _lock:
             _models_cache[r] = {"at": time.time(), "data": entries}
+            _catalog_meta[r] = {"source": source, "fetched_at": time.time(),
+                                "file_mtime": file_mtime}
         return entries
 def model_entry(mid, meta):
     """Build a rich /v1/models entry from the desktop app catalog metadata.
@@ -10156,6 +10339,10 @@ def model_entry(mid, meta):
     # ---- modality / capability ----
     # disabledMultimodal explicitly turns image input off; absent means allowed.
     vision = bool(meta.get("supportsImages")) and not meta.get("disabledMultimodal")
+    if mid == "glm-5.3-flash":
+        # 强制修正：上游元数据虽宣告支持多模态，但后端实际未接入视觉通道（见 issue #315）
+        vision = False
+        item["vision_note"] = "上游宣告多模态但实际通道不支持读图，已修正为纯文本"
     tools = bool(meta.get("supportsToolCall"))
     thinks = bool(meta.get("supportsReasoning"))
     inputs = ["text"] + (["image"] if vision else [])
@@ -10446,9 +10633,9 @@ def curate_remote_catalog(realm, ids, meta=None):
             continue
         if mid.endswith("-f"):
             base = mid[:-2]
-            if base in known and free(base) and not free(mid):
+            if base in ids and free(base) and not free(mid):
                 continue
-        elif (mid + "-f") in known and free(mid + "-f") and not free(mid):
+        elif (mid + "-f") in ids and free(mid + "-f") and not free(mid):
             continue
         out.append(mid)
     return out
@@ -10487,10 +10674,131 @@ def fetch_remote_product_config(realm):
             continue
         parsed = parse_remote_catalog(payload)
         if parsed:
+            # 成功副本落盘留档（catalog/，纯存档；见 persist_remote_catalog）。
+            persist_remote_catalog(realm, payload)
             return parsed
         last = "empty catalogue"
     log("remote catalog: %s fetch failed (%s)" % (realm, last))
     return None
+
+
+#: 面板「刷新模型清单」按钮的服务端冷却：同一 realm 两次手动强制拉取的最短
+#: 间隔。自动链本来就有 300s 缓存与桌面 UA 双尝试（最多两次请求），这个冷却
+#: 再拦一层误连点，别让面板把 /v3/config 点成高频请求——上游有 WAF，连接被丢
+#: 是常态，节制本身就是不触发风控的一部分。
+CATALOG_REFRESH_COOLDOWN = 30.0
+_catalog_refresh_at = {}
+
+
+def refresh_catalog(realm):
+    """手动刷新：立即向上游拉一次该 realm 的目录并发布到 /v1/models。
+
+    与自动链（fetch_models 缓存过期后）共用同一条取数管线：
+    fetch_remote_product_config 只挑该 realm 的代表账号、只打该 realm 的
+    端点（realm 隔离由它内部的 POOL.representative(realm=realm) 保证，
+    绝无跨区取数）；_catalog_lock 与自动链互斥，不会并发打到上游；失败
+    时不清旧缓存——清单保持可用，等用户或自动链下次再拉。与自动链的一个
+    差别：这里不读桌面缓存文件，拉不到就说拉不到（手动按钮要的是「这次
+    真的从上游 API 取到了」的如实反馈）。
+
+    返回面板可直接展示的 dict（任何情况都不抛异常）：
+      {"ok": bool, "realm": str|None, "source": "remote"|None,
+       "count": int, "cooldown": bool?, "retry_after": float?, "msg": str}
+    """
+    if realm not in ("intl", "cn"):
+        return {"ok": False, "realm": None, "source": None, "count": 0,
+                "msg": "realm 必须是 intl 或 cn"}
+    now = time.time()
+    with _lock:
+        wait = CATALOG_REFRESH_COOLDOWN - (now - _catalog_refresh_at.get(realm, 0.0))
+        if wait > 0:
+            return {"ok": False, "realm": realm, "source": None, "count": 0,
+                    "cooldown": True, "retry_after": round(wait, 1),
+                    "msg": "刷新太频繁：约 %d 秒后可再试" % max(1, int(wait + 0.5))}
+        # 先登记再拉取：失败也进冷却，连点的高频重试在这里就被拦住。
+        _catalog_refresh_at[realm] = now
+    with _catalog_lock:
+        try:
+            remote = fetch_remote_product_config(realm)
+        except Exception as exc:
+            log("catalog refresh: %s failed (%s)" % (realm, exc))
+            remote = None
+        if not remote:
+            log("catalog refresh: %s kept the previous list (upstream gave none)" % realm)
+            return {"ok": False, "realm": realm, "source": None, "count": 0,
+                    "msg": "上游未返回可用目录（账号不可用或网络异常），已保留现有清单"}
+        ids, meta = remote
+        live = [(mid, meta.get(mid) or {})
+                for mid in curate_remote_catalog(realm, ids, meta)]
+        entries = merge_catalog(live, realm=realm, extras=True)
+        note_bundled_reasoning(realm, live, entries)
+        with _lock:
+            _models_cache[realm] = {"at": time.time(), "data": entries}
+            _catalog_meta[realm] = {"source": "remote", "fetched_at": time.time(),
+                                    "file_mtime": None}
+    log("catalog refresh: %s updated from the product-config endpoint (%d models)"
+        % (realm, len(entries)))
+    note_remote_catalog(realm)
+    return {"ok": True, "realm": realm, "source": "remote", "count": len(entries),
+            "msg": "已从上游 API 更新清单，共 %d 个模型" % len(entries)}
+
+
+#: 目录的「每天至少从上游 API 取一次」兜底。活跃使用的部署里 fetch_models
+#: 的 300s 缓存把数据刷得比这更新；这个后台循环只兜两种情况：长时间没人
+#: 访问，或自动链一直回退到缓存文件/内置快照。上游有 WAF，频率上限就是
+#: 每天每个 realm 一次——成功即打点（距上次成功满 24h 才再次触发）；失败
+#: 不打扰成功记录，随循环每小时再试（拿不到新鲜数据时快一点重试是对的）。
+CATALOG_DAILY_INTERVAL = 24 * 3600
+_catalog_last_remote = {}
+
+
+def note_remote_catalog(realm, when=None):
+    """记下该 realm 最近一次成功从上游 API 拿到目录的时刻。"""
+    if realm not in ("intl", "cn"):
+        return
+    with _lock:
+        _catalog_last_remote[realm] = when if when is not None else time.time()
+
+
+def catalog_daily_due(now=None):
+    """到期的 realm 列表：距上次成功 API 获取 ≥ 24h（从未成功过也算到期）。"""
+    now = now if now is not None else time.time()
+    with _lock:
+        return [r for r in ("intl", "cn")
+                if now - _catalog_last_remote.get(r, 0.0) >= CATALOG_DAILY_INTERVAL]
+
+
+def catalog_daily_pass(now=None):
+    """每日兜底的一轮：只为到期的 realm 触发一次刷新。
+
+    与手动刷新共用 refresh_catalog（同一把 _catalog_lock、同一个 30s 冷却、
+    同样的 realm 隔离），失败保留旧数据。没有可用账号的 realm 静默跳过——
+    不是错误，等有账号了下一轮再看，也不留日志噪声。
+    """
+    done = []
+    for realm in catalog_daily_due(now):
+        if POOL is None or POOL.representative(realm=realm) is None:
+            continue
+        out = refresh_catalog(realm)
+        log("catalog daily: %s -> %s" % (realm, out.get("msg")))
+        done.append((realm, out))
+    return done
+
+
+def catalog_daily_loop():
+    # 先等启动流程跑完（账号池、服务就位），之后每小时看一眼。
+    time.sleep(60)
+    while True:
+        try:
+            catalog_daily_pass()
+        except Exception as exc:
+            log("catalog daily: pass failed (%s)" % exc)
+        time.sleep(3600)
+
+
+def start_catalog_daily():
+    threading.Thread(target=catalog_daily_loop, name="catalog-daily",
+                     daemon=True).start()
 
 
 def product_config_path(realm):
@@ -10498,6 +10806,28 @@ def product_config_path(realm):
     home = os.path.expanduser("~")
     cache_dir = ".workbuddy-ai" if realm == "intl" else ".workbuddy"
     return os.path.join(home, cache_dir, "cache", "acc-product-config-v3.json")
+
+
+def catalog_cache_path(realm):
+    """网关自己的落盘副本：最近一次成功拉取的 /v3/config 响应体。"""
+    return os.path.join(CATALOG_CACHE_DIR, "product-config-%s.json" % realm)
+
+
+def persist_remote_catalog(realm, payload):
+    """把刚成功拉取的 /v3/config 响应体原样落盘一份（原子写；失败静默）。
+
+    纯存档：网关自己不读它，只为留一份「最近一次 API 拿到的原始目录」——
+    重启或排查时可直接查看文件。写盘失败不是取数失败，绝不能影响本次结果。
+    """
+    try:
+        os.makedirs(CATALOG_CACHE_DIR, exist_ok=True)
+        path = catalog_cache_path(realm)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
+            json.dump(payload, fh, ensure_ascii=False)
+        os.replace(tmp, path)
+    except Exception as exc:
+        log("catalog cache: %s persist failed (%s)" % (realm, exc))
 
 
 def read_cached_remote_catalog(realm):
@@ -10522,31 +10852,38 @@ def read_cached_remote_catalog(realm):
 
 
 def curated_live_sources(realm):
-    """(entries, extras) for the realm's live catalogue, already curated.
+    """(entries, extras, source) for the realm's live catalogue, already curated.
 
     Remote first, then the desktop cache file - the cache is this very
     response written to disk, so both go through the same parser and the same
     rules. `extras` says the entries came from the desktop catalogue, whose
     membership may add a model the curated tables have never seen; the legacy
-    readers keep the old whitelist behaviour.
+    readers keep the old whitelist behaviour. `source` names where the batch
+    came from ("remote" = 上游 /v3/config，"cache" = 同机的桌面缓存文件，
+    "legacy" = 同一文件的宽松解析)，面板据此把「通过 API 获取」与「读取
+    配置文件」分开说；None = 哪里都没拿到。
     """
     remote = None
     try:
         remote = fetch_remote_product_config(realm)
     except Exception as exc:
         log("remote catalog: %s failed (%s)" % (realm, exc))
-    source = remote or read_cached_remote_catalog(realm)
-    if source:
-        ids, meta = source
+    if remote:
+        ids, meta = remote
         return ([(mid, meta.get(mid) or {})
-                for mid in curate_remote_catalog(realm, ids, meta)], True)
+                for mid in curate_remote_catalog(realm, ids, meta)], True, "remote")
+    cached = read_cached_remote_catalog(realm)
+    if cached:
+        ids, meta = cached
+        return ([(mid, meta.get(mid) or {})
+                for mid in curate_remote_catalog(realm, ids, meta)], True, "cache")
     legacy = read_product_config_models(realm=realm)
     if legacy:
         ids = [mid for mid, _ in legacy]
         meta = dict((mid, m) for mid, m in legacy if isinstance(m, dict))
         keep = set(curate_remote_catalog(realm, ids, meta))
-        return ([(mid, m) for mid, m in legacy if mid in keep], False)
-    return [], False
+        return ([(mid, m) for mid, m in legacy if mid in keep], False, "legacy")
+    return [], False, None
 
 
 def fetch_endpoint_models():
@@ -10643,7 +10980,7 @@ def _patch_payload_fingerprint():
     return hashlib.sha256(''.join(records).encode('ascii')).hexdigest()
 
 _OPS_PATCH_FINGERPRINT = _patch_payload_fingerprint()
-_OPS_PATCH_ID = "v1.7.3-ops.20261014.2"
+_OPS_PATCH_ID = "v1.7.5-ops.20261015.1"
 _OBSERVATION_STORE = None
 _OBSERVATION_STORE_LOCK = threading.Lock()
 
@@ -10765,7 +11102,8 @@ def _loop_event(kind, rule=None, chars=None, metrics=None, reason=None):
                     "content_chars", "closed_boundary", "loop_hit", "paired_rounds", "repeated_results", "distinct_arguments",
                     "trigger_bytes", "trigger_chars", "window_chars", "window_lines",
                     "intent_lines", "dominant_count", "distinct_intents", "received_chars",
-                    "path", "neutral_lines", "neutral_dominant_count", "substantive_lines", "substantive_chars"):
+                    "path", "neutral_lines", "neutral_dominant_count", "substantive_lines", "substantive_chars",
+                    "distinct_phrases", "short_phrases", "repeated_phrases", "content_seen", "tool_seen", "refusal_seen"):
             value = metrics.get(key)
             if isinstance(value, int) and not isinstance(value, bool):
                 event[key] = min(9007199254740991, max(0, value))
@@ -10776,7 +11114,7 @@ def _loop_event(kind, rule=None, chars=None, metrics=None, reason=None):
         _LOOP_EVENTS.append(event)
     observation = wb_observe.CURRENT.get()
     if observation is not None:
-        observation.signal(kind, metrics)
+        observation.signal(kind, metrics, rule=rule, chars=chars)
 
 
 def loop_health_snapshot():
@@ -10914,6 +11252,15 @@ def _generation_deadline(holder):
     return holder["generation_deadline"]
 
 
+_UNSET_DEADLINE = object()
+
+
+def _phase_deadline(generation_end, seconds):
+    """A phase may shorten the shared budget, never restart or extend it."""
+    deadline = time.monotonic() + seconds
+    return min(deadline, generation_end) if generation_end is not None else deadline
+
+
 def _buffer_protocol_event(detail):
     """Bounded shape diagnostics; never serialize values or arbitrary paths."""
     reason = detail.get("reason", "unknown")
@@ -11025,6 +11372,9 @@ class _GuardedStream:
         _hold_stream_response(upstream)
         self.holder = holder
         holder.pop("loop_evidence", None)
+        carried = getattr(upstream, '_ops_generation_deadline', _UNSET_DEADLINE)
+        if 'generation_deadline' not in holder and carried is not _UNSET_DEADLINE:
+            holder['generation_deadline'] = carried
         self.deadline = _generation_deadline(holder)
         self.expired = threading.Event()
         self.timer = None
@@ -11087,6 +11437,11 @@ class _GuardedStream:
 
     def _failure(self, code):
         retry_bump(code)
+        if code in ('generation_timeout', 'upstream_sse_limit'):
+            _loop_event(code, chars=self.received_chars,
+                        metrics={'content_seen': int(bool(self.holder.get('ops_output_seen'))),
+                                 'tool_seen': int(bool(self.holder.get('ops_tool_seen'))),
+                                 'refusal_seen': int(bool(self.holder.get('ops_refusal_seen')))})
         _interrupt_upstream(self.upstream)
         return ("data: " + json.dumps({"error": {"code": code,
                 "message": "Upstream safeguard: " + code}}) + "\n\n").encode()
@@ -11413,8 +11768,13 @@ class _GuardedStream:
                         _loop_event("leaked_thinking_loop_detected")
                     rule = "mixed-stall" if mixed_metrics and not self.reason.hit else detector.rule
                     self.holder["loop_evidence"] = {"rule": rule, "chars": detector.total_chars}
+                    evidence = dict((self.leak.mixed_metrics if leaked_loop else mixed_metrics) or
+                                    (detector.guard.evidence() if leaked_loop else detector.evidence()))
+                    evidence.update(content_seen=int(bool(self.holder.get('ops_output_seen'))),
+                                    tool_seen=int(bool(self.holder.get('ops_tool_seen'))),
+                                    refusal_seen=int(bool(self.holder.get('ops_refusal_seen'))))
                     _loop_event(code, rule, detector.total_chars,
-                                metrics=self.leak.mixed_metrics if leaked_loop else mixed_metrics)
+                                metrics=evidence)
                     yield self._failure(code)
                     return
                 if choice.get("finish_reason") and choice["finish_reason"] != "stop":
@@ -11587,7 +11947,7 @@ def probe_first_frame(upstream, retry_call=None, tried=None, deadline_at=None, r
 
 
 def _loop_recovery_body(body):
-    """Opt-in experiment: append an ordinary user hint to a detached request.
+    """Append the bounded safe-recovery hint to a detached request.
 
     Keep all history and reasoning untouched. Decline uncertain tool pairing;
     this is not a context compressor or a bypass for the replay safety gates.
@@ -11647,6 +12007,30 @@ def _make_retry_call(body, session_key, realm):
     retry_call._ops_deadline = True
     retry_call._ops_recovery_hint = True
     return retry_call
+
+
+def _open_first_stream(body, session_key=None, realm=None, prebuilt_body=None):
+    """Separate header and first-frame budgets under one generation deadline."""
+    generation_end = _generation_deadline({})
+    header_end = _phase_deadline(generation_end, upstream_timeouts()[0])
+    upstream = None
+    try:
+        options = {'session_key': session_key, 'target_realm': realm, 'deadline_at': header_end}
+        if prebuilt_body is not None:
+            options['prebuilt_body'] = prebuilt_body
+        upstream, account, effort = open_upstream(body, **options)
+        probed, replacement = probe_first_frame(
+            upstream, retry_call=_make_retry_call(body, session_key, realm),
+            tried=[account.uid], deadline_at=_phase_deadline(generation_end, FIRST_FRAME_DEADLINE))
+        if probed is None:
+            raise RuntimeError('upstream first-frame probe failed')
+        # Per-response metadata, never on the pooled connection. Adapters and
+        # their retries inherit it even when probing replaced the first lease.
+        probed._ops_generation_deadline = generation_end
+        return probed, replacement or account, effort
+    except BaseException:
+        _close_upstream(upstream)
+        raise
 
 
 def clean_chunk(raw):
@@ -14178,14 +14562,20 @@ class _SSELimits:
                 raise _SSELimitError("upstream_sse_limit: event exceeds byte budget")
 
 def _prefer_stream_usage(current, incoming):
-    if not isinstance(incoming, dict):
+    """Keep a detached valid cumulative snapshot, without summing frames."""
+    if not isinstance(incoming, dict) or not incoming:
         return current
-    if current is None:
-        return incoming
-    try:
-        return incoming if float(incoming.get('total_tokens') or 0) >= float(current.get('total_tokens') or 0) else current
-    except (TypeError, ValueError):
+    keys = ('prompt_tokens', 'completion_tokens', 'total_tokens')
+    present = [incoming[key] for key in keys if key in incoming]
+    if not present or any(type(n) not in (int, float) or n < 0 or
+                          (type(n) is float and not math.isfinite(n)) for n in present):
         return current
+    def score(value):
+        def token(key):
+            n = value.get(key)
+            return n if type(n) in (int, float) and n >= 0 and (type(n) is int or math.isfinite(n)) else 0
+        return max(token('total_tokens'), token('prompt_tokens') + token('completion_tokens'))
+    return copy.deepcopy(incoming) if current is None or score(incoming) >= score(current) else current
 
 
 def _observe_block_usage(lines, callback):
@@ -15017,7 +15407,8 @@ def follow_up_with_tool_results(internal_calls, holder, model, session_key, t_st
     if drop_tools:
         holder["web_tools_withdrawn"] = True
     return open_upstream(body, session_key=session_key,
-                         target_realm=holder.get("realm"))
+                         target_realm=holder.get("realm"),
+                         deadline_at=_phase_deadline(_generation_deadline(holder), upstream_timeouts()[0]))
 
 
 def internal_calls_from_chat(chat_obj, web_tools=False):
@@ -16382,10 +16773,9 @@ def _start_empty_continuation(holder, kind="thinking_only"):
     retry_bump(kind)
     if holder.get("record_attempt"):
         holder["record_attempt"]("retry")
-    deadline_at = time.monotonic() + FIRST_FRAME_DEADLINE
     generation_end = holder.get("generation_deadline")
+    deadline_at = _phase_deadline(generation_end, upstream_timeouts()[0])
     if generation_end is not None:
-        deadline_at = min(deadline_at, generation_end)
         if time.monotonic() >= deadline_at:
             holder["continuation_failure_code"] = "generation_timeout"
             return False
@@ -16405,7 +16795,7 @@ def _start_empty_continuation(holder, kind="thinking_only"):
         if getattr(callback, "_ops_deadline", False):
             options = {"deadline_at": deadline_at}
             if (kind == "reasoning_loop" and getattr(callback, "_ops_recovery_hint", False) and
-                    os.environ.get("WB_OPS_LOOP_RECOVERY_HINT", "0").lower() in ("1", "true", "on")):
+                    os.environ.get("WB_OPS_LOOP_RECOVERY_HINT", "1").lower() in ("1", "true", "on")):
                 options["recovery_hint"] = True
             upstream, account = callback(excluded, **options)
         else:
@@ -16415,7 +16805,7 @@ def _start_empty_continuation(holder, kind="thinking_only"):
         probing = True
         probed, replacement = probe_first_frame(
             upstream, retry_call=None if kind == "reasoning_loop" else callback, tried=[getattr(account, "uid", "")],
-            deadline_at=deadline_at, require_frame=(kind == "reasoning_loop"))
+            deadline_at=_phase_deadline(generation_end, FIRST_FRAME_DEADLINE), require_frame=(kind == "reasoning_loop"))
         if probed is None:
             holder["continuation_failure_code"] = "continuation_probe_failed"
             raise RuntimeError("empty-turn retry failed its first-frame probe")
@@ -17215,7 +17605,7 @@ class Handler(BaseHTTPRequestHandler):
             super().finish()
         except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
             pass
-    server_version = "wb-proxy/1.7.3"
+    server_version = "wb-proxy/1.7.5"
     def log_message(self, fmt, *args):
         # 静默过滤前端看板高频定时心跳的正常 200 GET 请求（/logs、/usage、/accounts 轮询等）
         # 避免自增死循环刷屏与日志污染。遇 4xx/5xx 异常或所有非 GET 业务操作依然如实记录。
@@ -17862,7 +18252,14 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             pass
         data = [model_entry(mid, meta) for mid, meta in entries]
-        return self._json(200, {"object": "list", "data": data, "realm": req_realm or CURRENT_REALM})
+        payload = {"object": "list", "data": data,
+                   "realm": req_realm or CURRENT_REALM}
+        # 来源说明（面板展示用）：这批清单是上游 API 实时取的，还是读的
+        # 本机桌面缓存文件/内置快照，以及各自的时间戳。
+        meta = catalog_meta(req_realm)
+        if meta:
+            payload["catalog"] = meta
+        return self._json(200, payload)
 
     def _get_v1_usage(self, query):
         if not self._authorized():
@@ -18171,7 +18568,18 @@ class Handler(BaseHTTPRequestHandler):
             since_id = int(query.get("since_id", ["0"])[0])
         except (ValueError, TypeError):
             since_id = 0
-        return self._json(200, get_logs(limit=limit, level=level, tag=tag, search=search, since_id=since_id))
+        result = get_logs(limit=limit, level=level, tag=tag, search=search, since_id=since_id)
+        # 面板要据 mode 决定顶部文案（内存保留 vs 落库保留）与是否显示库容量，
+        # 所以把模式与库统计一并带回；统计失败不该让整个日志请求失败。
+        result["mode"] = "db" if _log_db_active() else "memory"
+        if _log_db_active():
+            try:
+                stats = LOG_STORE.stats() or {}
+            except Exception:
+                stats = {}
+            result["stored"] = stats.get("rows", 0)
+            result["db_bytes"] = stats.get("bytes", 0)
+        return self._json(200, result)
 
     def _get_logs_export(self):
         if not self._authorized():
@@ -18687,6 +19095,28 @@ class Handler(BaseHTTPRequestHandler):
                 # 由下一个请求照常推（此刻就算推也要先折一次剩余估算，没必要
                 # 为一个开关多付这一趟）。
                 POOL.apply_remaining_weights(None)
+        if "log_db_enabled" in payload or "log_db_max_rows" in payload \
+                or "log_db_max_days" in payload or "log_db_max_bytes" in payload:
+            # 日志落库（默认关闭）：开关与三条保留上限一次提交里可以任选子集，
+            # 没带到的键原样保留。上限留空（null / "" / 0）一律存成「不限」。
+            log_db_touched = False
+            if "log_db_enabled" in payload:
+                raw = payload.get("log_db_enabled")
+                if not isinstance(raw, bool):
+                    return self._error(400, "log_db_enabled must be true or false",
+                                       "invalid_request_error")
+                wb_settings.set_log_db_enabled(ACCOUNTS_DIR, raw)
+                reply["log_db_enabled"] = raw
+                log_db_touched = True
+            for key, setter in (
+                    ("log_db_max_rows", wb_settings.set_log_db_max_rows),
+                    ("log_db_max_days", wb_settings.set_log_db_max_days),
+                    ("log_db_max_bytes", wb_settings.set_log_db_max_bytes)):
+                if key in payload:
+                    reply[key] = setter(ACCOUNTS_DIR, payload.get(key))
+                    log_db_touched = True
+            if log_db_touched:
+                apply_log_db_settings()
         if "accounts_collapsed" in payload:
             # A disclosure state, and the only thing this branch may touch: the
             # submission carries just this key, so the settings it does not name
@@ -18753,6 +19183,17 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(400, str(exc), "invalid_request_error")
             wb_settings.set_upstream_config(ACCOUNTS_DIR, patch)
             reply["upstream"] = wb_settings.upstream_config(ACCOUNTS_DIR)
+        if "usage" in payload:
+            raw = payload.get("usage")
+            if not isinstance(raw, dict):
+                return self._error(400, "usage must be an object",
+                                   "invalid_request_error")
+            try:
+                patch = wb_settings.validate_usage_patch(raw)
+            except ValueError as exc:
+                return self._error(400, str(exc), "invalid_request_error")
+            wb_settings.set_usage_config(ACCOUNTS_DIR, patch)
+            reply["usage"] = wb_settings.usage_config(ACCOUNTS_DIR)
         if "prompt" in payload:
             raw = payload.get("prompt")
             if not isinstance(raw, dict):
@@ -19001,6 +19442,7 @@ class Handler(BaseHTTPRequestHandler):
         failure message is appended to `warnings` only for the soft-fallback
         case; hard failures raise via the caller's 400 mapping.
         """
+        wb_agents = agents_module()
         key_id = str(payload.get("key_id") or "").strip()
         if key_id == "__global":
             return API_KEY or None
@@ -19441,6 +19883,18 @@ class Handler(BaseHTTPRequestHandler):
         out["msg"] = "已开始抓取，稍候刷新查看结果"
         return self._json(200, out)
 
+    def _route_catalog_refresh(self, payload):
+        """面板「刷新模型清单」：强制向上游拉一次指定版本的目录。
+
+        版本（realm）由面板显式传当前视图的 intl/cn：每个版本只用自己的
+        代表账号与该版本的端点，绝不跨区。拉取同步执行（通常 1~3 秒；
+        上游丢包时两次 10s 尝试封顶），同一版本有 30s 冷却；无论成败都
+        以 200 + ok 标志回答，msg 给面板直接展示（与 /pricing/refresh
+        同一条面板惯例）。
+        """
+        realm = str((payload or {}).get("realm") or "").strip().lower()
+        return self._json(200, refresh_catalog(realm))
+
     def _route_logs_clear(self, payload):
         clear_logs()
         return self._json(200, {"ok": True})
@@ -19587,6 +20041,22 @@ class Handler(BaseHTTPRequestHandler):
                 "ok": True,
                 "keyId": wb_atrest.derive_key_id(key),
                 "msg": "已从桌面客户端进程回收密钥（只留在内存里）",
+                "atrest": wb_atrest.status(),
+            })
+        if payload.get("keyText") is not None:
+            # 手工导入解码密钥：macOS / Linux 上无法回收进程内存，只能让用户贴一次。
+            # 与回收同一道闸——过不了 keyblob 自检就原样报错，不落内存。
+            try:
+                key = wb_atrest.adopt_key(payload.get("keyText"),
+                                          log=lambda m: log(m, tag="accounts"))
+            except Exception as exc:
+                log("at-rest key import rejected: %s" % exc, level="WARN", tag="accounts")
+                return self._json(200, {"ok": False, "msg": str(exc),
+                                        "atrest": wb_atrest.status()})
+            return self._json(200, {
+                "ok": True,
+                "keyId": wb_atrest.derive_key_id(key),
+                "msg": "已导入解码密钥（只留在内存里）",
                 "atrest": wb_atrest.status(),
             })
         if payload.get("forgetKey"):
@@ -19902,15 +20372,7 @@ class Handler(BaseHTTPRequestHandler):
             key_blocked = self._key_model_error(chat_req.get("model"))
             if key_blocked:
                 return self._error(400, key_blocked, "invalid_request_error")
-            deadline_at = time.monotonic() + FIRST_FRAME_DEADLINE
-            upstream, account, effort = open_upstream(chat_req, session_key=session_key,
-                                              target_realm=req_realm, deadline_at=deadline_at)
-            upstream, replacement = probe_first_frame(
-                upstream, retry_call=_make_retry_call(chat_req, session_key, req_realm),
-                tried=[account.uid], deadline_at=deadline_at)
-            account = replacement or account
-            if upstream is None:
-                raise RuntimeError("upstream first-frame probe failed")
+            upstream, account, effort = _open_first_stream(chat_req, session_key=session_key, realm=req_realm)
         except ContentRejected as exc:
             record_error(model, 403, exc.detail[:200],
                          elapsed_ms=int((time.time() - t_start) * 1000),
@@ -20038,7 +20500,8 @@ class Handler(BaseHTTPRequestHandler):
                 upstream, account, _ = follow_up_with_tool_results(
                     internal, holder, model, session_key, t_start, drop_tools=give_up)
                 upstream, replacement = probe_first_frame(
-                    upstream, retry_call=holder.get("retry_call"), tried=[account.uid])
+                    upstream, retry_call=holder.get("retry_call"), tried=[account.uid],
+                    deadline_at=_phase_deadline(_generation_deadline(holder), FIRST_FRAME_DEADLINE))
                 account = replacement or account
                 if upstream is None:
                     raise RuntimeError("web follow-up failed its first-frame probe")
@@ -20121,7 +20584,8 @@ class Handler(BaseHTTPRequestHandler):
                 upstream, account, _ = follow_up_with_tool_results(
                     calls, holder, model, session_key, t_start, drop_tools=give_up)
                 upstream, replacement = probe_first_frame(
-                    upstream, retry_call=holder.get("retry_call"), tried=[account.uid])
+                    upstream, retry_call=holder.get("retry_call"), tried=[account.uid],
+                    deadline_at=_phase_deadline(_generation_deadline(holder), FIRST_FRAME_DEADLINE))
                 account = replacement or account
                 if upstream is None:
                     raise RuntimeError("web follow-up failed its first-frame probe")
@@ -20190,8 +20654,8 @@ class Handler(BaseHTTPRequestHandler):
             key_blocked = self._key_model_error(chat_req.get("model"))
             if key_blocked:
                 return self._anthropic_error(400, key_blocked, "invalid_request_error")
-            upstream, account, effort = open_upstream(
-                chat_req, session_key=session_key, target_realm=req_realm)
+            upstream, account, effort = _open_first_stream(
+                chat_req, session_key=session_key, realm=req_realm)
         except ContentRejected as exc:
             record_error(model, 403, exc.detail[:200],
                          elapsed_ms=int((time.time() - t_start) * 1000),
@@ -20375,6 +20839,17 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/pricing/mapping":
                 return self._route_pricing_mapping(payload)
             return self._route_pricing_refresh(payload)
+        if path == "/catalog/refresh":
+            # Panel-only management write, like the pricing ones: it spends
+            # one upstream /v3/config call and republishes that realm's
+            # catalogue, so it answers to the panel session rather than to
+            # an API key.
+            if not self._panel_ok():
+                return self._error(401, "panel password required", "invalid_request_error")
+            payload = self._payload_or_error()
+            if payload is None:
+                return
+            return self._route_catalog_refresh(payload)
         if path.startswith("/proxy/"):
             if not self._panel_ok():
                 return self._error(
@@ -20510,15 +20985,8 @@ class Handler(BaseHTTPRequestHandler):
             key_blocked = self._key_model_error(payload.get("model"))
             if key_blocked:
                 return self._error(400, key_blocked, "invalid_request_error")
-            deadline_at = time.monotonic() + FIRST_FRAME_DEADLINE
-            upstream, account, effort = open_upstream(payload, session_key=session_key,
-                                              target_realm=req_realm, deadline_at=deadline_at, prebuilt_body=forwarded)
-            upstream, replacement = probe_first_frame(
-                upstream, retry_call=_make_retry_call(payload, session_key, req_realm),
-                tried=[account.uid], deadline_at=deadline_at)
-            account = replacement or account
-            if upstream is None:
-                raise RuntimeError("upstream first-frame probe failed")
+            upstream, account, effort = _open_first_stream(payload, session_key=session_key,
+                                                         realm=req_realm, prebuilt_body=forwarded)
         except ContentRejected as exc:
             record_error(model, 403, exc.detail[:200],
                          elapsed_ms=int((time.time() - t_start) * 1000),
@@ -20782,12 +21250,17 @@ def _probe_running_instance(args):
 
 def _bootstrap_runtime(args):
     global POOL, ACCOUNTS_DIR, API_KEY, SYSTEM_PROMPT
-    global API_KEY_FILE_SET, SCHEDULER
+    global API_KEY_FILE_SET, SCHEDULER, LOG_STORE
     api_key_generated = False
     API_KEY = args.api_key
     SYSTEM_PROMPT = args.system_prompt
     if args.accounts_dir:
         ACCOUNTS_DIR = os.path.abspath(args.accounts_dir)
+    # 日志落库（默认关闭）：在账号池之前初始化，好让「池加载失败」这类最需要
+    # 事后留档的启动日志也能进库。关闭时这里只造一个 enabled=False 的空壳，
+    # 不建文件、不改日志路径。
+    LOG_STORE = wb_logstore.LogStore(os.path.join(USAGE_DIR, "logs.sqlite3"))
+    apply_log_db_settings()
     # LAN mode must not ship a known key: the gateway spends the account's own
     # upstream quota, so a guessable default lets anyone on the network drain
     # it. Generate one on first use, persist it, and reuse it afterwards.
@@ -20820,6 +21293,9 @@ def _bootstrap_runtime(args):
     from wb_scheduler import Scheduler
     SCHEDULER = Scheduler(POOL)
     SCHEDULER.start()
+    # 目录兜底：每天至少从上游 API 取一次（活跃使用的部署里 300s 缓存早就
+    # 刷得更新，这个线程只兜长时间没人访问 / 一直吃缓存文件或内置快照）。
+    start_catalog_daily()
     global PRICING
     # The policy table and its timeline live beside the usage log, so one
     # volume carries both and the request references resolve locally.

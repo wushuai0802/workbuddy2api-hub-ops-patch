@@ -8,7 +8,6 @@ import threading
 import time
 import struct
 from collections import Counter, deque
-from wb_stall import _Safety
 
 UPSTREAM_IDLE_TIMEOUT = 120
 FIRST_FRAME_MAX_ATTEMPTS = 3
@@ -299,6 +298,9 @@ class FailedReasoningCache:
         self.entries = deque(maxlen=limit)
         self.lock = threading.Lock()
 
+    MAX_CLEAN_SEGMENTS = 16
+    MAX_CLEAN_CHARS = 65536
+
     def remember(self, text):
         if not isinstance(text, str) or not 160 <= len(text) <= 65536:
             return
@@ -313,10 +315,18 @@ class FailedReasoningCache:
             while self.entries and now - self.entries[0][0] >= self.ttl:
                 self.entries.popleft()
             candidates = sorted({(n, digest) for _, n, digest in self.entries if n <= len(text)}, reverse=True)
-        for n, digest in candidates:
-            if hashlib.sha256(text[:n].encode("utf-8")).digest() == digest:
-                return text[n:]
-        return text
+        offset = 0
+        for _ in range(self.MAX_CLEAN_SEGMENTS):
+            budget = min(len(text)-offset, self.MAX_CLEAN_CHARS-offset)
+            if budget <= 0:
+                break
+            for n, digest in candidates:
+                if n <= budget and hashlib.sha256(text[offset:offset+n].encode("utf-8")).digest() == digest:
+                    offset += n
+                    break
+            else:
+                break
+        return text[offset:]
 
 
 class CompactSSEBuffer:
@@ -494,6 +504,75 @@ class StallObserver:
         return None
 
 
+class _QuoteContext:
+    """Bounded detection-only quotation state, with character lookahead.
+
+    Adapted from the supplied v1.7.5-r2 reference. It masks quote spans rather
+    than exempting a whole surrounding planning line, without rewriting SSE.
+    """
+    LIMIT = 65536
+
+    def __init__(self):
+        self.quote = None
+        self.count = 0
+        self.escaped = False
+        self.previous = ""
+        self.pending = ""
+        self.expired = False
+
+    def copy(self):
+        result = _QuoteContext()
+        result.__dict__.update(self.__dict__)
+        return result
+
+    def _consume(self, char, after):
+        protected = self.quote is not None
+        if protected:
+            self.count += 1
+            if self.count > self.LIMIT:
+                self.quote, self.count = None, 0
+                self.expired = True
+                protected = False
+        before, self.previous = self.previous, char
+        if self.escaped:
+            self.escaped = False
+            return protected
+        if char == "\\":
+            self.escaped = True
+            return protected
+        if char not in ('"', "'", '“', '”', '‘', '’'):
+            return protected
+        if char in ("'", '’') and before.isalpha() and after.isalpha():
+            return protected
+        if self.quote is not None:
+            if char == self.quote:
+                self.quote, self.count = None, 0
+            return True
+        if char in ('”', '’'):
+            return True
+        if char == "'" and before and not (before.isspace() or before in '([{:,'):
+            return False
+        if char == '"' and before.isdigit():
+            return False
+        self.quote = {'“': '”', '‘': '’'}.get(char, char)
+        self.count = 0
+        return True
+
+    def feed(self, char):
+        self.expired = False
+        protected = self._consume(self.pending, char) if self.pending else False
+        self.pending = char
+        if char == '\n':
+            protected = self._consume(char, '') or protected
+            self.pending = ''
+            self.escaped = False
+        return protected
+
+    def preview(self):
+        state = self.copy()
+        return state._consume(state.pending, '') if state.pending else state.quote is not None
+
+
 class ReasoningLoopGuard:
     """Bounded tail tracker that latches once a repetition loop is seen."""
 
@@ -503,15 +582,15 @@ class ReasoningLoopGuard:
         self.detail = ""
         self.conservative = conservative
         self.line = ""
-        self.context_prefix = ""
-        self.context_chars = 0
         self.line_blocked = False
         self.fence = None
         self.scanned = 0
         self.fast = FastStallGuard(conservative)
         self.total_chars = 0
         self.rule = ""
-        self.safety = _Safety()
+        self.quote_context = _QuoteContext()
+        self.quote_view = ""
+        self.quote_line_start = False
 
     def _check(self, candidate):
         detail = detect_reasoning_loop(candidate[-REASON_LOOP_TAIL:], self.conservative)
@@ -524,24 +603,20 @@ class ReasoningLoopGuard:
         stripped = self.line.lstrip()
         match = re.match(r"(`{3,}|~{3,})", stripped)
         marker = match.group(1) if match else None
-        context = self.safety if complete else self.safety.copy()
-        protected = context.protected(self.context_prefix, structured=True)
-        if complete and self.context_chars > len(self.context_prefix):
-            # Keep the closing boundary of a long quoted line without retaining
-            # the whole line or rescanning it at every checkpoint.
-            tail_start = self.context_chars - len(self.line)
-            missing = max(0, tail_start - len(self.context_prefix))
-            if context.quote is not None:
-                context.quote_chars += missing
-            suffix = self.line[max(0, len(self.context_prefix)-tail_start):]
-            protected = context.protected(suffix, structured=True) or protected
-        safe = "" if protected else _prose_line(self.line)
+        if self.quote_line_start:
+            marker = None
+        safe = _prose_line(self.line)
         # Latch structured lines at deterministic checkpoints so a long code
         # prefix cannot fall out of the bounded window and become prose.
         if self.line.strip() and not safe:
             self.line_blocked = True
         if self.line_blocked:
             safe = ""
+        if safe:
+            pending = self.quote_context.pending
+            safe = self.quote_view + (' ' if self.quote_context.preview() else pending)
+            if not safe.strip():
+                safe = ""
         if complete:
             if marker and self.fence is None:
                 self.fence = marker
@@ -560,9 +635,13 @@ class ReasoningLoopGuard:
                         self.hit, self.detail, self.rule = True, hit, hit.split(":")[0]
                 elif self.line.strip():
                     self.fast.reset()
+            # Unmatched quotes in code/data must not hide later prose.
+            if (self.fence is not None or (self.line_blocked and not self.quote_line_start and
+                    not stripped.startswith(('"', "'", '“', '‘')))):
+                self.quote_context = _QuoteContext()
+            self.quote_line_start = self.quote_context.quote is not None
+            self.quote_view = ""
             self.line = ""
-            self.context_prefix = ""
-            self.context_chars = 0
             self.line_blocked = False
         if self.hit or self.fence or marker:
             return self.hit
@@ -588,14 +667,22 @@ class ReasoningLoopGuard:
         for char in text:
             self.total_chars += 1
             self.scanned += 1
+            if self.fence is None:
+                pending = self.quote_context.pending
+                protected = self.quote_context.feed(char)
+                if self.quote_context.expired:
+                    if not self.line_blocked:
+                        self.line = ""
+                    self.tail = ""
+                    self.fast.reset()
+                    self.quote_view = ""
+                if pending:
+                    self.quote_view = (self.quote_view + (' ' if protected else pending))[-REASON_LOOP_TAIL:]
             if char == "\n":
                 if self._line_state(complete=True):
                     return True
             else:
                 self.line = (self.line + char)[-REASON_LOOP_TAIL:]
-                self.context_chars += 1
-                if len(self.context_prefix) < REASON_LOOP_TAIL:
-                    self.context_prefix += char
             if self.scanned >= 64:
                 self.scanned = 0
                 if self._line_state():
@@ -606,6 +693,20 @@ class ReasoningLoopGuard:
         if self.rule.startswith("fast"):
             return "short-intent repetition churn (" + self.detail + ")"
         return self.detail or "reasoning repetition loop"
+
+    def evidence(self):
+        """Numeric-only shape of the bounded detection window, never text."""
+        tail = (self.tail + self.line)[-REASON_LOOP_TAIL:]
+        phrases = [" ".join(p.strip(" \t\r(),:，：\"'").split()).casefold()
+                   for p in re.split(r"[\n.!?。！？]+", unicodedata.normalize('NFKC', tail)) if p.strip()]
+        window = phrases[-48:]
+        short = [p for p in window if len(p) <= REASON_CHURN_MAX_LINE and len(p.split()) <= 12]
+        counts = Counter(_phrase_key(p) for p in short)
+        return {'window_chars': len(tail), 'window_lines': len(window),
+                'short_phrases': len(short), 'distinct_phrases': len(counts),
+                'repeated_phrases': sum(n for n in counts.values() if n >= 2),
+                'dominant_count': max(counts.values(), default=0),
+                'intent_lines': sum(bool(_STALL_RE.fullmatch(p)) for p in short)}
 
 
 class LeakedThinkingGuard:
@@ -673,7 +774,7 @@ class LeakedThinkingGuard:
                     self.pending = self.pending[-len(self.tag):]
                     if self._feed_view(prefix):
                         return True
-                if self.guard.fence is None and self.guard.safety.quote is None:
+                if self.guard.fence is None and not self.guard.quote_context.preview():
                     self._feed_view("", final=True)
                     self.pending, self.state = "", "done"
                     return self.hit

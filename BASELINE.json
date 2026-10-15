@@ -1,41 +1,42 @@
 {
-  "base_tag": "v1.7.3",
+  "base_tag": "v1.7.5",
   "compatibility": {
-    "dashboard.html": "502db629af3acdc45270ddb0eda6683b7766bb890212e3dd3ca5f31ba812db31",
+    "dashboard.html": "aeba724482c6968cd1f218c4ac63c1feba3e7738c93a93ad3abf345bbdbd6a83",
     "wb_activity.py": "da70fdd4b791198b9147d7624f734bcff396b5086a1736a75722c3e4b5ad69a9",
-    "wb_agents.py": "83c13fce511bebe3dc7ef87f8ca9481af927e1a376184cea70db2b59c8178c3a",
-    "wb_atrest.py": "62e2be9eb45ade20bbd16eba6393985cef82f80ed8776e2c955cdef72ecca303",
+    "wb_agents.py": "f65820d3ae180f514d7b030be8fb74d80196d4d0764c0fb375b9fb74015eaa5b",
+    "wb_atrest.py": "7fb222478f27ae38e676057d76f94bbb74467435ca321a08534a8f2d58d474a1",
     "wb_catalog.py": "3421a335adc9381ff7dd33bfbcb2a1bd5e4d8c5c1d23de2a7dffc40b8e2f2c07",
     "wb_egress.py": "f65cbf80e8706376b60d75502d88bb5b9bbfe1d75d34c837903e3718794d34a9",
     "wb_fingerprint.py": "89c38bc3e98344c77a6077b19160d63219f74fada5b88603049575d5294fb16d",
     "wb_identity.py": "bae56fb1478cf01bf46e571376671806d7bf3e8b4f58c37dd85c00c221762a3c",
     "wb_ipintel.py": "4e540e4b6d74028b93e01dd35ee6695772c056ab36c8e648a8227c5dbcf9dd6d",
+    "wb_logstore.py": "d9b9763a0aa120ee5dc48e4c34dc7f62a4c70127c0a9bb3a6630c149d93feda2",
     "wb_modelsdev.py": "9f6a0d335055eb971743bc65ca08720996d83533e6a0b1e1b9b60613e357a27c",
-    "wb_pricing.py": "6cc523efb4f6f19e7fce53e603b6c4ebc0dded6396e686311fbc639a41f445d5",
+    "wb_pricing.py": "3471071c1e5931e2064f2daf54f25c3053638af1f6d09fc7be11ba03ab18fa8b",
     "wb_probes.py": "2f0304f4dfe29ef5338980a4040eaea9cc992f4b6eeaf32ab1ecf0bd80ddb966",
     "wb_prompt.py": "2824b866969044f58e32162be44b056dcabc6c723269ce8ae63559ae0956eafe",
     "wb_scheduler.py": "2ed9a4a0183f80628d901dccbcbd1e8c8895566f97520ab86d6336f40497a673",
-    "wb_settings.py": "67b5d30503120936b85ac1e2cb5349d214b7ba952c69f433c05c126435832b00",
+    "wb_settings.py": "dc0e4db90f70decc5c98d0f86ca5620a4122b3432c832983f5bfeb689d47e330",
     "wb_tasks.py": "c36e8314e71c57ce328fd96b6b9838e634f9041f40c0a84fa9c8e9f76990030b",
     "wb_updates.py": "99b084bc41c12e65de09b206106916c87111ad3f250813919a2174d81865b6c1",
     "wb_webagent.py": "1258023afb2df58131947970ad3aa00e59c9e71899fd5e7e6557ee9dcc560828"
   },
   "files": {
     "wb_accounts.py": {
-      "base_sha256": "35242c3dc95a262180f41e1fbf6a8e05b10bb151725be2d829fa7266236b1b82",
-      "patched_sha256": "b4bea0a751061b616d23a8f590c5967736f687ae911d534b2515d45e8a5d56b1"
+      "base_sha256": "c4b06fa28c362d12f77486401f37af7eb1c2faab2eb1c8e97f133057288577a9",
+      "patched_sha256": "b3f6cccfa0268c065b8e0118a4aeb586f39b8dc28eaf253801f153e02cdb1dfd"
     },
     "wb_observe.py": {
       "base_sha256": null,
-      "patched_sha256": "fe682395074953282719fd7271e241ed555bc25f0bab61b195e9fa15ed4d4532"
+      "patched_sha256": "1f9df3b0a3855f79e536920f3d28ff6d6df53f4e06d4628a85b83ef24765a4ea"
     },
     "wb_ops.py": {
       "base_sha256": null,
-      "patched_sha256": "2ab6baf4424c3c83198d0f2eb59fe10e94ee0bc508e9c96c5e2e3caee3e3a6d7"
+      "patched_sha256": "fe26ca2f939b33dae0b847e81731ef8b7ca21b156fb71df7fde3ed42538af20f"
     },
     "wb_proxy.py": {
-      "base_sha256": "c7520bbf66413b57068e593271b22a8c672cd9f321f5f4fbb6410117cb45fe35",
-      "patched_sha256": "ee1f70aacb0c7dac3750859100139a62e99134b25b6388125c4b1adb9d542e96"
+      "base_sha256": "f67bf8458babb66b5606f9461bef91949d53f2705165d528e681cf5ffbca2f65",
+      "patched_sha256": "eebbc5fbf841570839ddea2c1dd1aa718d6914b55d9dbead74a03165153e00e4"
     },
     "wb_stall.py": {
       "base_sha256": null,
@@ -50,11 +51,11 @@
       "patched_sha256": "f3a09e170e9393592179638378781b72be075fb6c9596e847db01e4e11b154da"
     }
   },
-  "patch_id": "v1.7.3-ops.20261014.2",
+  "patch_id": "v1.7.5-ops.20261015.1",
   "patch_source": "wushuai0802/workbuddy2api-hub-ops-patch",
-  "payload_fingerprint": "975111b96db4fc81a253067341b169fe4b84a902d5142d6c4af0eb2edcafa5d3",
+  "payload_fingerprint": "37d9ca2277607b42c9d15a51a2c70617cb4c65bfdb8426cafd84bab9a93e88e6",
   "python_requires": ">=3.11",
   "repository": "https://github.com/ardeyouxipianyi/workbuddy2api-hub",
   "schema_version": 1,
-  "upstream_commit": "c7dad8fe32316d47ce4f0ff260bb7ac7802b8a94"
+  "upstream_commit": "762982531fae2d58aacfaa78c989a873f06206df"
 }

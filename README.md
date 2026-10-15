@@ -4,17 +4,19 @@
 
 为 WorkBuddy 网关提供 DeepSeek 复读保护、受限认证续期、推理历史与工具图片兼容，以及流式协议边界修复。基于[官方项目](https://github.com/ardeyouxipianyi/workbuddy2api-hub)，可检查、可回退，遵循 MIT。
 
-当前版本：**v1.7.3-ops.20261014.2**。
+当前版本：**v1.7.5-ops.20261015.1**。
 
-- [下载 ZIP 与 SHA256SUMS.txt](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.7.3-ops.20261014.2)
-- 文件名：`workbuddy2api-hub-v1.7.3-wushuai0802-ops-20261014-r2.zip`
-- 仅支持官方 **v1.7.3**，提交 `c7dad8fe32316d47ce4f0ff260bb7ac7802b8a94`。
+- [下载 ZIP 与 SHA256SUMS.txt](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.7.5-ops.20261015.1)
+- 文件名：`workbuddy2api-hub-v1.7.5-wushuai0802-ops-20261015-r1.zip`
+- 仅支持官方 **v1.7.5**，提交 `762982531fae2d58aacfaa78c989a873f06206df`。
 - Python 3.11+。Docker 用户从打过完整补丁的准确源码重新构建镜像。
 - 安装器只替换四个上游模块（proxy、accounts、webtools、upstream_pool），新增 ops、stall、observe 三个模块；不操作账号、Key、配置、历史或部署。
 
-本版在官方 v1.7.3 上重基用户提供的 v1.7.2 补丁，保留我们现有混合复读、推理别名预算、工具图片、拒答及连接所有权保护。来源与许可见 [NOTICE.md](NOTICE.md) 和 [THIRD-PARTY-zh.md](THIRD-PARTY-zh.md)。
+本版把已有补丁迁移到官方 v1.7.5，保留混合复读、推理别名预算、工具图片、拒答、用量结算和连接所有权保护。来源与许可见 [NOTICE.md](NOTICE.md) 和 [THIRD-PARTY-zh.md](THIRD-PARTY-zh.md)。
 
-r2 修复引用中的复读示例被旧检测误杀、正文循环与异常终止丢失已接收用量，以及健康接口统计口径。增加 SSE 单行/事件上限与独立请求/尝试统计。跨工具回合只加入观察信号：不同参数反复得到同样失败可被记录，正常轮询和变化结果有反例保护；不会据此自动重试或中止任务。
+本次修复响应头预算被固定45秒覆盖的问题：响应头尊重面板设置，返回后才开始45秒首帧预算；初始连接、恢复和网页工具后续生成共享原300秒总期限。纯推理循环的唯一一次安全恢复默认加入简短接续提示，可用 `WB_OPS_LOOP_RECOVERY_HINT=0` 关闭提示。连续已知失败前缀最多清理16段/65536字符，保留未知后缀和客户端原历史。持久观察新增匿名规则、窗口计数和恢复停止原因；检测阈值保持。
+
+参考新提供的v1.7.5-r2包，将引号保护细化到引用片段，短工具名不再让周围整行复读漏检；累计用量先校验数值、保留独立快照，支持无total字段。保留原混合/期限/租约保护，见[来源对照](THIRD-PARTY-zh.md)。
 
 | 功能 | 行为 |
 | --- | --- |
@@ -26,27 +28,27 @@ r2 修复引用中的复读示例被旧检测误杀、正文循环与异常终�
 | 新版工具兼容 | 保留额外工具注入、命名空间自由格式工具回程、DSML打印调用恢复及空finish_reason归一化。 |
 | 分块流与租约 | 保留v1.7.3的分块读取/写出和共享TLS；缓冲帧验证后释放连接，失败时丢弃，保留已接收用量。 |
 
-上游 v1.7.3 的原生改动包括流式性能、命名空间工具闭环、面板限高/吸顶、响应头超时、国际活跃轻量模型与最近请求显示修复。跨过 v1.7.0/1.7.2 还包含风控403轮换、单请求失败计账去重、默认关闭的出口退避、权重/备注、多引擎网页工具与用量缓存优化。完整归属与兼容说明见补丁范围。
+上游 v1.7.4/1.7.5 增加默认关闭的SQLite日志及保留限制、checkpoint修复、凭据手动导入、新主题/统计面板、每日及手动模型目录刷新、来源标记和原始目录归档。模型目录/倍率现在优先使用实际API结果，显示可能变化；这些原生功能不代替防复读。SQLite日志是否启用沿用用户设置，公开包不自动开启。
 
 ## 安装
 
 先保存旧镜像、源码、配置和数据，在新目录获取两个准确版本：
 
 ~~~sh
-git clone --depth 1 --branch v1.7.3-ops.20261014.2 https://github.com/wushuai0802/workbuddy2api-hub-ops-patch.git ops-patch-v173
-git clone --depth 1 --branch v1.7.3 https://github.com/ardeyouxipianyi/workbuddy2api-hub.git workbuddy2api-hub-v1.7.3
-git -C workbuddy2api-hub-v1.7.3 rev-parse HEAD
-python3 -B ops-patch-v173/apply.py --verify-package
-python3 -B ops-patch-v173/apply.py --target ./workbuddy2api-hub-v1.7.3 --dry-run
+git clone --depth 1 --branch v1.7.5-ops.20261015.1 https://github.com/wushuai0802/workbuddy2api-hub-ops-patch.git ops-patch-v175
+git clone --depth 1 --branch v1.7.5 https://github.com/ardeyouxipianyi/workbuddy2api-hub.git workbuddy2api-hub-v1.7.5
+git -C workbuddy2api-hub-v1.7.5 rev-parse HEAD
+python3 -B ops-patch-v175/apply.py --verify-package
+python3 -B ops-patch-v175/apply.py --target ./workbuddy2api-hub-v1.7.5 --dry-run
 ~~~
 
-提交必须匹配上面的完整SHA。预检通过后，按[安装指南](docs/INSTALL.md)暂停唯一目标服务、应用完整补丁、构建并定向切换。已有v1.6.20或v1.7.2补丁不能直接叠加；不要删除状态/备份绕过检查。旧[20261012版本](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.6.20-ops.20261012.1)及更早tag继续保留。
+提交必须匹配上面的完整SHA。预检通过后，按[安装指南](docs/INSTALL.md)暂停唯一目标服务、应用完整补丁、构建并定向切换。已有旧补丁（包括v1.7.3）不能直接叠加；不要删除状态/备份绕过检查。旧Release/tag继续保留。
 
 公共默认请求体上限保持官方16MiB；确有大历史需求时显式设置 `WB_MAX_PAYLOAD_BYTES=52428800`，评估并发内存。新版可能重建用量checkpoint缓存，历史JSONL应保留。调度、出口退避、权重、轻量签到模型等仍由使用者的既有设置决定，本补丁不代你启用。
 
 ## 验证与边界
 
-Windows/Python3.14.7的58组离线回归通过，新增引用/六路径用量/异常SSE/跨回合观察与持久化统计测试；保留原有保护、迁移/DSML、分块/TLS、工具、退避和统计合同。CI检查Linux3.11/3.12与Windows3.11，实际状态见[验证记录](docs/VERIFICATION.md)。
+离线runner包含68组Python回归，新增阶段期限、连续前缀、默认恢复提示、匿名证据持久化及可选日志库测试；面板使用官方Node合成DOM测试。CI检查Linux3.11/3.12与Windows3.11，实际结果见[验证记录](docs/VERIFICATION.md)。
 
 测试使用合成账号、空数据和本机HTTP，不含真实会话。检测仍以单次生成为范围，尚无通用跨工具回合业务进展熔断。健康、模块指纹或离线测试不等于真实长会话输出质量验收。
 

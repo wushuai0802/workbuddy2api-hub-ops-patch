@@ -18,11 +18,12 @@ import uuid
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from apply import Bundle
+from scripts.offline_fixtures import prepare_test_fixtures
 
 PATCH_SUITES = ('test_installer.py', 'test_wb_stall.py', 'test_mixed_stall_proxy.py', 'test_keepalive_guard.py',
                 'test_auth_deadline.py', 'test_proxy_boundaries.py', 'test_leaked_mixed_stall.py',
-                'test_guarded_sse_batching.py', 'test_review_fixes.py', 'test_progress_observe.py', 'test_v1617.py', 'test_v172.py',
-                'test_build_identity.py', 'test_dated_guards.py', 'test_observability.py',
+                'test_guarded_sse_batching.py', 'test_review_fixes.py', 'test_progress_observe.py', 'test_phase_recovery.py', 'test_v1617.py', 'test_v172.py',
+                'test_build_identity.py', 'test_dated_guards.py', 'test_observability.py', 'test_logstore.py',
                 '_test_401_refresh.py', '_test_deepseek_multimodal.py', '_test_deepseek_reasoning_compaction.py',
                 'test_integration.py', 'test_loop_recovery.py', 'test_reasoning_recovery.py',
                 'test_nullable_buffer.py', 'test_metadata_buffer.py', 'test_compact_buffer.py',
@@ -37,7 +38,10 @@ UPSTREAM_SUITES = ('_test_upstream_repairs.py', '_test_namespace_tools.py', '_te
                    '_test_stop_normalization.py', '_test_pool_backoff.py', '_test_egress_backoff.py',
                    '_test_manual_weight.py', '_test_account_note.py', '_test_daily_chat.py',
                    '_test_closed_window_buckets.py', '_test_cold_window_scan.py',
-                   '_test_pricing_used_fingerprint.py', '_test_usage_bytes_prefilter.py', '_test_recent_index.py')
+                   '_test_pricing_used_fingerprint.py', '_test_usage_bytes_prefilter.py', '_test_recent_index.py',
+                   '_test_catalog_refresh.py', '_test_remote_catalog.py', '_test_pricing_auto.py',
+                   '_test_settings_preservation.py', '_test_analytics_hour_buckets.py', '_test_usage_aggregate_cache.py',
+                   '_test_agents.py', '_test_desktop_atrest.py')
 
 
 def main():
@@ -56,6 +60,7 @@ def main():
     shutil.copytree(upstream, gateway, ignore=shutil.ignore_patterns(
         '.git', '__pycache__', 'accounts', 'usage', '.ops-patch-backups', '.ops-patch-state.json', '.ops-patch.lock'))
     bundle.apply(gateway)
+    prepare_test_fixtures(gateway)
     for path in gateway.glob('wb_*.py'):
         ast.parse(path.read_text(encoding='utf8'), filename=path.name)
     env = dict(os.environ)

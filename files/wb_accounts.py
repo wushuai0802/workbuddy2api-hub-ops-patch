@@ -3616,7 +3616,9 @@ def scan_desktop_credentials():
                         key = None
                 if key is None:
                     item["needsKey"] = True
-                    item["error"] = "凭据已加密：先点「回收密钥」，再回来导入"
+                    item["error"] = ("凭据已加密：先点「回收密钥」，再回来导入"
+                                     if wb_atrest.hunt_supported()
+                                     else "凭据已加密：" + wb_atrest.hunt_hint())
                     found.append(item)
                     continue
                 token = wb_atrest.decrypt_field(key, raw) or ""

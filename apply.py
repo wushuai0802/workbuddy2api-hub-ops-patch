@@ -24,11 +24,12 @@ DEPENDENCIES = {
     "dashboard.html", "wb_activity.py", "wb_agents.py",
     "wb_atrest.py", "wb_catalog.py", "wb_egress.py", "wb_fingerprint.py", "wb_identity.py",
     "wb_ipintel.py", "wb_modelsdev.py", "wb_pricing.py", "wb_probes.py",
+    "wb_logstore.py",
     "wb_prompt.py", "wb_scheduler.py", "wb_settings.py", "wb_tasks.py",
     "wb_updates.py", "wb_webagent.py",
 }
-BASE_TAG = "v1.7.3"
-UPSTREAM_COMMIT = "c7dad8fe32316d47ce4f0ff260bb7ac7802b8a94"
+BASE_TAG = "v1.7.5"
+UPSTREAM_COMMIT = "762982531fae2d58aacfaa78c989a873f06206df"
 
 
 def digest(data):
