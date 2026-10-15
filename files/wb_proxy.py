@@ -251,6 +251,46 @@ UPSTREAM = "https://www.workbuddy.ai"
 CHAT_PATH = "/v2/chat/completions"
 MODELS_PATH = "/v2/enterprises/personal/models"
 DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant."
+
+# ---------------------------------------------------------------------------
+# Background-model redirection (desktop clients).
+#
+# A desktop client's model picker only governs the MAIN chat thread. Its
+# built-in "model routing config" (codex-apps/protocol/src/model-routing-config.ts)
+# sends background work - memory generation, ambient suggestions, ephemeral
+# generation, automations - to its own hard-coded models. Those requests hit
+# this gateway on the same key as normal traffic, so they keep burning paid
+# credits even when a free model is selected in the UI.
+#
+# Rewrite them to a free target so the client features keep working without
+# spending credits. Override without editing code:
+#   WB_BACKGROUND_MODEL_NAMES="gpt-5.6-terra,gpt-5.6-luna,gpt-5.3-codex"
+#   WB_BACKGROUND_MODEL_TARGET="deepseek-v4.1-flash"
+# ---------------------------------------------------------------------------
+BACKGROUND_MODEL_TARGET = os.environ.get("WB_BACKGROUND_MODEL_TARGET", "deepseek-v4.1-flash")
+BACKGROUND_MODEL_NAMES = tuple(
+    m.strip().lower()
+    for m in os.environ.get(
+        "WB_BACKGROUND_MODEL_NAMES",
+        "gpt-5.6-terra,gpt-5.6-luna,gpt-5.3-codex",
+    ).split(",")
+    if m.strip()
+)
+
+
+def _apply_background_model_alias(payload):
+    """Rewrite known client background-task models to a free target model."""
+    if not isinstance(payload, dict):
+        return
+    name = payload.get("model")
+    if not isinstance(name, str):
+        return
+    if name.strip().lower() not in BACKGROUND_MODEL_NAMES:
+        return
+    payload["model"] = BACKGROUND_MODEL_TARGET
+    log("alias: background model %s -> %s" % (name, BACKGROUND_MODEL_TARGET))
+
+
 # The WorkBuddy AI desktop app caches its account product config here on every
 # launch. That file carries the real model catalog the app shows in its picker
 # (21 models, incl. deepseek-v4.1-flash / gpt-6-astra) - the CLI-facing
@@ -9810,7 +9850,7 @@ def runtime_settings_view():
         "accounts_dir": ACCOUNTS_DIR,
         "usage_dir": USAGE_DIR,
         "settings_file": wb_settings.settings_path(ACCOUNTS_DIR),
-        "version": "1.7.5",
+        "version": "1.7.6",
     }
 def current_account():
     """Account used for display purposes (health / usage summaries)."""
@@ -10980,7 +11020,7 @@ def _patch_payload_fingerprint():
     return hashlib.sha256(''.join(records).encode('ascii')).hexdigest()
 
 _OPS_PATCH_FINGERPRINT = _patch_payload_fingerprint()
-_OPS_PATCH_ID = "v1.7.5-ops.20261015.1"
+_OPS_PATCH_ID = "v1.7.6-ops.20261015.1"
 _OBSERVATION_STORE = None
 _OBSERVATION_STORE_LOCK = threading.Lock()
 
@@ -17612,7 +17652,7 @@ class Handler(BaseHTTPRequestHandler):
             super().finish()
         except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
             pass
-    server_version = "wb-proxy/1.7.5"
+    server_version = "wb-proxy/1.7.6"
     def log_message(self, fmt, *args):
         # 静默过滤前端看板高频定时心跳的正常 200 GET 请求（/logs、/usage、/accounts 轮询等）
         # 避免自增死循环刷屏与日志污染。遇 4xx/5xx 异常或所有非 GET 业务操作依然如实记录。
@@ -20909,6 +20949,19 @@ class Handler(BaseHTTPRequestHandler):
                     401, "missing or invalid API key", "authentication_error")
         elif not self._authorized():
             return
+        # Fail closed until the Anthropic-to-Chat bridge has verified prompt-cache
+        # parity. Reject before forwarding or recording any paid usage.
+        if is_messages_route and os.environ.get(
+                "WB_ENABLE_ANTHROPIC_MESSAGES", "").strip().lower() not in (
+                "1", "true", "yes", "on"):
+            return self._anthropic_error(
+                400,
+                "Anthropic Messages is disabled by default: this gateway "
+                "translates requests to Chat Completions and ignores "
+                "cache_control. This can cause excessive credit consumption. "
+                "Set WB_ENABLE_ANTHROPIC_MESSAGES=1 to opt in at your own risk "
+                "(see issue #367).",
+                "invalid_request_error")
         payload = self._payload_or_error(allow_list=(path == "/accounts/import"))
         if payload is None:
             return
@@ -20919,6 +20972,7 @@ class Handler(BaseHTTPRequestHandler):
                          "invalid_request_error")
         if is_account_route:
             return self._handle_accounts(path, payload)
+        _apply_background_model_alias(payload)
         if is_messages_route:
             if path.endswith("/count_tokens"):
                 return self._handle_messages_count_tokens(payload)

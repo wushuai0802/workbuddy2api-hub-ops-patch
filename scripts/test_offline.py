@@ -27,7 +27,7 @@ PATCH_SUITES = ('test_installer.py', 'test_wb_stall.py', 'test_mixed_stall_proxy
                 '_test_401_refresh.py', '_test_deepseek_multimodal.py', '_test_deepseek_reasoning_compaction.py',
                 'test_integration.py', 'test_loop_recovery.py', 'test_reasoning_recovery.py',
                 'test_nullable_buffer.py', 'test_metadata_buffer.py', 'test_compact_buffer.py',
-                'test_extra_fields.py', 'test_sse_framing.py', 'test_buffer_records.py', 'test_recovery_hint.py')
+                'test_extra_fields.py', 'test_sse_framing.py', 'test_buffer_records.py', 'test_recovery_hint.py', 'test_v176.py')
 UPSTREAM_SUITES = ('_test_upstream_repairs.py', '_test_namespace_tools.py', '_test_reasoning_backfill.py',
                    '_test_anthropic_messages.py', '_test_tool_choice_none.py',
                    '_test_upstream_pool.py', '_test_remaining_usage.py', '_test_streak_report.py',
@@ -41,7 +41,7 @@ UPSTREAM_SUITES = ('_test_upstream_repairs.py', '_test_namespace_tools.py', '_te
                    '_test_pricing_used_fingerprint.py', '_test_usage_bytes_prefilter.py', '_test_recent_index.py',
                    '_test_catalog_refresh.py', '_test_remote_catalog.py', '_test_pricing_auto.py',
                    '_test_settings_preservation.py', '_test_analytics_hour_buckets.py', '_test_usage_aggregate_cache.py',
-                   '_test_agents.py', '_test_desktop_atrest.py')
+                   '_test_agents.py', '_test_desktop_atrest.py', '_test_background_model_alias.py')
 
 
 def main():
@@ -71,7 +71,8 @@ def main():
                API_KEY='', WB_PROXY_KEY='', WB_OPS_ALLOW_PROMPT_DEGRADE='0', WB_OPS_LOOP_RECOVERY_HINT='0')
     for name in ('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy'):
         env.pop(name, None)
-    for name in ('WB_SEARCH_ENDPOINT', 'WB_OPS_BING_FALLBACK'):
+    for name in ('WB_SEARCH_ENDPOINT', 'WB_OPS_BING_FALLBACK',
+                 'WB_BACKGROUND_MODEL_NAMES', 'WB_BACKGROUND_MODEL_TARGET'):
         env.pop(name, None)
     env['NO_PROXY'] = '127.0.0.1,localhost,::1'
     env['PYTHONPATH'] = os.pathsep.join((str(ROOT / 'tests/safety'), str(gateway), str(ROOT / 'tests')))
@@ -82,6 +83,9 @@ def main():
         started = time.monotonic()
         logfile = run / (path.stem + '.log')
         suite_env = dict(env, WB_OPS_LOOP_RETRY='0' if path.name == 'test_integration.py' else '1')
+        # Existing six-path protocol contracts exercise the explicit opt-in.
+        # Native/default-policy suites and v176 contracts control their own gate.
+        suite_env['WB_ENABLE_ANTHROPIC_MESSAGES'] = '1' if path.parent == ROOT / 'tests' and path.name != 'test_v176.py' else ''
         with logfile.open('w', encoding='utf8') as output:
             result = subprocess.run([sys.executable, '-B', str(path)], cwd=gateway, env=suite_env,
                                     stdout=output, stderr=subprocess.STDOUT, timeout=180)

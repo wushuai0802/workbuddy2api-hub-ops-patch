@@ -1,5 +1,5 @@
 {
-  "base_tag": "v1.7.5",
+  "base_tag": "v1.7.6",
   "compatibility": {
     "dashboard.html": "aeba724482c6968cd1f218c4ac63c1feba3e7738c93a93ad3abf345bbdbd6a83",
     "wb_activity.py": "da70fdd4b791198b9147d7624f734bcff396b5086a1736a75722c3e4b5ad69a9",
@@ -35,8 +35,8 @@
       "patched_sha256": "fe26ca2f939b33dae0b847e81731ef8b7ca21b156fb71df7fde3ed42538af20f"
     },
     "wb_proxy.py": {
-      "base_sha256": "f67bf8458babb66b5606f9461bef91949d53f2705165d528e681cf5ffbca2f65",
-      "patched_sha256": "7d9bde48ffd8e59d12a797e14d1201215cdd6e876438dd1724d89fe2188f8faf"
+      "base_sha256": "620bbc8c30ab2532dbeb00965bc565f0dc4d659a4de3f412e0eb000dd1c70e99",
+      "patched_sha256": "bfea0180e364c9843867d7eaeeeff4f63f0636e432067e78fe8c79fce626bb5e"
     },
     "wb_stall.py": {
       "base_sha256": null,
@@ -51,11 +51,11 @@
       "patched_sha256": "f3a09e170e9393592179638378781b72be075fb6c9596e847db01e4e11b154da"
     }
   },
-  "patch_id": "v1.7.5-ops.20261015.1",
+  "patch_id": "v1.7.6-ops.20261015.1",
   "patch_source": "wushuai0802/workbuddy2api-hub-ops-patch",
-  "payload_fingerprint": "6bcf6af164f2457215d526bbe0a75ec033351fa4b03ee2d44ddcc2071a5f46ae",
+  "payload_fingerprint": "d7780ac900164e638bb231e094173fcab75a932e8e22c6b859ac2ab4be8fddc3",
   "python_requires": ">=3.11",
   "repository": "https://github.com/ardeyouxipianyi/workbuddy2api-hub",
   "schema_version": 1,
-  "upstream_commit": "762982531fae2d58aacfaa78c989a873f06206df"
+  "upstream_commit": "7dbe11564c0c74a1d2cdb05791b313e339dddbf5"
 }

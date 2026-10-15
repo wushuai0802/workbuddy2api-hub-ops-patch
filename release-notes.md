@@ -1,22 +1,18 @@
-升级官方 **v1.7.5**，修复阶段超时冲突并完善纯推理循环的安全恢复。
+升级官方 **v1.7.6**，保留现有防复读、恢复、历史、协议与连接保护。
 
-- 补丁：`v1.7.5-ops.20261015.1`
-- 官方提交：`762982531fae2d58aacfaa78c989a873f06206df`
-- 下载：`workbuddy2api-hub-v1.7.5-wushuai0802-ops-20261015-r1.zip` 与 `SHA256SUMS.txt`
-- 响应头尊重面板设置，返回后开始45秒首帧预算；初始请求、恢复和网页工具后续生成共享原总期限，默认300秒。
-- 唯一一次安全纯推理循环恢复默认加入简短接续提示，只改出站副本；正文、拒答或工具后禁止重放。`WB_OPS_LOOP_RECOVERY_HINT=0`关闭提示。
-- 连续精确失败前缀最多清理16段/65536字符，最长匹配优先，保留未知后缀与客户端原历史。
-- 持久化匿名规则、窗口计数和恢复停止原因，不存原推理/提示词/工具参数/凭据。检测阈值保持。
-- 参考用户提供的v1.7.5-r2，细化引用片段保护以避免短工具名旁的复读漏检，并校验/复制累计用量，支持无total字段。
-- 保留混合守卫、引用反例、六路径用量、401期限、拒答、历史预算、工具图片、SSE限制及连接租约保护。
-- 保留官方默认关闭的SQLite日志、checkpoint修复、新主题/统计面板、每日/手动模型目录刷新、来源归档和实际倍率。模型列表/倍率显示遵循新目录行为。
-- 四个替换模块、三个新增模块；新增官方`wb_logstore.py`依赖需随完整基线构建。仅支持干净固定v1.7.5，旧补丁树不能直接覆盖。
-- 68组Python定向回归与39组官方Node面板测试；Linux3.11/3.12及Windows3.11最终结果以本版Actions为准。
+- 补丁：`v1.7.6-ops.20261015.1`
+- 官方提交：`7dbe11564c0c74a1d2cdb05791b313e339dddbf5`
+- 下载：`workbuddy2api-hub-v1.7.6-wushuai0802-ops-20261015-r1.zip` 与 `SHA256SUMS.txt`
+- 原生新增三个模型名的默认重定向。匹配不区分前台/后台，主动请求同名模型也会改写；`WB_BACKGROUND_MODEL_NAMES=""`关闭名单，`WB_BACKGROUND_MODEL_TARGET`自定义目标。
+- Messages及count_tokens默认在转发前返回400；原鉴权先执行。`WB_ENABLE_ANTHROPIC_MESSAGES=1`显式保留旧协议。转换层仍不透传cache_control，不能把此防护当成缓存修复。
+- 保留共享总期限与独立header/首帧预算、唯一安全循环恢复提示、连续精确失败前缀清理、引用片段保护、有效累计用量、独立401刷新、池租约与SSE字节上限、匿名观察。
+- 三方迁移四个替换模块及三个新增模块，准确依赖保持；只能安装到干净固定官方v1.7.6，不直接覆盖旧补丁树。
+- 70组Python定向回归（新增模型别名7项/入口兼容6项），官方39组Node面板套件；Linux3.11/3.12及Windows3.11结果以本版Actions为准。
 
-先保留旧镜像、源码、配置和数据，再在新目录应用完整补丁，定向重建唯一目标服务。公共请求体默认16MiB；较大需求需显式配置。Docker应持久化`/app/catalog`，或设置`WB_PROXY_CATALOG_DIR=/app/usage/catalog`复用usage挂载。SQLite日志沿用用户选择，不自动开启。checkpoint可能重建，原JSONL保持。
+公开包保留上游新默认。升级使用已有模型路由或Messages客户端时，显式选择兼容变量并保留原配置/挂载。公共入站默认16MiB，较大限制需显式配置。目录归档仍需持久化，SQLite日志保持原选择；模型、账号、配置、历史由使用者原部署保留。
 
-没有真实模型请求验证恢复率，无法保证模型不再复读；第二次循环仍会结束。通用跨工具回合业务进展熔断未实现，相关信号保持只观察。原Release/tag继续保留。
+先备份镜像/源码/配置/数据，再在独立准确基线安装、构建固定镜像，定向切换唯一服务。原Release/tag继续保留。没有额外调用真实模型验证长会话完成率；单流保护不能保证所有跨工具回合停滞消失。
 
-[中文说明](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/blob/v1.7.5-ops.20261015.1/README.md) · [安装与回滚](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/blob/v1.7.5-ops.20261015.1/docs/INSTALL.md) · [验证记录](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/blob/v1.7.5-ops.20261015.1/docs/VERIFICATION.md) · [GitHub Actions](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/actions/workflows/tests.yml)
+[说明与安装](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/blob/v1.7.6-ops.20261015.1/README.md) · [验证](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/blob/v1.7.6-ops.20261015.1/docs/VERIFICATION.md) · [Actions](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/actions/workflows/tests.yml)
 
-MIT，保留官方归属与附件来源说明。
+MIT，保留官方及历史附件来源说明。
