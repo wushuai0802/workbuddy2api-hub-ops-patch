@@ -11855,6 +11855,7 @@ def probe_first_frame(upstream, retry_call=None, tried=None, deadline_at=None, r
     deadline_at = deadline_at or time.monotonic() + FIRST_FRAME_DEADLINE
     for attempt in range(FIRST_FRAME_MAX_ATTEMPTS):
         timer = None
+        socket_deadline_limited = False
         try:
             _hold_stream_response(upstream)
             remaining = deadline_at - time.monotonic()
@@ -11863,6 +11864,7 @@ def probe_first_frame(upstream, retry_call=None, tried=None, deadline_at=None, r
             sock = _stream_socket(upstream)
             if sock is not None:
                 sock.settimeout(remaining)
+                socket_deadline_limited = True
             timer = threading.Timer(remaining, _interrupt_upstream, args=(upstream,))
             timer.daemon = True
             timer.start()
@@ -11925,7 +11927,12 @@ def probe_first_frame(upstream, retry_call=None, tried=None, deadline_at=None, r
                 raise
             if retry_call is None:
                 raise
-            if attempt + 1 >= FIRST_FRAME_MAX_ATTEMPTS or time.monotonic() >= deadline_at:
+            # A socket set to the remaining probe budget may expire one clock
+            # tick early on Windows. That is terminal phase expiry, not a
+            # spare budget for opening another upstream connection.
+            phase_expired = (time.monotonic() >= deadline_at or
+                             (socket_deadline_limited and isinstance(exc, socket.timeout)))
+            if attempt + 1 >= FIRST_FRAME_MAX_ATTEMPTS or phase_expired:
                 retry_bump("first_frame_giveup")
                 return None, None
             retry_bump("first_frame")

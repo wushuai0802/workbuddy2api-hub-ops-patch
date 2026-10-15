@@ -176,6 +176,33 @@ class PrefixTests(unittest.TestCase):
         self.assertEqual(cleaned[0]['reasoning'],'Useful.')
 
 
+class ProbeClockTests(unittest.TestCase):
+    def test_deadline_socket_timeout_never_opens_another_attempt_before_clock_tick(self):
+        source=Stream([],error=TimeoutError('synthetic early socket deadline'))
+        sock=mock.Mock()
+        retry=mock.Mock()
+        with mock.patch.object(wb.time,'monotonic',return_value=100.), \
+             mock.patch.object(wb,'_stream_socket',return_value=sock),mock.patch.object(wb,'retry_bump'):
+            result=wb.probe_first_frame(source,retry_call=retry,deadline_at=110.)
+        self.assertEqual(result,(None,None))
+        sock.settimeout.assert_called_once_with(10.)
+        retry.assert_not_called()
+        self.assertTrue(source.closed)
+
+    def test_early_non_timeout_transport_failure_keeps_safe_probe_retry(self):
+        source=Stream([],error=ConnectionResetError('synthetic early reset'))
+        good=Stream(turn({'content':'answer'}))
+        retry=mock.Mock(return_value=(good,Account('b')))
+        with mock.patch.object(wb.time,'monotonic',return_value=100.), \
+             mock.patch.object(wb,'_stream_socket',return_value=mock.Mock()),mock.patch.object(wb,'retry_bump'):
+            result,account=wb.probe_first_frame(source,retry_call=retry,deadline_at=110.)
+        try:
+            self.assertIn(b'answer',b''.join(result))
+            self.assertEqual(account.uid,'b')
+            retry.assert_called_once()
+        finally:wb._close_upstream(result)
+
+
 class RecoveryDefaultsTests(unittest.TestCase):
     def test_default_hint_is_one_detached_attempt_in_all_six_paths(self):
         original=os.environ.pop('WB_OPS_LOOP_RECOVERY_HINT',None)
