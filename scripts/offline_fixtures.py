@@ -25,7 +25,22 @@ def prepare_test_fixtures(gateway):
     assert source.count(old) == 1, 'pinned extension-module fixture changed'
     source = source.replace(old, '("Lib/%s/__init__.py" % m) not in covered '
                            'and ("DLLs/%s.pyd" % m) not in covered]')
+    # This is a Windows portable-runtime contract even on Linux runners.
+    # math/zlib are linked into the target python DLL; Linux exposes them as
+    # extensions. Keep the missing-dependency assertion for all other imports.
+    old = 'if m not in local and m not in sys.builtin_module_names)'
+    assert source.count(old) == 1, 'pinned Windows builtin profile changed'
+    source = source.replace(old, 'if m not in local and m not in '
+                           '(sys.builtin_module_names + ("math", "zlib")))')
     assets.write_text(source, encoding='utf8')
+
+    # The harness checks parent-before-child relationships, but its synthetic
+    # /proc fixture assumes numeric sibling order. tmpfs readdir is unordered.
+    contracts = gateway / 'tests/_test_run_all_contracts.py'
+    source = contracts.read_text(encoding='utf8')
+    old = 'names = [n for n in os.listdir(proc_root) if n.isdigit()]'
+    assert source.count(old) == 1, 'pinned process-table fixture changed'
+    contracts.write_text(source.replace(old, 'names = sorted(n for n in os.listdir(proc_root) if n.isdigit())'), encoding='utf8')
     # These suites rebind the parent's hardcoded ACCOUNTS_DIR, but the inline
     # child runner omits that rebind. Keep both pricing/realm fingerprints on
     # their synthetic directory rather than the gateway's empty default dir.
