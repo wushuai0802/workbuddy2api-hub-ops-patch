@@ -28,8 +28,8 @@ DEPENDENCIES = {
     "wb_prompt.py", "wb_scheduler.py", "wb_settings.py", "wb_tasks.py",
     "wb_updates.py", "wb_webagent.py",
 }
-BASE_TAG = "v1.7.6"
-UPSTREAM_COMMIT = "7dbe11564c0c74a1d2cdb05791b313e339dddbf5"
+BASE_TAG = "v1.7.8"
+UPSTREAM_COMMIT = "1631d4cf091a50820e8aae8da07e58be24b2563e"
 
 
 def digest(data):

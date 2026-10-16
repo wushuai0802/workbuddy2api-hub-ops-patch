@@ -12,7 +12,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from wb_fingerprint import derive_id, generate_request_id
+from wb_fingerprint import derive_id, generate_request_id, session_id
 import wb_activity
 import wb_atrest
 import wb_identity
@@ -46,7 +46,11 @@ WEB_USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 
 DAILY_CHAT_MODEL = "deepseek-v4.1-flash"
 DAILY_CHAT_WEB_PROMPT = "Hi"
 #: 网页通道一轮最多等多久（秒）。实测一次「Hi」十几秒就跑完，留足余量。
+#: 没配 settings 的账号（如单测里手工构造的）用它兜底。
 WEB_TURN_TIMEOUT = int(os.environ.get("WB_WEB_TURN_TIMEOUT") or "120")
+#: 网页通道一共试几次（含第一轮）。第 N 轮的等待是首轮的 2^(N-1) 倍，所以
+#: 3 次 = 最多等 base×(1+2+4) 秒。设置页可改（见 wb_settings.daily_chat_web_attempts）。
+WEB_TURN_ATTEMPTS = 3
 
 
 def _retryable(exc):
@@ -617,6 +621,16 @@ SOFT_RATE_UNVERIFIED_MAX = 600.0
 BREAKER_THRESHOLD = 3           # consecutive hard failures before the breaker
 BREAKER_COOLDOWN = 1800.0       # first breaker window: 30 minutes
 BREAKER_COOLDOWN_MAX = 21600.0  # ... doubling up to 6 hours
+# 上面那个「连续」必须有时间含义：老实现只认次数、不认间隔，fails 只有成功才
+# 归零，于是同一条凭据几小时前的一次 502 + 几天前的一次超时 + 刚才一次抖动就凑成
+# 「连续 3 次」，把账号关 30 分钟——而且关得越久下次越容易再凑满（1800 → 3600 →
+# 7200…）。生产上的表现就是「明明测了能用，它还熔断」。现在两次失败间隔超过这个
+# 窗口就重新从 1 数起，连续才真的是连续。可用 WB_FAIL_WINDOW 覆盖，设 0 关闭衰减
+# （回到旧的累计行为）。
+try:
+    FAIL_WINDOW = max(0.0, float(os.environ.get("WB_FAIL_WINDOW") or 600.0))
+except (TypeError, ValueError):
+    FAIL_WINDOW = 600.0
 DEGRADE_THRESHOLD = 5           # consecutive unknown failures before degrading
 DEGRADE_COOLDOWN = 600.0        # first degrade window: 10 minutes
 DEGRADE_COOLDOWN_MAX = 7200.0   # ... doubling up to 2 hours
@@ -730,6 +744,12 @@ class Account(object):
         # otherwise a single throttled model blackholes every request on the pool.
         # Deliberately runtime-only (not persisted): see VOLATILE_FIELDS.
         self.model_cooldowns = {}
+        # 每个模型冷却窗口是**什么时候挂上的**（model -> epoch）。model_cooldowns
+        # 只留恢复时刻，起始时刻以前被丢掉：面板因此无法如实说「限流时刻」，只能
+        # 用「—」占位，把 60s 的短时 parking 和几小时的 6004 撞线画成一样。与
+        # model_cooldowns 同款运行时态：重启即清零（6004 的撞线时刻另有持久化的
+        # model_caps["at"]）。
+        self.model_cooldowns_at = {}
 # 402 (out of credits): a hard park until the next local 04:00,
         # instead of a short cooldown that would retry an empty account all
         # day. Runtime-only, like the other throttle windows; a balance
@@ -746,6 +766,8 @@ class Account(object):
         self.degrade_count = 0
         self.breaker_until = 0.0
         self.degrade_until = 0.0
+        # 最近一次记失败的时刻：FAIL_WINDOW 用它判断「连续」是否还成立。
+        self.last_fail_at = 0.0
         self.credits = data.get("credits") or None
         self.last_checkin = data.get("lastCheckin") or None
         self.last_daily_chat = data.get("lastDailyChat") or None
@@ -876,6 +898,11 @@ class Account(object):
         models = []
         for model, until in active:
             entry = {"model": model, "expiresAt": int(until)}
+            # 这个窗口是何时挂上的：面板据此把「限流时刻」如实画出来，而不是拿
+            # 「—」占位（临时 429 与 6004 撞线都由此有真实的时间语义）。
+            started = self.model_cooldowns_at.get(model)
+            if started:
+                entry["startedAt"] = int(started)
             # 撞线时间只在 cap 还在恢复期内时带上：它同时说明这次禁用是
             # 「额度用满」（6004）而不是一次临时限流，面板据此显示两段时间。
             if self.cap_until(model, now) > 0:
@@ -917,6 +944,11 @@ class Account(object):
             "unscopedStreak": int(self.unscoped_streak),
             "breakerFor": round(max(0.0, self.breaker_until - now)) or None,
             "degradeFor": round(max(0.0, self.degrade_until - now)) or None,
+            # 连续失败计数（离熔断还差几次）与最近一次失败的时间：面板用它解释
+            # 「为什么这个账号被关了」，也是「一键测试」判定成功/失败的依据。
+            "fails": int(self.fails),
+            "failWindow": int(FAIL_WINDOW),
+            "lastFailFor": (round(max(0.0, now - self.last_fail_at)) if self.last_fail_at else None),
             "addedAt": self.added_at,
             "file": os.path.basename(self.path) if self.path else None,
             "credits": self.credits,
@@ -944,7 +976,7 @@ class Account(object):
             "canDailyChat": self.realm == "intl",
             "canReportActivity": self.realm == "cn" and not self.is_enterprise(),
             "machineId": derive_id(self.uid, "machine"),
-            "sessionId": derive_id(self.uid, "session"),
+            "sessionId": session_id(self.uid),
         }
 
     def save(self, directory):
@@ -1309,6 +1341,15 @@ class Account(object):
 
         chat 用途走 wb_identity（CLI 头 / WorkBuddy 头，可切换）；
         billing 用途维持原本的轻量标头，计费端点不吃那套身分。
+
+        chat 标头按 5.8.4 抓包对齐：官方对话请求不带 X-Machine-ID /
+        X-Session-ID（那两个只用于反馈上报），所以这里也不再发——之前发的
+        是每个账号恒定的派生值，反而是一处「网关特征」。
+
+        billing 标头仍带 X-Machine-ID / X-Session-ID，但两个都必须按账号派生：
+        网关是一个进程冒充几十台设备，一旦取进程级的值，全部账号就会共用同一个
+        session id，那是一条把它们串起来的关联键（与每账号一台设备的隔离口径
+        相悖）。见 wb_fingerprint.session_id。
         """
         cfg = get_realm_config(self.realm)
 
@@ -1327,7 +1368,7 @@ class Account(object):
                 "Accept-Language": "en-US" if self.realm == "intl" else "zh-CN",
                 "X-Request-ID": generate_request_id(self.uid),
                 "X-Machine-ID": derive_id(self.uid, "machine"),
-                "X-Session-ID": derive_id(self.uid, "session"),
+                "X-Session-ID": session_id(self.uid),
             }
             if self.enterprise_id:
                 headers["X-Enterprise-Id"] = self.enterprise_id
@@ -1346,7 +1387,6 @@ class Account(object):
             realm=self.realm,
             uid=self.uid,
             token=self.access_token,
-            conversation_id=getattr(self, "conversation_id", None),
             enterprise_id=self.enterprise_id,
             tenant_id=self.enterprise_id,
         )
@@ -1358,8 +1398,6 @@ class Account(object):
             "Referer": cfg["origin"] + "/",
             "X-CodeBuddy-Request": "1",
             "Accept-Language": "en-US" if self.realm == "intl" else "zh-CN",
-            "X-Machine-ID": derive_id(self.uid, "machine"),
-            "X-Session-ID": derive_id(self.uid, "session"),
         }
         headers.update(identity)
         device_token = self._device_token()
@@ -1534,11 +1572,26 @@ class Account(object):
         legs (the desktop-identity completion and the web conversation) read
         this, so one setting moves the whole activity.
         """
+        candidates = []
         if self.path:
             picked = wb_settings.daily_chat_model(os.path.dirname(self.path))
             if picked:
-                return picked
-        return DAILY_CHAT_MODEL
+                candidates.append(picked)
+        candidates.append(DAILY_CHAT_MODEL)
+        # Add fallback free models for the account's realm if preferred model is cooling down
+        if self.realm == "intl":
+            candidates.extend(["hy3", "hy4-preview-f", "hy4-preview", "glm-5.3-flash"])
+        else:
+            candidates.extend(["hy3", "hy4-preview-f", "hy4-preview"])
+
+        now = time.time()
+        with self._throttle_lock:
+            for cand in candidates:
+                # Check model-level cooldown or cap directly
+                cooldown_until = self.model_cooldowns.get(cand, 0.0)
+                if cooldown_until <= now and self.cap_until(cand, now) <= 0.0:
+                    return cand
+        return candidates[0]
 
     def daily_chat_web(self, prompt=None, trigger="unknown"):
         """网页通道的每日活跃会话（issue #75 / #59 / #90）。
@@ -1561,7 +1614,51 @@ class Account(object):
         return res
 
     def _daily_chat_web_upstream(self, prompt=None):
-        """网页通道的实际流程；返回形状见 daily_chat_web。"""
+        """网页通道的实际流程；返回形状见 daily_chat_web。
+
+        失败会再试（见 daily_chat_web_policy）：一共最多 attempts 次（含第一轮），
+        第 N 轮的等待是首轮的 2^(N-1) 倍 —— 默认 3 次、首轮 120 秒，也就是
+        120 / 240 / 480。最典型的失败是「会话还没跑完」（状态=working），它往往
+        只是慢，多等一轮就好，所以这里把等待时间当成重试的代价，不再额外 sleep。
+        业务拒绝（建会话返回非 0 code）不再试：同一个被拒的请求再发一次也一样被拒。
+
+        返回里带 attempts（实际跑了几轮），其余字段与 _daily_chat_web_once 一致。
+        """
+        base, total = self.daily_chat_web_policy()
+        attempt = 0
+        while True:
+            res = self._daily_chat_web_once(prompt, wait_seconds=base * (2 ** attempt))
+            res["attempts"] = attempt + 1
+            if res.get("ok") or attempt + 1 >= total or not res.get("retryable"):
+                return res
+            attempt += 1
+
+    def daily_chat_web_policy(self):
+        """(首轮等待秒数, 总尝试次数)。设置页改过就按设置页的来。
+
+        重试开关默认开（见 wb_settings.daily_chat_web_retry），关掉就是只试一次。
+        等待时间没设过时用 WEB_TURN_TIMEOUT —— 它吃 WB_WEB_TURN_TIMEOUT 环境变量，
+        别让这个新设置项把它悄悄顶掉。没配 settings 的账号（单测里手工构造的）
+        同样按内置默认走。
+        """
+        if not self.path:
+            return WEB_TURN_TIMEOUT, WEB_TURN_ATTEMPTS
+        directory = os.path.dirname(self.path)
+        total = 1
+        if wb_settings.daily_chat_web_retry(directory):
+            total = wb_settings.daily_chat_web_attempts(directory,
+                                                        default=WEB_TURN_ATTEMPTS)
+        return (wb_settings.daily_chat_web_timeout(directory, default=WEB_TURN_TIMEOUT),
+                total)
+
+    def _daily_chat_web_once(self, prompt=None, wait_seconds=None):
+        """网页通道的一轮尝试；返回形状见 daily_chat_web。
+
+        结果里的 retryable 说明这一轮的失败值不值得再试一次（重试策略见
+        _daily_chat_web_upstream）。
+        """
+        if wait_seconds is None:
+            wait_seconds = WEB_TURN_TIMEOUT
         model = self.daily_chat_model()
         body = {
             "prompt": prompt or DAILY_CHAT_WEB_PROMPT,
@@ -1582,40 +1679,44 @@ class Account(object):
                 detail = exc.read().decode("utf-8", "replace")
             except Exception:
                 detail = str(exc)
-            return {"ok": False, "error": "HTTP %d: %s" % (exc.code, detail[:120])}
+            return {"ok": False, "error": "HTTP %d: %s" % (exc.code, detail[:120]),
+                    "retryable": exc.code >= 500 or exc.code in (408, 429)}
         except Exception as exc:
-            return {"ok": False, "error": str(exc)}
+            return {"ok": False, "error": str(exc), "retryable": True}
         if not isinstance(payload, dict):
-            return {"ok": False, "error": "unexpected response"}
+            return {"ok": False, "error": "unexpected response", "retryable": True}
         conversation = (payload.get("data") or {}).get("id")
         if payload.get("code") not in (0, None) or not conversation:
             return {"ok": False, "error": "code=%s msg=%s"
-                    % (payload.get("code"), payload.get("msg"))}
+                    % (payload.get("code"), payload.get("msg")),
+                    "retryable": False}
 
         # 建完只是排队：接上沙箱、请求这一轮，它才会真的跑起来（issue #90）。
         try:
             session = (self._web_conversation_get(conversation, "/session") or {}).get("data") or {}
         except Exception as exc:
             return {"ok": False, "conversation": conversation,
-                    "error": "session 查询失败: %s" % exc}
+                    "error": "session 查询失败: %s" % exc, "retryable": True}
         link = session.get("link") or session.get("endpoint") or ""
         token = session.get("token") or ""
         session_id = session.get("sessionId") or session.get("session_id") or conversation
         cwd = session.get("cwd") or "/workspace"
         if not link or not token:
             return {"ok": False, "conversation": conversation,
-                    "error": "沙箱未就绪（没有 link/token）"}
+                    "error": "沙箱未就绪（没有 link/token）", "retryable": True}
 
         result = wb_webagent.run_turn(
             link, token, session_id, cwd, prompt or DAILY_CHAT_WEB_PROMPT,
             WEB_USER_AGENT,
             poll_status=lambda: self._web_conversation_status(conversation),
-            wait_seconds=WEB_TURN_TIMEOUT, proxy=self.proxy,
+            wait_seconds=wait_seconds, proxy=self.proxy,
             model=model)
         result["conversation"] = conversation
         if result.get("ok"):
             result["msg"] = "网页通道会话跑完：%d 段输出，%d ms" % (
                 result.get("chunks") or 0, result.get("elapsed_ms") or 0)
+        else:
+            result["retryable"] = True
         return result
 
     def _web_conversation_get(self, conversation, suffix=""):
@@ -1682,16 +1783,23 @@ class Account(object):
                 result["web"] = res
                 web_ok = bool(res.get("ok"))
                 if web_ok:
-                    result["msg"] = ("每日活跃对话成功完成（网页通道 %s：%d 段输出，%d ms）"
-                                     % (res.get("status") or "completed",
+                    # 重试过就把轮数带上：光看「成功」分不清是首轮就跑完，还是
+                    # 前几轮超时、多等了一轮才跑完（后者是慢，不是没跑）。
+                    tries = res.get("attempts") or 1
+                    retried = "（重试 %d 次后）" % (tries - 1) if tries > 1 else ""
+                    result["msg"] = ("每日活跃对话成功完成（网页通道%s %s：%d 段输出，%d ms）"
+                                     % (retried, res.get("status") or "completed",
                                         res.get("chunks") or 0, res.get("elapsed_ms") or 0))
                 else:
                     # 桌面腿成功不等于当天打卡完成：计入官方「每日活跃」的只有网页腿
                     # （#75/#59/#90）。面板与活动历史按 ok 画成功/失败，网页腿失败却
                     # 报成功的话，「今天这 30/50 积分没到账」在界面上一直看不见。
+                    tries = res.get("attempts") or 1
+                    suffix = "（已重试 %d 次）" % (tries - 1) if tries > 1 else ""
                     result["ok"] = False
-                    result["error"] = "网页通道失败：%s" % res.get("error")
-                    result["msg"] = "每日活跃对话未完成（网页通道失败：%s）" % res.get("error")
+                    result["error"] = "网页通道失败：%s%s" % (res.get("error"), suffix)
+                    result["msg"] = "每日活跃对话未完成（网页通道失败：%s%s）" % (
+                        res.get("error"), suffix)
             # 只有真正计入官方「每日活跃」的网页通道成功了才算今天做过：网页腿失败时
             # 若照写 lastDailyChat，当天后续巡检会直接跳过该账号，那天的 30/50 积分静默
             # 丢掉且不再重试。web=False（没开网页通道）时维持原语义：桌面腿成功即算完成。
@@ -2220,7 +2328,11 @@ class Account(object):
                 # Model-scoped throttle: keep the account usable for every other model.
                 wait = max(1.0, float(until) - time.time()) if until else (
                     3.0 if single_account else float(cooldown))
-                self.model_cooldowns[model] = time.time() + wait
+                now = time.time()
+                self.model_cooldowns[model] = now + wait
+                # 起始时刻：面板要如实说「限流时刻 + 恢复时间」，而恢复时刻减不出
+                # 起始时刻（wait 来自 60s→10m 的阶梯，不落库）。记这一次就够了。
+                self.model_cooldowns_at[model] = now
                 return
             actual_cooldown = 3 if single_account else cooldown
             self.cooldown_until = time.time() + actual_cooldown
@@ -2288,16 +2400,29 @@ class Account(object):
         """5xx / transport failure: feed the breaker counter."""
         with self._throttle_lock:
             self.last_error = str(message)[:200]
+            self._decay_strikes()
             self.fails += 1
             if self.fails >= BREAKER_THRESHOLD:
                 wait = breaker_backoff(self.fails)
                 self.breaker_until = max(self.breaker_until, time.time() + wait)
         return self.breaker_until
 
+    def _decay_strikes(self):
+        """两次失败隔得太久就不再算「连续」，从头计数。
+
+        调用方必须已持有 _throttle_lock。窗口设 0 时保持旧的累计语义。
+        """
+        now = time.time()
+        if FAIL_WINDOW and self.last_fail_at and now - self.last_fail_at > FAIL_WINDOW:
+            self.fails = 0
+            self.degrade_count = 0
+        self.last_fail_at = now
+
     def note_unknown_failure(self, message):
         """Unknown error: degrade counter plus the shared breaker counter."""
         with self._throttle_lock:
             self.last_error = str(message)[:200]
+            self._decay_strikes()
             self.degrade_count += 1
             self.fails += 1
             now = time.time()
@@ -2314,10 +2439,12 @@ class Account(object):
         with self._throttle_lock:
             if model:
                 self.model_cooldowns.pop(model, None)
+                self.model_cooldowns_at.pop(model, None)
             self.soft_streak = 0
             self.unscoped_streak = 0
             self.fails = 0
             self.degrade_count = 0
+            self.last_fail_at = 0.0
             self.breaker_until = 0.0
             self.degrade_until = 0.0
             self.last_error = ""
@@ -2348,13 +2475,16 @@ self.balance_until - now, self.breaker_until - now, self.degrade_until - now)
             if model:
                 if not (keep_caps and self.cap_until(model) > 0):
                     self.model_cooldowns.pop(model, None)
+                    self.model_cooldowns_at.pop(model, None)
             elif keep_caps:
                 now = time.time()
                 for mid in [m for m in self.model_cooldowns
                             if self.cap_until(m, now) <= 0]:
                     self.model_cooldowns.pop(mid, None)
+                    self.model_cooldowns_at.pop(mid, None)
             else:
                 self.model_cooldowns.clear()
+                self.model_cooldowns_at.clear()
             if (self.last_error or self.cooldown_until
                     or self.last_error_detail or self.balance_until):
                 self.last_error = ""

@@ -29,7 +29,7 @@ def main():
     shutil.copy2(upstream / 'dashboard.html', gateway / 'dashboard.html')
     shutil.copytree(upstream / 'tests', gateway / 'tests', ignore=shutil.ignore_patterns('__pycache__'))
     suites = sorted((gateway / 'tests').glob('_test_*.js'))
-    assert len(suites) == 39, 'pinned dashboard suite inventory changed'
+    assert len(suites) == 41, 'pinned dashboard suite inventory changed'
     env = {key: val for key, val in os.environ.items()
            if key.upper() not in ('API_KEY', 'WB_PROXY_KEY', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NODE_OPTIONS')
            and not key.startswith('WB_')}

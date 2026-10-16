@@ -1,18 +1,20 @@
-升级官方 **v1.7.6**，保留现有防复读、恢复、历史、协议与连接保护。
+升级官方 **v1.7.8**，迁移现有防复读与恢复补丁，并补齐缓存用量及断网期限边界。
 
-- 补丁：`v1.7.6-ops.20261015.1`
-- 官方提交：`7dbe11564c0c74a1d2cdb05791b313e339dddbf5`
-- 下载：`workbuddy2api-hub-v1.7.6-wushuai0802-ops-20261015-r1.zip` 与 `SHA256SUMS.txt`
-- 原生新增三个模型名的默认重定向。匹配不区分前台/后台，主动请求同名模型也会改写；`WB_BACKGROUND_MODEL_NAMES=""`关闭名单，`WB_BACKGROUND_MODEL_TARGET`自定义目标。
-- Messages及count_tokens默认在转发前返回400；原鉴权先执行。`WB_ENABLE_ANTHROPIC_MESSAGES=1`显式保留旧协议。转换层仍不透传cache_control，不能把此防护当成缓存修复。
-- 保留共享总期限与独立header/首帧预算、唯一安全循环恢复提示、连续精确失败前缀清理、引用片段保护、有效累计用量、独立401刷新、池租约与SSE字节上限、匿名观察。
-- 三方迁移四个替换模块及三个新增模块，准确依赖保持；只能安装到干净固定官方v1.7.6，不直接覆盖旧补丁树。
-- 70组Python定向回归（新增模型别名7项/入口兼容6项），官方39组Node面板套件；Linux3.11/3.12及Windows3.11结果以本版Actions为准。
+- 补丁：`v1.7.8-ops.20261016.1`
+- 官方提交：`1631d4cf091a50820e8aae8da07e58be24b2563e`
+- 下载：`workbuddy2api-hub-v1.7.8-wushuai0802-ops-20261016-r1.zip` 与 `SHA256SUMS.txt`
+- 纳入5.8.4国际版会话/追踪头及按账号隔离身份，针对上游11-128渠道校验；离线合同不代表所有线上错误已根除。
+- 纳入失败计数时间窗、本机断网不惩罚账号、每日活跃网页可配置重试、未活跃名单补跑、冷却/配额模型回退、GPT最小输出16与413提示、新面板测试及DSH思考档位。
+- 完善补丁Chat/Responses输出的缓存命中标准字段；响应独立于原始记账快照，保留provider原值和明细，不为收集用量多读上游。
+- 新断网重试等待受原deadline约束；保留原混合/引用守卫、唯一安全恢复、连续失败前缀、阶段/总期限、401、池租约、SSE和匿名观察。
+- 80组Python定向回归与41组官方Node面板测试，含新增身份/治理/活跃任务/缓存反例；Linux3.11/3.12与Windows3.11结果以本版Actions为准。
 
-公开包保留上游新默认。升级使用已有模型路由或Messages客户端时，显式选择兼容变量并保留原配置/挂载。公共入站默认16MiB，较大限制需显式配置。目录归档仍需持久化，SQLite日志保持原选择；模型、账号、配置、历史由使用者原部署保留。
+仅适用准确干净官方v1.7.8。旧补丁树请先保留，再在新目录整体安装、构建固定镜像；只切换目标服务。账号、配置、历史、请求体限制及挂载沿既有部署保留。新增每日任务重试与模型回退不扩大普通聊天恢复次数；一键账号测试会发送真实模型请求，安装器不会自动执行。
 
-先备份镜像/源码/配置/数据，再在独立准确基线安装、构建固定镜像，定向切换唯一服务。原Release/tag继续保留。没有额外调用真实模型验证长会话完成率；单流保护不能保证所有跨工具回合停滞消失。
+保留v1.7.6的公开默认：三个模型名会被改写到DeepSeek（主动同名请求也匹配），Messages/count_tokens默认关闭。`WB_BACKGROUND_MODEL_NAMES=""`保持原路由，`WB_ENABLE_ANTHROPIC_MESSAGES=1`保留旧接口；cache_control仍未透传。部署者按客户端需要显式选择兼容变量。
 
-[说明与安装](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/blob/v1.7.6-ops.20261015.1/README.md) · [验证](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/blob/v1.7.6-ops.20261015.1/docs/VERIFICATION.md) · [Actions](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/actions/workflows/tests.yml)
+本次没有额外真实模型长会话验收，不保证业务循环全部消失。原Release/tag继续保留。
+
+[说明](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/blob/v1.7.8-ops.20261016.1/README.md) · [安装/回滚](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/blob/v1.7.8-ops.20261016.1/docs/INSTALL.md) · [验证](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/blob/v1.7.8-ops.20261016.1/docs/VERIFICATION.md)
 
 MIT，保留官方及历史附件来源说明。

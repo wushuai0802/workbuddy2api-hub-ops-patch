@@ -27,7 +27,7 @@ PATCH_SUITES = ('test_installer.py', 'test_wb_stall.py', 'test_mixed_stall_proxy
                 '_test_401_refresh.py', '_test_deepseek_multimodal.py', '_test_deepseek_reasoning_compaction.py',
                 'test_integration.py', 'test_loop_recovery.py', 'test_reasoning_recovery.py',
                 'test_nullable_buffer.py', 'test_metadata_buffer.py', 'test_compact_buffer.py',
-                'test_extra_fields.py', 'test_sse_framing.py', 'test_buffer_records.py', 'test_recovery_hint.py', 'test_v176.py')
+                'test_extra_fields.py', 'test_sse_framing.py', 'test_buffer_records.py', 'test_recovery_hint.py', 'test_v176.py', 'test_v178.py')
 UPSTREAM_SUITES = ('_test_upstream_repairs.py', '_test_namespace_tools.py', '_test_reasoning_backfill.py',
                    '_test_anthropic_messages.py', '_test_tool_choice_none.py',
                    '_test_upstream_pool.py', '_test_remaining_usage.py', '_test_streak_report.py',
@@ -41,7 +41,10 @@ UPSTREAM_SUITES = ('_test_upstream_repairs.py', '_test_namespace_tools.py', '_te
                    '_test_pricing_used_fingerprint.py', '_test_usage_bytes_prefilter.py', '_test_recent_index.py',
                    '_test_catalog_refresh.py', '_test_remote_catalog.py', '_test_pricing_auto.py',
                    '_test_settings_preservation.py', '_test_analytics_hour_buckets.py', '_test_usage_aggregate_cache.py',
-                   '_test_agents.py', '_test_desktop_atrest.py', '_test_background_model_alias.py')
+                   '_test_agents.py', '_test_desktop_atrest.py', '_test_background_model_alias.py',
+                   '_test_breaker_fairness.py', '_test_daily_chat_pending_route.py', '_test_dsh_reasoning_effort.py',
+                   '_test_product_persistence.py', '_test_model_cooldowns.py', '_test_gateway_fixes.py',
+                   '_test_usage_cache_aliases.py', '_test_sanitize_fingerprint.py', '_test_product_switch.py')
 
 
 def main():

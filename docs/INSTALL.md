@@ -1,24 +1,24 @@
 # 安装、升级与回滚
 
-本包 `v1.7.6-ops.20261015.1` 只支持官方v1.7.6 / `7dbe11564c0c74a1d2cdb05791b313e339dddbf5`。以下路径、Compose参数和服务名需要按自己的部署填写。Python3.11+，Linux/macOS示例；Windows使用同一安装器参数及完整路径。
+本包 `v1.7.8-ops.20261016.1` 只支持官方v1.7.8 / `1631d4cf091a50820e8aae8da07e58be24b2563e`。以下路径、Compose参数和服务名需要按自己的部署填写。Python3.11+，Linux/macOS示例；Windows使用同一安装器参数及完整路径。
 
 ## 核对输入
 
-[Release下载](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.7.6-ops.20261015.1)含ZIP和SHA256SUMS.txt；ZIP顶层目录为`workbuddy2api-hub-ops-patch/`。
+[Release下载](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.7.8-ops.20261016.1)含ZIP和SHA256SUMS.txt；ZIP顶层目录为`workbuddy2api-hub-ops-patch/`。
 
 ~~~sh
 sha256sum -c SHA256SUMS.txt
-git clone --depth 1 --branch v1.7.6 https://github.com/ardeyouxipianyi/workbuddy2api-hub.git workbuddy2api-hub-v1.7.6
-git -C workbuddy2api-hub-v1.7.6 rev-parse HEAD
+git clone --depth 1 --branch v1.7.8 https://github.com/ardeyouxipianyi/workbuddy2api-hub.git workbuddy2api-hub-v1.7.8
+git -C workbuddy2api-hub-v1.7.8 rev-parse HEAD
 PATCH_DIR='/absolute/path/to/workbuddy2api-hub-ops-patch'
-TARGET_DIR='/absolute/path/to/workbuddy2api-hub-v1.7.6'
+TARGET_DIR='/absolute/path/to/workbuddy2api-hub-v1.7.8'
 python3 -B "$PATCH_DIR/apply.py" --verify-package
 python3 -B "$PATCH_DIR/apply.py" --target "$TARGET_DIR" --dry-run
 ~~~
 
 SHA必须匹配上述完整提交；预检通过只代表可以应用，尚未部署。已有旧补丁或未知改动时，另建准确干净源码，保留旧部署。不删除状态/备份或重写校验绕过拒绝。回滚旧源码补丁使用其原版本安装器；当前安装器不能卸载旧包。
 
-这也适用于v1.7.5→v1.7.6：在新基线整体安装，不直接覆盖旧已安装树。运行时独立`usage/ops-observations.jsonl`不属于安装器修改范围；它有界轮换且可用`WB_OPS_OBSERVE=0`关闭，不改写原usage历史。
+这也适用于v1.7.6→v1.7.8：在新基线整体安装，不直接覆盖旧已安装树。运行时独立`usage/ops-observations.jsonl`不属于安装器修改范围；它有界轮换且可用`WB_OPS_OBSERVE=0`关闭，不改写原usage历史。
 
 ## 保存部署与数据
 
@@ -27,9 +27,9 @@ SHA必须匹配上述完整提交；预检通过只代表可以应用，尚未�
 ~~~sh
 COMPOSE_FILE='/absolute/path/to/your/compose.yaml'
 SERVICE='your-hub-service'
-BACKUP_DIR='/absolute/path/to/private-backups/pre-ops-20261015'
+BACKUP_DIR='/absolute/path/to/private-backups/pre-ops-20261016'
 PATCHED_IMAGE='your-local/workbuddy2api-hub:1.7.5-ops.20261015.1'
-ROLLBACK_IMAGE='your-local/workbuddy2api-hub:rollback-before-ops-20261015'
+ROLLBACK_IMAGE='your-local/workbuddy2api-hub:rollback-before-ops-20261016'
 docker compose -f "$COMPOSE_FILE" config --services
 CONTAINER_ID=$(docker compose -f "$COMPOSE_FILE" ps -q "$SERVICE")
 docker inspect --format '{{json .Mounts}}' "$CONTAINER_ID"
@@ -85,7 +85,7 @@ python3 -B "$PATCH_DIR/apply.py" --target "$TARGET_DIR" --rollback --dry-run
 python3 -B "$PATCH_DIR/apply.py" --target "$TARGET_DIR" --rollback
 ~~~
 
-恢复安装前的官方v1.7.6字节，不恢复更旧版本或业务数据；代码被再次修改时拒绝覆盖，需先检查。
+恢复安装前的官方v1.7.8字节，不恢复更旧版本或业务数据；代码被再次修改时拒绝覆盖，需先检查。
 
 Docker用户暂停请求，将image改回旧ROLLBACK_IMAGE，沿原参数定向启动。镜像缺失时从私有rollback-image.tar加载；当前账号/usage继续沿用，不自动用旧数据覆盖。恢复数据会丢失备份点之后新增内容，须另行保留当前数据并核对。
 
@@ -93,3 +93,5 @@ Docker用户暂停请求，将image改回旧ROLLBACK_IMAGE，沿原参数定向�
 ## v1.7.6兼容选择
 
 默认按模型名把terra/luna/5.3-codex改到DeepSeek，同名前台请求也匹配；默认禁用Messages及count_tokens。要保持旧模型路由，设置`WB_BACKGROUND_MODEL_NAMES=""`；要保留旧Messages接口，显式设置`WB_ENABLE_ANTHROPIC_MESSAGES=1`。后者仍不透传cache_control，有原有缓存/积分边界，不代表缓存问题已修好。按已有客户端需要选择，安装器不改部署配置或替你设置这两个变量。
+
+v1.7.7/v1.7.8新增每日网页活跃重试/超时/次数与模型冷却回退、失败时间窗及一键测试。保留既有设置和账号/历史，新增字段沿原生默认按需读取。不要用真实账号的一键模型测试作为无成本健康检查；本地count_tokens仍是估算。国际版头对齐属于原生变更，离线检查不能保证所有上游会话错误消失。
