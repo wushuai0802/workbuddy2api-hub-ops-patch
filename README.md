@@ -4,10 +4,10 @@
 
 为 WorkBuddy 网关提供 DeepSeek 复读保护、受限认证续期、推理历史与工具图片兼容，以及流式协议边界修复。基于[官方项目](https://github.com/ardeyouxipianyi/workbuddy2api-hub)，可检查、可回退，遵循 MIT。
 
-当前版本：**v1.7.10-ops.20261016.1**。
+当前版本：**v1.7.10-ops.20261016.2**。
 
-- [下载 ZIP 与 SHA256SUMS.txt](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.7.10-ops.20261016.1)
-- 文件名：`workbuddy2api-hub-v1.7.10-wushuai0802-ops-20261016-r1.zip`
+- [下载 ZIP 与 SHA256SUMS.txt](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.7.10-ops.20261016.2)
+- 文件名：`workbuddy2api-hub-v1.7.10-wushuai0802-ops-20261016-r2.zip`
 - 仅支持官方 **v1.7.10**，提交 `7e5c38dd18d78e6582f6f5730bc2f050c601d142`。
 - Python 3.11+。Docker 用户从打过完整补丁的准确源码重新构建镜像。
 - 安装器只替换四个上游模块（proxy、accounts、webtools、upstream_pool），新增 ops、stall、observe 三个模块；不操作账号、Key、配置、历史或部署。
@@ -53,7 +53,7 @@
 先保存旧镜像、源码、配置和数据，在新目录获取两个准确版本：
 
 ~~~sh
-git clone --depth 1 --branch v1.7.10-ops.20261016.1 https://github.com/wushuai0802/workbuddy2api-hub-ops-patch.git ops-patch-v1710
+git clone --depth 1 --branch v1.7.10-ops.20261016.2 https://github.com/wushuai0802/workbuddy2api-hub-ops-patch.git ops-patch-v1710
 git clone --depth 1 --branch v1.7.10 https://github.com/ardeyouxipianyi/workbuddy2api-hub.git workbuddy2api-hub-v1.7.10
 git -C workbuddy2api-hub-v1.7.10 rev-parse HEAD
 python3 -B ops-patch-v1710/apply.py --verify-package
@@ -66,7 +66,7 @@ python3 -B ops-patch-v1710/apply.py --target ./workbuddy2api-hub-v1.7.10 --dry-r
 
 ## 验证与边界
 
-离线runner包含82组Python回归，新增阶段期限、连续前缀、默认恢复提示、匿名证据持久化及可选日志库测试；面板使用官方Node合成DOM测试。CI检查Linux3.11/3.12与Windows3.11，实际结果见[验证记录](docs/VERIFICATION.md)。
+离线runner包含149组Python回归（34组补丁及全部115组官方Python），另有41组官方Node；新增阶段期限、连续前缀、默认恢复提示、匿名证据持久化及可选日志库测试；面板使用官方Node合成DOM测试。CI检查Linux3.11/3.12与Windows3.11，实际结果见[验证记录](docs/VERIFICATION.md)。
 
 测试使用合成账号、空数据和本机HTTP，不含真实会话。检测仍以单次生成为范围，尚无通用跨工具回合业务进展熔断。健康、模块指纹或离线测试不等于真实长会话输出质量验收。
 

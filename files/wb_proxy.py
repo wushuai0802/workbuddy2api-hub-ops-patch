@@ -11072,7 +11072,7 @@ def _patch_payload_fingerprint():
     return hashlib.sha256(''.join(records).encode('ascii')).hexdigest()
 
 _OPS_PATCH_FINGERPRINT = _patch_payload_fingerprint()
-_OPS_PATCH_ID = "v1.7.10-ops.20261016.1"
+_OPS_PATCH_ID = "v1.7.10-ops.20261016.2"
 _OBSERVATION_STORE = None
 _OBSERVATION_STORE_LOCK = threading.Lock()
 
@@ -11911,6 +11911,11 @@ class _GuardedStream:
 
 
 class _ProbedStream:
+    _RAW_READ_METHODS = frozenset((
+        "read", "read1", "readall", "readinto", "readinto1",
+        "readline", "readlines", "peek",
+    ))
+
     def __init__(self, raw, iterator, prefix, read_hook=None, usage_hook=None):
         self.raw = raw
         self.iterator = itertools.chain(prefix, iterator)
@@ -11931,9 +11936,9 @@ class _ProbedStream:
         return self.iterator
 
     def __getattr__(self, name):
-        if name == "read1":
-            # Reading raw again would skip the prefix and the chunk remainder
-            # already retained by the first-frame reader.
+        if name in self._RAW_READ_METHODS:
+            # Only iteration consumes the replayed prefix and prefetched tail.
+            # Never advertise raw reads that silently bypass either buffer.
             raise AttributeError(name)
         return getattr(self.raw, name)
 

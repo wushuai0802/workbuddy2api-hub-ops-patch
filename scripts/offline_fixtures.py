@@ -10,10 +10,27 @@ def prepare_test_fixtures(gateway):
         assert source.count(old) == 1, 'pinned web-tool fixture changed: '+name
         source = source.replace(old, new)
     path.write_text(source, encoding='utf8')
+
+    # The full native inventory also checks packaging. Describe the patched
+    # sandbox honestly without changing the user's upstream release files.
+    manifest = gateway / 'release/portable.txt'
+    manifest.write_text(manifest.read_text(encoding='utf8') + '\nwb_ops.py\nwb_stall.py\nwb_observe.py\n', encoding='utf8')
+    runtime = gateway / 'release/portable_runtime.py'
+    runtime.write_text(runtime.read_text(encoding='utf8') +
+                       '\nREQUIRED_FILES += ("Lib/copy.py", "Lib/struct.py", "Lib/xml/__init__.py", '
+                       '"Lib/contextvars.py", "DLLs/_contextvars.pyd", "Lib/dataclasses.py", "Lib/functools.py")\n', encoding='utf8')
+    assets = gateway / 'tests/_test_release_assets.py'
+    source = assets.read_text(encoding='utf8')
+    old = '("Lib/%s/__init__.py" % m) not in covered]'
+    assert source.count(old) == 1, 'pinned extension-module fixture changed'
+    source = source.replace(old, '("Lib/%s/__init__.py" % m) not in covered '
+                           'and ("DLLs/%s.pyd" % m) not in covered]')
+    assets.write_text(source, encoding='utf8')
     # These suites rebind the parent's hardcoded ACCOUNTS_DIR, but the inline
     # child runner omits that rebind. Keep both pricing/realm fingerprints on
     # their synthetic directory rather than the gateway's empty default dir.
-    for name in ('_test_usage_aggregate_cache.py', '_test_analytics_hour_buckets.py'):
+    for name in ('_test_usage_aggregate_cache.py', '_test_analytics_hour_buckets.py',
+                 '_test_usage_day_buckets.py', '_test_usage_hour_buckets.py', '_test_usage_series_minutes.py'):
         path = gateway / 'tests' / name
         source = path.read_text(encoding='utf8')
         old = 'import wb_proxy as P\nimport wb_pricing\nwb_pricing.set_data_dir(P.USAGE_DIR)'

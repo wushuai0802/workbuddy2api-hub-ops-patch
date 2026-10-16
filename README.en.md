@@ -2,9 +2,9 @@
 
 [中文](README.md) · [Install and rollback](docs/INSTALL.md) · [Patch scope](docs/PATCHES.md) · [Verification](docs/VERIFICATION.md)
 
-Release **v1.7.10-ops.20261016.1**, targeting upstream **v1.7.10** at `7e5c38dd18d78e6582f6f5730bc2f050c601d142`. Python 3.11+ is required.
+Release **v1.7.10-ops.20261016.2**, targeting upstream **v1.7.10** at `7e5c38dd18d78e6582f6f5730bc2f050c601d142`. Python 3.11+ is required.
 
-[Download ZIP and SHA256SUMS.txt](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.7.10-ops.20261016.1): `workbuddy2api-hub-v1.7.10-wushuai0802-ops-20261016-r1.zip`.
+[Download ZIP and SHA256SUMS.txt](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.7.10-ops.20261016.2): `workbuddy2api-hub-v1.7.10-wushuai0802-ops-20261016-r2.zip`.
 
 This version migrates our retained safeguards onto the exact v1.7.10 source and retains our mixed-stall guard, reasoning-alias budget, tool-image compatibility, refusals, bounded refresh, and pooled connection ownership. It preserves upstream additional-tools/custom namespace support, Anthropic thinking, DSML fallback, block I/O and shared TLS contexts.
 
@@ -37,7 +37,7 @@ Anthropic Messages and count_tokens endpoints now return400 by default, after au
 Prepare separate clean pinned sources, keep the previous deployment and backups, and verify first:
 
 ~~~sh
-git clone --depth 1 --branch v1.7.10-ops.20261016.1 https://github.com/wushuai0802/workbuddy2api-hub-ops-patch.git ops-patch-v1710
+git clone --depth 1 --branch v1.7.10-ops.20261016.2 https://github.com/wushuai0802/workbuddy2api-hub-ops-patch.git ops-patch-v1710
 git clone --depth 1 --branch v1.7.10 https://github.com/ardeyouxipianyi/workbuddy2api-hub.git workbuddy2api-hub-v1.7.10
 git -C workbuddy2api-hub-v1.7.10 rev-parse HEAD
 python3 -B ops-patch-v1710/apply.py --verify-package
@@ -52,7 +52,7 @@ A response whose wire body was read in one block retains its connection lease un
 
 ## Verification and limits
 
-82 focused groups passed locally on Windows/Python3.14.7. CI checks Linux3.11/3.12 and Windows3.11; see [VERIFICATION.md](docs/VERIFICATION.md). Tests use synthetic data and loopback HTTP with external Python sockets denied; they do not establish online task completion.
+The runner covers 149 Python groups (34 patch and all 115 official Python groups), plus 41 official Node groups. CI checks Linux3.11/3.12 and Windows3.11; see [VERIFICATION.md](docs/VERIFICATION.md). Tests use synthetic data and loopback HTTP with external Python sockets denied; they do not establish online task completion.
 
 r2 protects quoted repetition examples, preserves already-consumed provider usage across guard failure, transport errors and cancellation, and bounds SSE lines/events (4/8MiB defaults). A request-local history observer reports repeated tool results without blocking or replaying tools. It does not combine sessions or infer generic shell-command progress. Durable metrics distinguish requests from guarded attempts and legal-output recovery from business completion, with explicit time/version/protocol grouping and retention limits.
 

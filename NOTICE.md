@@ -4,6 +4,8 @@ This unofficial bundle derives from [WorkBuddy2API-Hub](https://github.com/ardey
 
 Supported upstream: v1.7.10, commit `7e5c38dd18d78e6582f6f5730bc2f050c601d142`.
 
+The reviewed v1.7.10 reference (SHA256 `8b82cc3c0faed4a46ea541692dceec2b4cc3a34e041847c0fb80095728fc6a74`) informed the r2 read-interface boundary and fragmentation/real-ledger regression coverage. Its installer and payload were not applied wholesale.
+
 The user-supplied `workbuddy2api-hub-v1.7.2-ops-20261012-r1.zip` provided a reference migration and DSML boundary fixes. Its credential-deadline and refusal work credits this repository's earlier `v1.6.20-ops.20261012.1`. We retained relevant reference changes while preserving our additional guard/history/image behavior. See [THIRD-PARTY-zh.md](THIRD-PARTY-zh.md).
 
 The four modified upstream modules retain upstream attribution. `wb_ops.py` holds retained operations safeguards; `wb_stall.py` adds bounded mixed-stall detection; `wb_observe.py` adds privacy-safe request/attempt and tool-history observations. This repository is independently maintained.
