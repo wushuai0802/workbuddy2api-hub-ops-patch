@@ -2,11 +2,11 @@
 
 [中文](README.md) · [Install and rollback](docs/INSTALL.md) · [Patch scope](docs/PATCHES.md) · [Verification](docs/VERIFICATION.md)
 
-Release **v1.7.8-ops.20261016.1**, targeting upstream **v1.7.8** at `1631d4cf091a50820e8aae8da07e58be24b2563e`. Python 3.11+ is required.
+Release **v1.7.10-ops.20261016.1**, targeting upstream **v1.7.10** at `7e5c38dd18d78e6582f6f5730bc2f050c601d142`. Python 3.11+ is required.
 
-[Download ZIP and SHA256SUMS.txt](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.7.8-ops.20261016.1): `workbuddy2api-hub-v1.7.8-wushuai0802-ops-20261016-r1.zip`.
+[Download ZIP and SHA256SUMS.txt](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.7.10-ops.20261016.1): `workbuddy2api-hub-v1.7.10-wushuai0802-ops-20261016-r1.zip`.
 
-This version migrates our retained safeguards onto the exact v1.7.8 source and retains our mixed-stall guard, reasoning-alias budget, tool-image compatibility, refusals, bounded refresh, and pooled connection ownership. It preserves upstream additional-tools/custom namespace support, Anthropic thinking, DSML fallback, block I/O and shared TLS contexts.
+This version migrates our retained safeguards onto the exact v1.7.10 source and retains our mixed-stall guard, reasoning-alias budget, tool-image compatibility, refusals, bounded refresh, and pooled connection ownership. It preserves upstream additional-tools/custom namespace support, Anthropic thinking, DSML fallback, block I/O and shared TLS contexts.
 
 The installer replaces four upstream modules and adds `wb_ops.py`, `wb_stall.py` and `wb_observe.py`, checking all unchanged dependencies. It preserves accounts, keys, configuration and usage and does not deploy. The running gateway writes a separate bounded observation log, disabled with `WB_OPS_OBSERVE=0`.
 
@@ -14,7 +14,13 @@ The header phase respects panel settings (120 seconds by default); its 45-second
 
 The supplied v1.7.5-r2 reference informed quote-span masking and detached validated cumulative usage snapshots. Quoted examples remain protected while short quoted tool names no longer exempt a surrounding repeated plan. Original SSE bytes and tool arguments are preserved.
 
-## v1.7.8 changes
+## v1.7.10 changes
+
+Adds native panel switches for Messages and paid-model fallback, per-key concurrency (0/unset is unlimited; excess requests return429), and DSH vision metadata. Paid fallback is off by default and can spend credits when enabled. Settings and environment enablement are ORed; clear a legacy true environment override when moving control to the panel.
+
+All six adapters now fail an upstream `finish_reason=error`, retaining consumed provider usage and visible output while preventing extra recovery/tool replay. Billing keeps the actual model and requested alias distinct across probing and recovery. Optional paid fallback inherits the original deadline and exclusions. Existing loop, history, auth, framing and lease protections remain.
+
+## Retained v1.7.8 changes
 
 Includes upstream 5.8.4 identity/conversation headers, account-scoped identifiers, a 600-second failure window, host-network failure classification, configurable web activity retries, pending-account activity actions, cooldown/cap-aware daily-model fallback, GPT minimum output 16, 413 hints, panel testing and DSH reasoning options. Daily-model fallback applies to activity jobs; normal chat routing remains a separate policy. Panel account tests send real requests and are never triggered by the installer.
 
@@ -31,11 +37,11 @@ Anthropic Messages and count_tokens endpoints now return400 by default, after au
 Prepare separate clean pinned sources, keep the previous deployment and backups, and verify first:
 
 ~~~sh
-git clone --depth 1 --branch v1.7.8-ops.20261016.1 https://github.com/wushuai0802/workbuddy2api-hub-ops-patch.git ops-patch-v178
-git clone --depth 1 --branch v1.7.8 https://github.com/ardeyouxipianyi/workbuddy2api-hub.git workbuddy2api-hub-v1.7.8
-git -C workbuddy2api-hub-v1.7.8 rev-parse HEAD
-python3 -B ops-patch-v178/apply.py --verify-package
-python3 -B ops-patch-v178/apply.py --target ./workbuddy2api-hub-v1.7.8 --dry-run
+git clone --depth 1 --branch v1.7.10-ops.20261016.1 https://github.com/wushuai0802/workbuddy2api-hub-ops-patch.git ops-patch-v1710
+git clone --depth 1 --branch v1.7.10 https://github.com/ardeyouxipianyi/workbuddy2api-hub.git workbuddy2api-hub-v1.7.10
+git -C workbuddy2api-hub-v1.7.10 rev-parse HEAD
+python3 -B ops-patch-v1710/apply.py --verify-package
+python3 -B ops-patch-v1710/apply.py --target ./workbuddy2api-hub-v1.7.10 --dry-run
 ~~~
 
 Use [INSTALL.md](docs/INSTALL.md) to stop the one intended service, apply, rebuild and recreate it with its original parameters. Earlier patched trees are not overlays; do not delete state or checksum metadata to bypass a refusal. The [previous v1.6.20 release](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.6.20-ops.20261012.1) remains available.
@@ -46,7 +52,7 @@ A response whose wire body was read in one block retains its connection lease un
 
 ## Verification and limits
 
-80 focused groups passed locally on Windows/Python3.14.7. CI checks Linux3.11/3.12 and Windows3.11; see [VERIFICATION.md](docs/VERIFICATION.md). Tests use synthetic data and loopback HTTP with external Python sockets denied; they do not establish online task completion.
+82 focused groups passed locally on Windows/Python3.14.7. CI checks Linux3.11/3.12 and Windows3.11; see [VERIFICATION.md](docs/VERIFICATION.md). Tests use synthetic data and loopback HTTP with external Python sockets denied; they do not establish online task completion.
 
 r2 protects quoted repetition examples, preserves already-consumed provider usage across guard failure, transport errors and cancellation, and bounds SSE lines/events (4/8MiB defaults). A request-local history observer reports repeated tool results without blocking or replaying tools. It does not combine sessions or infer generic shell-command progress. Durable metrics distinguish requests from guarded attempts and legal-output recovery from business completion, with explicit time/version/protocol grouping and retention limits.
 

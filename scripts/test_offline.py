@@ -27,7 +27,7 @@ PATCH_SUITES = ('test_installer.py', 'test_wb_stall.py', 'test_mixed_stall_proxy
                 '_test_401_refresh.py', '_test_deepseek_multimodal.py', '_test_deepseek_reasoning_compaction.py',
                 'test_integration.py', 'test_loop_recovery.py', 'test_reasoning_recovery.py',
                 'test_nullable_buffer.py', 'test_metadata_buffer.py', 'test_compact_buffer.py',
-                'test_extra_fields.py', 'test_sse_framing.py', 'test_buffer_records.py', 'test_recovery_hint.py', 'test_v176.py', 'test_v178.py')
+                'test_extra_fields.py', 'test_sse_framing.py', 'test_buffer_records.py', 'test_recovery_hint.py', 'test_v176.py', 'test_v178.py', 'test_v1710.py')
 UPSTREAM_SUITES = ('_test_upstream_repairs.py', '_test_namespace_tools.py', '_test_reasoning_backfill.py',
                    '_test_anthropic_messages.py', '_test_tool_choice_none.py',
                    '_test_upstream_pool.py', '_test_remaining_usage.py', '_test_streak_report.py',
@@ -44,7 +44,7 @@ UPSTREAM_SUITES = ('_test_upstream_repairs.py', '_test_namespace_tools.py', '_te
                    '_test_agents.py', '_test_desktop_atrest.py', '_test_background_model_alias.py',
                    '_test_breaker_fairness.py', '_test_daily_chat_pending_route.py', '_test_dsh_reasoning_effort.py',
                    '_test_product_persistence.py', '_test_model_cooldowns.py', '_test_gateway_fixes.py',
-                   '_test_usage_cache_aliases.py', '_test_sanitize_fingerprint.py', '_test_product_switch.py')
+                   '_test_usage_cache_aliases.py', '_test_sanitize_fingerprint.py', '_test_product_switch.py', '_test_key_concurrency.py')
 
 
 def main():
@@ -75,7 +75,7 @@ def main():
     for name in ('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy'):
         env.pop(name, None)
     for name in ('WB_SEARCH_ENDPOINT', 'WB_OPS_BING_FALLBACK',
-                 'WB_BACKGROUND_MODEL_NAMES', 'WB_BACKGROUND_MODEL_TARGET'):
+                 'WB_BACKGROUND_MODEL_NAMES', 'WB_BACKGROUND_MODEL_TARGET', 'WB_ENABLE_FREE_MODEL_CREDIT_FALLBACK'):
         env.pop(name, None)
     env['NO_PROXY'] = '127.0.0.1,localhost,::1'
     env['PYTHONPATH'] = os.pathsep.join((str(ROOT / 'tests/safety'), str(gateway), str(ROOT / 'tests')))

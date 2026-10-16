@@ -754,7 +754,8 @@ def _best_cached_tokens(usage):
 
 
 def record_usage(model, usage, stream=None, elapsed_ms=None, ttft_ms=None, gen_ms=None, fp=None,
-                account=None, outcome="completed", key=None, effort=None):
+                account=None, outcome="completed", key=None, effort=None,
+                requested_model=None):
     """Record one finished request as exactly one JSONL row.
 
     A request without a usage block still gets a row (flagged usage_missing):
@@ -788,6 +789,8 @@ def record_usage(model, usage, stream=None, elapsed_ms=None, ttft_ms=None, gen_m
         "ttft_ms": ttft_ms,
         "gen_ms": gen_ms,
     }
+    if requested_model and requested_model != model:
+        row["requested_model"] = requested_model
     if usage_missing:
         row["usage_missing"] = True
     row.update(fields)
@@ -834,6 +837,12 @@ def record_usage(model, usage, stream=None, elapsed_ms=None, ttft_ms=None, gen_m
     return row
 
 
+def record_upstream_usage(upstream, requested_model, usage, **kwargs):
+    """Record the model actually billed upstream, preserving the client alias."""
+    billed_model = getattr(upstream, "_wb_billed_model", requested_model)
+    record_usage(billed_model, usage, requested_model=requested_model, **kwargs)
+
+
 def _persist_usage(row, fail_label):
     """Append one usage row as a JSONL line.
 
@@ -852,7 +861,7 @@ def _persist_usage(row, fail_label):
 
 def record_error(model, status, message, elapsed_ms=None, account=None,
                  usage=None, stream=None, ttft_ms=None, gen_ms=None, fp=None,
-                 outcome="failed", key=None, effort=None):
+                 outcome="failed", key=None, effort=None, requested_model=None):
     """Record one failed request as exactly one JSONL row.
 
     Passing the account uid records which account the request was bound to, so
@@ -886,6 +895,8 @@ def record_error(model, status, message, elapsed_ms=None, account=None,
         "message": str(message)[:200],
         "elapsed_ms": elapsed_ms,
     }
+    if requested_model and requested_model != model:
+        row["requested_model"] = requested_model
     if stream is not None:
         row["stream"] = bool(stream)
     if ttft_ms is not None:
@@ -9855,6 +9866,8 @@ def runtime_settings_view():
         "pricing_variant_inherit": wb_settings.pricing_variant_inherit(ACCOUNTS_DIR),
         "pricing_enabled": wb_settings.pricing_enabled(ACCOUNTS_DIR),
         "auto_switch_product": wb_settings.auto_switch_product(ACCOUNTS_DIR),
+        "free_model_credit_fallback": wb_settings.free_model_credit_fallback(ACCOUNTS_DIR),
+        "enable_anthropic_messages": wb_settings.enable_anthropic_messages(ACCOUNTS_DIR),
         "daily_chat_web": wb_settings.daily_chat_web(ACCOUNTS_DIR),
         "daily_chat_web_retry": wb_settings.daily_chat_web_retry(ACCOUNTS_DIR),
         "daily_chat_web_attempts":
@@ -9889,7 +9902,7 @@ def runtime_settings_view():
         "accounts_dir": ACCOUNTS_DIR,
         "usage_dir": USAGE_DIR,
         "settings_file": wb_settings.settings_path(ACCOUNTS_DIR),
-        "version": "1.7.8",
+        "version": "1.7.10",
     }
 def current_account():
     """Account used for display purposes (health / usage summaries)."""
@@ -11059,7 +11072,7 @@ def _patch_payload_fingerprint():
     return hashlib.sha256(''.join(records).encode('ascii')).hexdigest()
 
 _OPS_PATCH_FINGERPRINT = _patch_payload_fingerprint()
-_OPS_PATCH_ID = "v1.7.8-ops.20261016.1"
+_OPS_PATCH_ID = "v1.7.10-ops.20261016.1"
 _OBSERVATION_STORE = None
 _OBSERVATION_STORE_LOCK = threading.Lock()
 
@@ -11316,7 +11329,8 @@ def _close_upstream(upstream):
 
 
 _STREAM_GUARD_CODES = {"reasoning_loop_detected", "content_loop_detected", "generation_timeout",
-                       "upstream_candidate_unsupported", "upstream_choices_unsupported", "upstream_sse_limit"}
+                       "upstream_candidate_unsupported", "upstream_choices_unsupported", "upstream_sse_limit",
+                       "upstream_finish_error"}
 
 
 def _generation_deadline(holder):
@@ -11450,6 +11464,7 @@ class _GuardedStream:
         self.upstream = upstream
         _hold_stream_response(upstream)
         self.holder = holder
+        holder["billed_model"] = getattr(upstream, "_wb_billed_model", None) or holder.get("model")
         holder.pop("loop_evidence", None)
         carried = getattr(upstream, '_ops_generation_deadline', _UNSET_DEADLINE)
         if 'generation_deadline' not in holder and carried is not _UNSET_DEADLINE:
@@ -11872,6 +11887,13 @@ class _GuardedStream:
                         repaired["choices"] = [{"index": 0, "delta": {"content": answer}, "finish_reason": None}]
                         yield ("data: " + json.dumps(repaired, ensure_ascii=False) + "\n\n").encode("utf-8")
             yield raw
+            if any(str(choice.get("finish_reason") or "").strip().lower() == "error" for choice in choices):
+                self.recovery.block()
+                self.holder["ops_tool_seen"] = True
+                if self.observation is not None:
+                    self.observation.signal("upstream_finish_error")
+                yield self._failure("upstream_finish_error")
+                return
 
     def close(self):
         if self.closed:
@@ -14213,12 +14235,25 @@ def _apply_stream_idle_timeout(response, seconds):
         return False
 
 
+_FREE_MODEL_CREDIT_FALLBACKS = {
+    ("intl", "deepseek-v4.1-flash"): "deepseek-v4.1-flash-sg",
+}
+
+
+def _free_model_credit_fallback_enabled():
+    if wb_settings.free_model_credit_fallback(ACCOUNTS_DIR):
+        return True
+    return os.environ.get("WB_ENABLE_FREE_MODEL_CREDIT_FALLBACK", "0").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
 def open_upstream(payload, session_key=None, target_realm=None,
-                  exclude_uids=None, deadline_at=None, prebuilt_body=None):
+                  exclude_uids=None, deadline_at=None, prebuilt_body=None,
+                  allow_credit_fallback=True, allow_product_switch=True):
     candidate_error = _single_candidate_error(payload)
     if candidate_error:
         raise ValueError(candidate_error)
-    # Refresh the daily token guard before picking. The scan underneath is
+    # Refresh the daily guards before picking. The scan underneath is
     # incremental and TTL-cached, so this is a stat() plus a cached dict on
     # the hot path, and an account parked by any of the guards is skipped
     # like any other unusable one. One call covers all three guards: they
@@ -14283,7 +14318,8 @@ def open_upstream(payload, session_key=None, target_realm=None,
     local_net_hits = 0
     # Read once per request, not per attempt: this is a panel setting, and a
     # settings read on every retry would be pure overhead.
-    auto_switch = auto_switch_product_enabled()
+    auto_switch = (auto_switch_product_enabled()
+                   if allow_product_switch else False)
     # Panel parity: header/idle timeouts are read once per request, not
     # once per retry, so a settings read never lands in the retry loop.
     header_timeout, idle_timeout = upstream_timeouts()
@@ -14585,6 +14621,27 @@ def open_upstream(payload, session_key=None, target_realm=None,
             account.note_error(str(exc)[:120], cooldown=60, single_account=(total <= 1))
             last_error = exc
             continue
+    # Only spend credits after every enabled, credential-bearing account in
+    # this realm has a persisted upstream 6004 cap for this free model. The
+    # switch is opt-in because the retry can incur real charges.
+    paid_model = _FREE_MODEL_CREDIT_FALLBACKS.get((realm, model))
+    fallback_enabled = allow_credit_fallback and paid_model and _free_model_credit_fallback_enabled()
+    eligible = ([a for a in POOL.accounts
+                 if a.realm == realm and a.enabled and a.access_token] if fallback_enabled and POOL else [])
+    if eligible and all(a.cap_until(model) > time.time() for a in eligible):
+        paid_payload = dict(payload)
+        paid_payload["model"] = paid_model
+        log("free model '%s' exhausted on all %d %s account(s); retrying paid model '%s'"
+            % (model, len(eligible), realm, paid_model))
+        response, account, effort = open_upstream(
+            paid_payload, session_key=session_key, target_realm=realm,
+            exclude_uids=exclude_uids, deadline_at=deadline_at,
+            allow_credit_fallback=False, allow_product_switch=False)
+        try:
+            response._wb_billed_model = paid_model
+        except Exception:
+            pass
+        return response, account, effort
     if last_error is not None:
         # Carry the account that produced the failure out to the caller, so
         # the error row can name it even though the local variable that would
@@ -16873,6 +16930,20 @@ def _saved_attempt_usage(holder, field="usage"):
     return holder.get("ops_received_usage") if holder.get("ops_received_usage") is not None else holder.get(field)
 
 
+def _record_billed_usage(holder, requested_model, usage, **kwargs):
+    billed = holder.get("billed_model") or requested_model
+    if billed != requested_model:
+        kwargs["requested_model"] = requested_model
+    return record_usage(billed, usage, **kwargs)
+
+
+def _record_billed_error(holder, requested_model, status, message, **kwargs):
+    billed = holder.get("billed_model") or requested_model
+    if billed != requested_model:
+        kwargs["requested_model"] = requested_model
+    return record_error(billed, status, message, **kwargs)
+
+
 def _attempt_recorder(holder, model, fp, t_start, stream=True, usage_field="usage"):
     def record(outcome=None):
         if holder.get("usage_recorded"):
@@ -16880,7 +16951,7 @@ def _attempt_recorder(holder, model, fp, t_start, stream=True, usage_field="usag
         account = holder.get("account")
         uid = getattr(account, "uid", None) or holder.get("account_uid")
         outcome = {"retry": "failed", "web_tool_followup": "completed"}.get(outcome, outcome or "completed")
-        record_usage(model, _saved_attempt_usage(holder, usage_field), stream=stream,
+        _record_billed_usage(holder, model, _saved_attempt_usage(holder, usage_field), stream=stream,
                      elapsed_ms=int((time.time() - t_start) * 1000), fp=fp,
                      account=uid, outcome=outcome,
                      key=holder.get("key_id"), effort=holder.get("effort"))
@@ -17814,6 +17885,52 @@ def _cache_etag(kind, key, built_at):
     return '"%s-%s"' % (stamp, digest)
 
 
+def _anthropic_messages_enabled():
+    if wb_settings.enable_anthropic_messages(ACCOUNTS_DIR):
+        return True
+    return os.environ.get("WB_ENABLE_ANTHROPIC_MESSAGES", "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+# ---------------------------------------------------------------------------
+# Per-key concurrency tracking (#359)
+# ---------------------------------------------------------------------------
+_key_active_concurrency = {}
+_key_concurrency_lock = threading.Lock()
+
+def _acquire_key_slot(key_entry):
+    """Try to acquire a concurrency slot for key_entry. Returns (ok, current, limit)."""
+    if not isinstance(key_entry, dict):
+        return True, 0, 0
+    k_id = key_entry.get("id")
+    if not k_id:
+        return True, 0, 0
+    limit = int(key_entry.get("concurrency_limit") or 0)
+    if limit <= 0:
+        return True, 0, 0
+    with _key_concurrency_lock:
+        current = _key_active_concurrency.get(k_id, 0)
+        if current >= limit:
+            return False, current, limit
+        _key_active_concurrency[k_id] = current + 1
+        return True, current + 1, limit
+
+def _release_key_slot(key_entry):
+    """Release a concurrency slot for key_entry."""
+    if not isinstance(key_entry, dict):
+        return
+    k_id = key_entry.get("id")
+    if not k_id:
+        return
+    limit = int(key_entry.get("concurrency_limit") or 0)
+    if limit <= 0:
+        return
+    with _key_concurrency_lock:
+        current = _key_active_concurrency.get(k_id, 0)
+        if current > 1:
+            _key_active_concurrency[k_id] = current - 1
+        else:
+            _key_active_concurrency.pop(k_id, None)
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     # 关掉 Nagle（对连接设 TCP_NODELAY）：响应头和响应体是两次独立 write，Nagle
@@ -17895,7 +18012,7 @@ class Handler(BaseHTTPRequestHandler):
             super().finish()
         except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
             pass
-    server_version = "wb-proxy/1.7.8"
+    server_version = "wb-proxy/1.7.10"
     def log_message(self, fmt, *args):
         # 静默过滤前端看板高频定时心跳的正常 200 GET 请求（/logs、/usage、/accounts 轮询等）
         # 避免自增死循环刷屏与日志污染。遇 4xx/5xx 异常或所有非 GET 业务操作依然如实记录。
@@ -19329,6 +19446,18 @@ class Handler(BaseHTTPRequestHandler):
                 threading.Thread(target=PRICING.run_once, daemon=True,
                                  name="price-refresh-inherit").start()
                 reply["pricing_refresh_started"] = True
+        if "enable_anthropic_messages" in payload:
+            raw = payload.get("enable_anthropic_messages")
+            if not isinstance(raw, bool):
+                return self._error(400, "enable_anthropic_messages must be true or false", "invalid_request_error")
+            wb_settings.set_enable_anthropic_messages(ACCOUNTS_DIR, raw)
+            reply["enable_anthropic_messages"] = raw
+        if "free_model_credit_fallback" in payload:
+            raw = payload.get("free_model_credit_fallback")
+            if not isinstance(raw, bool):
+                return self._error(400, "free_model_credit_fallback must be true or false", "invalid_request_error")
+            wb_settings.set_free_model_credit_fallback(ACCOUNTS_DIR, raw)
+            reply["free_model_credit_fallback"] = raw
         if "auto_switch_product" in payload:
             # Strictly a JSON boolean: a string like "false" would be truthy and
             # silently switch the feature on, which is the one thing an operator
@@ -19702,6 +19831,12 @@ class Handler(BaseHTTPRequestHandler):
                 name = meta.get("name")
                 if name:
                     entry["name"] = name
+                # Vision support flag (DSH and clients use this)
+                vision = bool(meta.get("supportsImages")) and not meta.get("disabledMultimodal")
+                if mid == "glm-5.3-flash":
+                    vision = False
+                if vision:
+                    entry["supports_vision"] = True
                 # 可选的思考档位交给客户端（DSH 用它生成会话里的档位选择器）。
                 # 只宣告目录明确列出档位的模型：固定档位的模型（只有
                 # reasoning.effort、没有 supportedEfforts）不列，选了也不会改变
@@ -20781,7 +20916,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(502, "upstream first-frame probe failed")
         except Exception as exc:
             _close_upstream(upstream)
-            record_error(model, 502, "first-frame probe failed: %s" % type(exc).__name__,
+            _record_billed_error({"billed_model": getattr(upstream, "_wb_billed_model", None)}, model, 502, "first-frame probe failed: %s" % type(exc).__name__,
                          elapsed_ms=int((time.time() - t_start) * 1000), account=account.uid,
                          key=self._key_id(), effort=effort)
             return self._error(502, "upstream first-frame probe failed")
@@ -20894,9 +21029,9 @@ class Handler(BaseHTTPRequestHandler):
                        fp=fp, account=account.uid, key=self._key_id(), effort=effort)
         usage = None if holder.get("usage_recorded") else _saved_attempt_usage(holder)
         if failed:
-            record_error(model, 502, failed, usage=usage, outcome="upstream_aborted", **details)
+            _record_billed_error(holder, model, 502, failed, usage=usage, outcome="upstream_aborted", **details)
         elif not holder.get("usage_recorded"):
-                record_usage(model, usage, outcome=outcome or "completed", **details)
+                _record_billed_usage(holder, model, usage, outcome=outcome or "completed", **details)
         return
 
     @_track_response('responses', False)
@@ -20921,7 +21056,7 @@ class Handler(BaseHTTPRequestHandler):
                 chat_obj, account = _aggregate_with_recovery(upstream, model, account, holder)
             except Exception as exc:
                 account = holder.get("account") or account
-                record_error(model, 502, str(exc), usage=_saved_attempt_usage(holder),
+                _record_billed_error(holder, model, 502, str(exc), usage=_saved_attempt_usage(holder),
                              elapsed_ms=int((time.time() - t_start) * 1000),
                              account=account.uid, key=self._key_id(), effort=effort)
                 return self._error(502, f"upstream stream error: {exc}")
@@ -20946,7 +21081,7 @@ class Handler(BaseHTTPRequestHandler):
                 if upstream is None:
                     raise RuntimeError("web follow-up failed its first-frame probe")
             except Exception as exc:
-                record_error(model, 502, "web tool follow-up failed: %s" % exc,
+                _record_billed_error(holder, model, 502, "web tool follow-up failed: %s" % exc,
                              elapsed_ms=int((time.time() - t_start) * 1000),
                              account=account.uid, key=self._key_id(), effort=effort)
                 return self._error(502, "web tool follow-up failed: %s" % exc)
@@ -20957,10 +21092,10 @@ class Handler(BaseHTTPRequestHandler):
         result = chat_to_response(chat_obj, model, custom_names, request_meta, namespace_map,
                                   sources=sources)
         if chat_obj.get("_ops_failure"):
-            record_error(model, 502, chat_obj["_ops_failure"], usage=local_usage,
+            _record_billed_error(holder, model, 502, chat_obj["_ops_failure"], usage=local_usage,
                          stream=False, elapsed_ms=wall, fp=fp, account=account.uid, key=self._key_id(), effort=effort)
         elif not holder.get("usage_recorded"):
-            record_usage(model, local_usage, stream=False, elapsed_ms=wall, fp=fp,
+            _record_billed_usage(holder, model, local_usage, stream=False, elapsed_ms=wall, fp=fp,
                          account=account.uid, key=self._key_id(), effort=effort)
         return self._json(200, result)
 
@@ -21081,7 +21216,7 @@ class Handler(BaseHTTPRequestHandler):
             chat_obj, account = _aggregate_with_recovery(upstream, model, account, holder)
             failure = chat_obj.get("_ops_failure")
             if failure:
-                record_error(model, 502, failure,
+                _record_billed_error(holder, model, 502, failure,
                              usage=None if holder.get("usage_recorded") else _saved_attempt_usage(holder),
                              stream=False, account=account.uid, key=self._key_id(), effort=effort)
                 return self._anthropic_error(502, "upstream safeguards: " + failure)
@@ -21089,12 +21224,12 @@ class Handler(BaseHTTPRequestHandler):
             chat_obj["usage"] = holder.get("total_usage") or chat_obj.get("usage")
             result = chat_to_messages(chat_obj)
             wall = int((time.time() - t_start) * 1000)
-            record_usage(model, local_usage, stream=False, elapsed_ms=wall,
+            _record_billed_usage(holder, model, local_usage, stream=False, elapsed_ms=wall,
                          fp=fp, account=account.uid, key=self._key_id(), effort=effort)
             return self._json(200, result)
         except Exception as exc:
             wall = int((time.time() - t_start) * 1000)
-            record_error(model, 502, "messages upstream error: %s" % exc, usage=_saved_attempt_usage(holder),
+            _record_billed_error(holder, model, 502, "messages upstream error: %s" % exc, usage=_saved_attempt_usage(holder),
                          elapsed_ms=wall, account=account.uid, key=self._key_id(), effort=effort)
             return self._anthropic_error(502, "upstream stream error: %s" % exc)
         finally:
@@ -21133,7 +21268,7 @@ class Handler(BaseHTTPRequestHandler):
         except (_ClientStreamClosed, BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             wall = int((time.time() - t_start) * 1000)
             account = holder.get("account") or account
-            record_usage(model, None if holder.get("usage_recorded") else _saved_attempt_usage(holder, "usage_this_round"), stream=True, elapsed_ms=wall,
+            _record_billed_usage(holder, model, None if holder.get("usage_recorded") else _saved_attempt_usage(holder, "usage_this_round"), stream=True, elapsed_ms=wall,
                          ttft_ms=first_ms,
                          gen_ms=(wall - first_ms) if first_ms is not None else None,
                          fp=fp, account=account.uid,
@@ -21142,7 +21277,7 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             wall = int((time.time() - t_start) * 1000)
             account = holder.get("account") or account
-            record_error(model, 502, "messages stream aborted: %s" % exc,
+            _record_billed_error(holder, model, 502, "messages stream aborted: %s" % exc,
                          elapsed_ms=wall, account=account.uid,
                          usage=None if holder.get("usage_recorded") else _saved_attempt_usage(holder, "usage_this_round"), stream=True,
                          ttft_ms=first_ms, fp=fp, outcome="upstream_aborted",
@@ -21167,11 +21302,11 @@ class Handler(BaseHTTPRequestHandler):
         wall = int((time.time() - t_start) * 1000)
         account = holder.get("account") or account
         if holder.get("incomplete_reason"):
-            record_error(model, 502, holder["incomplete_reason"],
+            _record_billed_error(holder, model, 502, holder["incomplete_reason"],
                          usage=None if holder.get("usage_recorded") else _saved_attempt_usage(holder, "usage_this_round"), stream=True, elapsed_ms=wall,
                          account=account.uid, key=self._key_id(), effort=effort)
             return
-        record_usage(model, _saved_attempt_usage(holder, "usage_this_round"), stream=True, elapsed_ms=wall,
+        _record_billed_usage(holder, model, _saved_attempt_usage(holder, "usage_this_round"), stream=True, elapsed_ms=wall,
                      ttft_ms=first_ms,
                      gen_ms=(wall - first_ms) if first_ms is not None else None,
                      fp=fp, account=account.uid, key=self._key_id(), effort=effort)
@@ -21269,16 +21404,14 @@ class Handler(BaseHTTPRequestHandler):
             return
         # Fail closed until the Anthropic-to-Chat bridge has verified prompt-cache
         # parity. Reject before forwarding or recording any paid usage.
-        if is_messages_route and os.environ.get(
-                "WB_ENABLE_ANTHROPIC_MESSAGES", "").strip().lower() not in (
-                "1", "true", "yes", "on"):
+        if is_messages_route and not _anthropic_messages_enabled():
             return self._anthropic_error(
                 400,
                 "Anthropic Messages is disabled by default: this gateway "
                 "translates requests to Chat Completions and ignores "
                 "cache_control. This can cause excessive credit consumption. "
-                "Set WB_ENABLE_ANTHROPIC_MESSAGES=1 to opt in at your own risk "
-                "(see issue #367).",
+                "Enable it in the Settings panel or set WB_ENABLE_ANTHROPIC_MESSAGES=1 "
+                "to opt in at your own risk (see issue #367).",
                 "invalid_request_error")
         payload = self._payload_or_error(allow_list=(path == "/accounts/import"))
         if payload is None:
@@ -21291,29 +21424,49 @@ class Handler(BaseHTTPRequestHandler):
         if is_account_route:
             return self._handle_accounts(path, payload)
         _apply_background_model_alias(payload)
-        if is_messages_route:
-            if path.endswith("/count_tokens"):
-                return self._handle_messages_count_tokens(payload)
+        # Check per-key concurrency limit (#359)
+        key_entry = getattr(self, "key_entry", None)
+        key_ok, cur_key_conc, max_key_conc = _acquire_key_slot(key_entry)
+        if not key_ok:
+            key_name = (key_entry or {}).get("name") or self._key_id() or "当前 Key"
+            message = ("Rate limit reached: API key '%s' reached its concurrency limit (%d in flight); retry shortly"
+                       % (key_name, max_key_conc))
+            record_error(payload.get("model") or "unknown", 429, message,
+                         stream=payload.get("stream"), key=self._key_id())
+            if is_messages_route:
+                return self._anthropic_error(429, message, "rate_limit_error")
+            return self._error(429, message, "rate_limit_error")
+
+        try:
+            if is_messages_route:
+                if path.endswith("/count_tokens"):
+                    return self._handle_messages_count_tokens(payload)
+                if not _chat_slots.acquire(timeout=CHAT_SLOT_WAIT_SECONDS):
+                    message = ("gateway is at its concurrent chat limit "
+                               "(%d in flight); retry shortly" % MAX_CONCURRENT_CHAT)
+                    record_error(payload.get("model") or "unknown", 503, message,
+                                 stream=payload.get("stream"), key=self._key_id())
+                    return self._anthropic_error(503, message, "overloaded_error")
+                try:
+                    return self._handle_messages(payload)
+                finally:
+                    _chat_slots.release()
+            # Both OpenAI-shaped routes below can hold a thread for up to 600s.
+            # Take a slot for the duration; release it in finally so every early
+            # return (including client disconnects) gives the slot back.
             if not _chat_slots.acquire(timeout=CHAT_SLOT_WAIT_SECONDS):
-                message = ("gateway is at its concurrent chat limit "
-                           "(%d in flight); retry shortly" % MAX_CONCURRENT_CHAT)
-                record_error(payload.get("model") or "unknown", 503, message,
-                             stream=payload.get("stream"), key=self._key_id())
-                return self._anthropic_error(503, message, "overloaded_error")
+                return self._error(503, "gateway is at its concurrent chat limit "
+                                        "(%d in flight); retry shortly" % MAX_CONCURRENT_CHAT)
             try:
-                return self._handle_messages(payload)
+                return self._dispatch_chat_post(path, payload)
             finally:
                 _chat_slots.release()
-        # Both OpenAI-shaped routes below can hold a thread for up to 600s.
-        # Take a slot for the duration; release it in finally so every early
-        # return (including client disconnects) gives the slot back.
-        if not _chat_slots.acquire(timeout=CHAT_SLOT_WAIT_SECONDS):
-            return self._error(503, "gateway is at its concurrent chat limit "
-                                    "(%d in flight); retry shortly" % MAX_CONCURRENT_CHAT)
-        try:
-            return self._dispatch_chat_post(path, payload)
         finally:
-            _chat_slots.release()
+            _release_key_slot(key_entry)
+
+
+
+
 
     def _dispatch_chat_post(self, path, payload):
         # 先挡背景请求：Codex 自己发的（记忆整理／环境建议／自动复核）
@@ -21430,7 +21583,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(502, "upstream first-frame probe failed")
         except Exception as exc:
             _close_upstream(upstream)
-            record_error(model, 502, "first-frame probe failed: %s" % type(exc).__name__,
+            _record_billed_error({"billed_model": getattr(upstream, "_wb_billed_model", None)}, model, 502, "first-frame probe failed: %s" % type(exc).__name__,
                          elapsed_ms=int((time.time() - t_start) * 1000), account=account.uid,
                          key=self._key_id(), effort=effort)
             return self._error(502, "upstream first-frame probe failed")
@@ -21482,9 +21635,9 @@ class Handler(BaseHTTPRequestHandler):
                        fp=fp, account=account.uid, key=self._key_id(), effort=effort)
         usage = None if holder.get("usage_recorded") else _saved_attempt_usage(holder, "usage_this_round")
         if failed:
-            record_error(model, 502, failed, usage=usage, outcome="upstream_aborted", **details)
+            _record_billed_error(holder, model, 502, failed, usage=usage, outcome="upstream_aborted", **details)
         elif not holder.get("usage_recorded"):
-            record_usage(model, usage, outcome=outcome or "completed", **details)
+            _record_billed_usage(holder, model, usage, outcome=outcome or "completed", **details)
         return
 
     @_track_response('chat', False)
@@ -21498,12 +21651,12 @@ class Handler(BaseHTTPRequestHandler):
         try:
             result, account = _aggregate_with_recovery(upstream, model, account, holder)
         except Exception as exc:
-            record_error(model, 502, str(exc), usage=_saved_attempt_usage(holder), elapsed_ms=int((time.time() - t_start) * 1000),
+            _record_billed_error(holder, model, 502, str(exc), usage=_saved_attempt_usage(holder), elapsed_ms=int((time.time() - t_start) * 1000),
                          account=account.uid, key=self._key_id(), effort=effort)
             return self._error(502, f"upstream stream error: {exc}")
         wall = int((time.time() - t_start) * 1000)
         if result.get("_ops_failure"):
-            record_error(model, 502, result["_ops_failure"],
+            _record_billed_error(holder, model, 502, result["_ops_failure"],
                          usage=None if holder.get("usage_recorded") else _saved_attempt_usage(holder),
                          stream=False, elapsed_ms=wall, fp=fp, account=account.uid,
                          key=self._key_id(), effort=effort)
@@ -21512,7 +21665,7 @@ class Handler(BaseHTTPRequestHandler):
         first_at = result.get("first_chunk_at")
         # Measured from request arrival so streaming and non-streaming are comparable.
         first_ms = int((first_at - t_start) * 1000) if first_at else None
-        record_usage(model, _saved_attempt_usage(holder), stream=False,
+        _record_billed_usage(holder, model, _saved_attempt_usage(holder), stream=False,
                      elapsed_ms=wall, ttft_ms=first_ms,
                      gen_ms=(wall - first_ms) if first_ms is not None else None,
                      fp=fp, account=account.uid, key=self._key_id(), effort=effort)

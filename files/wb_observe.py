@@ -19,7 +19,7 @@ import uuid
 CURRENT = contextvars.ContextVar('wb_ops_observation', default=None)
 SIGNALS = frozenset(('reasoning_loop_detected', 'content_loop_detected', 'generation_timeout',
                      'upstream_sse_limit', 'upstream_choices_unsupported',
-                     'upstream_candidate_unsupported', 'progress_repeated_failure',
+                     'upstream_candidate_unsupported', 'upstream_finish_error', 'progress_repeated_failure',
                      'progress_repeated_result', 'reasoning_stall_observed',
                      'retry_started', 'retry_recovered', 'retry_failed',
                      'retry_blocked_output_or_protocol', 'retry_budget_exhausted', 'retry_cooldown',
