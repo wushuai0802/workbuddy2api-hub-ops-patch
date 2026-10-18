@@ -1585,6 +1585,12 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     '国内版 (China) · copilot.tencent.com': 'China · copilot.tencent.com',
     '国内版成长任务与日常福利': 'China growth tasks and daily perks',
     '国内版任务与福利': 'China tasks and perks',
+    // 页签名与区块标题：词级词典缺了「福利」，整体只能拼出「Taskand福利」。
+    '任务与福利': 'Tasks & rewards',
+    '国际版每日活跃福利': 'Daily activity rewards (Global)',
+    '已获取福利总积分': 'Total reward credits earned',
+    '每日活跃打卡、Buddy 加油站、成长任务与福利积分总览。': 'Daily check-in, Buddy refuel and an overview of growth tasks plus reward credits.',
+    '福利': 'rewards',
     '国内版签到': 'China check-in',
     '国家未知': 'Country unknown',
     '国际版': 'Global',
@@ -1603,6 +1609,7 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     '复制登录链接': 'Copy sign-in link',
     '复制当前视图显示的日志': 'Copy the log lines shown in the current view',
     '多个账号按会话粘性 + 轮询使用；某个账号被上游拒绝时自动切到下一个': 'Accounts are used with session stickiness plus round-robin; when one is rejected upstream it switches to the next',
+    '天有活动': 'days active',
     '天': 'days',
     '天 (即将到期)': 'days (expiring soon)',
     '天)': 'days)',
@@ -1877,6 +1884,16 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     '点击添加备注，比如「批量」/「自用」': 'Click to add a note, e.g. "batch" / "personal"',
     '最近将过期': 'Expiring soonest',
     '最近请求': 'Recent requests',
+    // 数据看板（B 版）的区块标题与指标名：此前整条回落中文，实测 en 界面残留。
+    'Token 时序': 'Token timeline',
+    '工作回溯': 'Activity lookback',
+    '吞吐量': 'Throughput',
+    '峰值吞吐': 'Peak throughput',
+    '实时活动流': 'Live activity stream',
+    '近一年每日活动': 'Daily activity over the last year',
+    '用量明细': 'Usage detail',
+    '积分扣减历史': 'Credit deduction history',
+    '模型性能分位': 'Model performance percentiles',
     '有': '',
     '有剩余': 'Left',
     '有效期': 'Valid until',
@@ -1905,6 +1922,8 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     '本周请求数': 'Requests this week',
     '本地网络工具': 'Local web tools',
     '更新': 'Update',
+    // 「更新于 HH:MM:SS」是 B 版页头的动态拼接串，只有「更新」有词条会拼出「Update于」。
+    '更新于': 'Updated at',
     '立即检查更新': 'Check now',
     '安装更新': 'Install update',
     '网关检查自有 GitHub Release。发现稳定版后可手动安装；安装会短暂重启网关，账号与用量数据会保留。': 'The gateway checks its configured GitHub Releases. Stable updates can be installed manually; installation briefly restarts the gateway and preserves accounts and usage data.',
@@ -1979,6 +1998,9 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     '模型能力': 'Capabilities',
     '模型限制': 'Model restriction',
     '模式': 'Mode',
+    // 「N 次请求」是页头/热力图/模型表的动态拼接串：只有「次」「请求」两个单词条时
+    // 会拼成「N callsRequests」，短语条目靠长度降序先命中。
+    '次请求': 'requests',
     '次': 'calls',
     '次 ·': 'calls ·',
     '次异常拦截': 'errors blocked',
@@ -14277,23 +14299,25 @@ const state = {
 let prevSummary = null; /* B 版：上一等长周期汇总（环比） */
 
 /* ---------- B 版：环比 / sparkline / 环形卡 / 活动流 ---------- */
-function prevRange(){
-  const now = Math.floor(Date.now() / 1000);
+function prevRange(untilAt){
+  // 环比窗口的上界同样来自调用方：轮询时与 rangeParams 共用同一个量化时刻，
+  // 否则 /usage/timeseries?…&until=… 这一条照样每轮都换 URL。
+  const now = (untilAt === undefined || untilAt === null) ? Math.floor(Date.now() / 1000) : untilAt;
   if (state.range === 'today'){
-    const d = new Date(); d.setHours(0,0,0,0);
+    const d = new Date(now * 1000); d.setHours(0,0,0,0);
     const startToday = Math.floor(d.getTime() / 1000);
     const span = now - startToday;
     return [startToday - 86400, startToday - 86400 + span];
   }
   if (state.range === 'week'){
-    const dowMon = (new Date().getDay() + 6) % 7;
-    const d = new Date(); d.setHours(0,0,0,0); d.setDate(d.getDate() - dowMon);
+    const dowMon = (new Date(now * 1000).getDay() + 6) % 7;
+    const d = new Date(now * 1000); d.setHours(0,0,0,0); d.setDate(d.getDate() - dowMon);
     const startWeek = Math.floor(d.getTime() / 1000);
     const span = now - startWeek;
     return [startWeek - 7 * 86400, startWeek - 7 * 86400 + span];
   }
   if (state.range === 'month'){
-    const d = new Date();
+    const d = new Date(now * 1000);
     const startMonth = Math.floor(new Date(d.getFullYear(), d.getMonth(), 1, 0,0,0).getTime() / 1000);
     const span = now - startMonth;
     const startPrev = Math.floor(new Date(d.getFullYear(), d.getMonth() - 1, 1, 0,0,0).getTime() / 1000);
@@ -14303,8 +14327,8 @@ function prevRange(){
   if (state.range === 'd30') return [now - 60 * 86400, now - 30 * 86400];
   return null;
 }
-async function loadPrevSummary(){
-  const pr = prevRange();
+async function loadPrevSummary(untilAt){
+  const pr = prevRange(untilAt);
   if (!pr) return null;
   try{
     const p = await api(`/usage/timeseries?realm=all&range=custom&since=${pr[0]}&until=${pr[1]}`);
@@ -14384,8 +14408,19 @@ async function loadRecent(){
   }catch(e){ console.error('recent failed', e); }
 }
 
-function rangeParams(range){
-  const now = Math.floor(Date.now() / 1000);
+/* 轮询类请求的窗口上界量化：服务端 _json_cached 只在「调用前后的缓存条目一模一样」
+ * 时才发 ETag（wb_proxy.py:16872），而缓存键里含 until。until 每轮都取 now()，
+ * 缓存键每轮都是新的 → before 永远是 None → 304 一次都命不中外加整份重传。
+ * 量化到服务端聚合缓存自己的 TTL（wb_proxy.py:1778 _STATS_TTL = 15s）：同一个 15 秒
+ * 桶内 URL 逐字相同，第 2、3 轮直接吃 304；代价是最多 15 秒的新鲜度延迟。
+ * 只有轮询走这条（loadRange(true)），用户手点区间仍用精确 now。 */
+const POLL_UNTIL_BUCKET = 15;
+function pollUntil(){
+  return Math.floor(Math.floor(Date.now() / 1000) / POLL_UNTIL_BUCKET) * POLL_UNTIL_BUCKET;
+}
+function rangeParams(range, untilAt){
+  // since 必须和 until 用同一个时间点推导，否则 since 仍在逐秒变化，URL 照样每轮都新。
+  const now = (untilAt === undefined || untilAt === null) ? Math.floor(Date.now() / 1000) : untilAt;
   if (range === 'd3')  return `range=custom&since=${now - 3*86400}&until=${now}`;
   if (range === 'd30') return `range=custom&since=${now - 30*86400}&until=${now}`;
   if (range === 'all') return `range=custom&since=${now - 365*86400}&until=${now}`;
@@ -14409,19 +14444,27 @@ if(typeof MutationObserver !== 'undefined'){
 /* ============================================================
    加载与渲染
    ============================================================ */
-async function loadRange(){
+/* 区间/轮询的代次。与 refreshInner 里 REFRESH_GEN 同一套理由：取数期间又发起了更新
+ * 的一轮（刚切了区间、或轮询撞上点击），这批结果已经过期，直接丢掉——否则慢的那一轮
+ * 晚到，会把上一个区间的数字画到新区间的标题下面（实测有 1.2~1.8 秒的错位窗口）。 */
+let WBA_GEN = 0;
+async function loadRange(polled){
+  const gen = ++WBA_GEN;
+  const untilAt = polled ? pollUntil() : null;
   $('kpis').style.opacity = .55;
-  const rp = rangeParams(state.range);
+  const rp = rangeParams(state.range, untilAt);
   try{
     const [analytics, series, prev] = await Promise.all([
       api(`/usage/analytics?realm=all&${rp}`),
       api(`/usage/timeseries?realm=all&${rp}`),
-      loadPrevSummary(),
+      loadPrevSummary(untilAt),
     ]);
+    if (gen !== WBA_GEN) return;
     state.analytics = analytics;
     state.series = series;
     prevSummary = prev;
   } catch(e){
+    if (gen !== WBA_GEN) return;
     console.error('load range failed', e);
   }
   $('kpis').style.opacity = 1;
@@ -14639,11 +14682,16 @@ function drawSeries(){
   // hover
   cv.onmousemove = ev => {
     if (!seriesLayout) return;
+    // 空数据（今日还没有请求 / 新装实例）时 series.length 是 0，而下面那行的夹取是
+    // Math.max(0, Math.min(n - 1, idx))：n-1 = -1 会被 Math.max 拉回 0，于是
+    // series[0] 是 undefined，B 版气泡里的 b.at 直接抛 TypeError。没有点就收起返回。
+    if (!series.length) { tip.style.opacity = 0; return; }
     const rect = cv.getBoundingClientRect();
     const mx = ev.clientX - rect.left;
     let idx = Math.round((mx - padL) / gap - .5);
-    idx = Math.max(0, Math.min(n - 1, idx));
+    idx = Math.max(0, Math.min(series.length - 1, idx));
     const b = series[idx];
+    if (!b) return;
     tip.style.opacity = 1;
     tip.style.left = Math.min(window.innerWidth - 200, ev.clientX + 14) + 'px';
     tip.style.top = Math.max(8, ev.clientY - 46) + 'px';
@@ -15018,6 +15066,9 @@ $('rangeSeg').addEventListener('click', ev => {
   const btn = ev.target.closest('button'); if (!btn) return;
   [...$('rangeSeg').children].forEach(b => b.classList.toggle('on', b === btn));
   state.range = btn.dataset.range;
+  // 新区间的数字还没到：先把页头的旧读数清成占位，别让「全部」标题下面继续挂着本月的
+  // 数字（那一段是页头最长的一行，误读代价最大）。取回后 renderKpis() 会重新写满。
+  $('pageSub').textContent = '—';
   loadRange();
 });
 $('metricSeg').addEventListener('click', ev => {
@@ -15114,7 +15165,7 @@ function syncOldRange(){
 let wbaStarted = false;
 function wbaTick(){
   if (!wbaStarted){ wbaStarted = true; loadStatic(); }
-  loadRange();
+  loadRange(true);   // 轮询：窗口上界按 15 秒桶量化，连续两轮同桶才有可能吃 304
 }
 window.loadAnalytics = wbaTick;            /* 面板 5s 轮询 / 切页 / 回前台统一入口 */
 window.loadAnalyticsMatrix = function(){}; /* 旧性能矩阵已并入本页（性能分位折叠区） */

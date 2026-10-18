@@ -37,7 +37,7 @@ def main():
     args = parser.parse_args()
     upstream = args.upstream.resolve(strict=True)
     official_suites = sorted((upstream / 'tests').glob('_test_*.py'))
-    assert len(official_suites) == 126, 'pinned official Python inventory changed'
+    assert len(official_suites) == 127, 'pinned official Python inventory changed'
     bundle = Bundle(ROOT)
     assert set(bundle.status(bundle.target(upstream)).values()) == {'base'}, 'use clean pinned upstream'
     args.output.mkdir(parents=True, exist_ok=True)
@@ -60,7 +60,8 @@ def main():
     for name in ('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy'):
         env.pop(name, None)
     for name in ('WB_SEARCH_ENDPOINT', 'WB_OPS_BING_FALLBACK',
-                 'WB_BACKGROUND_MODEL_NAMES', 'WB_BACKGROUND_MODEL_TARGET', 'WB_ENABLE_FREE_MODEL_CREDIT_FALLBACK'):
+                 'WB_BACKGROUND_MODEL_NAMES', 'WB_BACKGROUND_MODEL_TARGET', 'WB_ENABLE_FREE_MODEL_CREDIT_FALLBACK',
+                 'WB_CN_CHAT_UPSTREAM'):
         env.pop(name, None)
     env['NO_PROXY'] = '127.0.0.1,localhost,::1'
     env['PYTHONPATH'] = os.pathsep.join((str(ROOT / 'tests/safety'), str(gateway), str(ROOT / 'tests')))

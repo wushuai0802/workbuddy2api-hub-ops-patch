@@ -439,7 +439,9 @@ REALM_CONFIGS = {
     },
     "cn": {
         "name": "国内版 (China)",
-        "chat_upstream": "https://copilot.tencent.com",
+        # 默认 https://copilot.tencent.com；WB_CN_CHAT_UPSTREAM 可覆盖（见 wb_identity.CN_CHAT_BASE）。
+        # domain 不随之改：它是 X-Domain 的兜底值，请求优先用账号自己的 domain。
+        "chat_upstream": wb_identity.CN_CHAT_BASE,
         "billing_upstream": "https://www.codebuddy.cn",
         "origin": "https://www.codebuddy.cn",
         "domain": "copilot.tencent.com",

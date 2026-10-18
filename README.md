@@ -4,17 +4,19 @@
 
 为 WorkBuddy 网关提供 DeepSeek 复读保护、受限认证续期、推理历史与工具图片兼容，以及流式协议边界修复。基于[官方项目](https://github.com/ardeyouxipianyi/workbuddy2api-hub)，可检查、可回退，遵循 MIT。
 
-当前版本：**v1.7.15-ops.20261018.1**。
+当前版本：**v1.7.16-ops.20261018.1**。
+
+本次吸收原生空时序图悬停、区间旧响应隔离、英文词条及15秒轮询缓存修复；再补齐日/周/月环比窗口跨日历边界时的时间锚定。国内版新增可选`WB_CN_CHAT_UPSTREAM`，缺省地址不变，安装器不替使用者改出口。
 
 纳入v1.7.13～1.7.15的出站身份/账号连接隔离、工具Schema与图片/配对修复、积分护栏、可配置排程及冷却展示。保留防复读与期限保护，完善401同号重试、定址账号恢复隔离，以及管理型部署的停止保护。
 
-- [下载 ZIP 与 SHA256SUMS.txt](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.7.15-ops.20261018.1)
-- 文件名：`workbuddy2api-hub-v1.7.15-wushuai0802-ops-20261018-r1.zip`
-- 仅支持官方 **v1.7.15**，提交 `497db0d99487c0046c3732d880e4ac86582801b5`。
+- [下载 ZIP 与 SHA256SUMS.txt](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.7.16-ops.20261018.1)
+- 文件名：`workbuddy2api-hub-v1.7.16-wushuai0802-ops-20261018-r1.zip`
+- 仅支持官方 **v1.7.16**，提交 `75fa346d9fcc4a116c1f3d1be0405c19b637c1dc`。
 - Python 3.11+。Docker 用户从打过完整补丁的准确源码重新构建镜像。
 - 安装器替换四个上游Python模块（proxy、accounts、webtools、upstream_pool）及看板，新增 ops、stall、observe 三个模块；不操作账号、Key、配置、历史或部署。
 
-本版把已有补丁迁移到官方 v1.7.15，保留混合复读、推理别名预算、工具图片、拒答、用量结算和连接所有权保护。来源与许可见 [NOTICE.md](NOTICE.md) 和 [THIRD-PARTY-zh.md](THIRD-PARTY-zh.md)。
+本版把已有补丁迁移到官方 v1.7.16，保留混合复读、推理别名预算、工具图片、拒答、用量结算和连接所有权保护。来源与许可见 [NOTICE.md](NOTICE.md) 和 [THIRD-PARTY-zh.md](THIRD-PARTY-zh.md)。
 
 本次修复响应头预算被固定45秒覆盖的问题：响应头尊重面板设置，返回后才开始45秒首帧预算；初始连接、恢复和网页工具后续生成共享原300秒总期限。纯推理循环的唯一一次安全恢复默认加入简短接续提示，可用 `WB_OPS_LOOP_RECOVERY_HINT=0` 关闭提示。连续已知失败前缀最多清理16段/65536字符，保留未知后缀和客户端原历史。持久观察新增匿名规则、窗口计数和恢复停止原因；检测阈值保持。
 
@@ -32,7 +34,11 @@
 
 上游 v1.7.4/1.7.5 增加默认关闭的SQLite日志及保留限制、checkpoint修复、凭据手动导入、新主题/统计面板、每日及手动模型目录刷新、来源标记和原始目录归档。模型目录/倍率现在优先使用实际API结果，显示可能变化；这些原生功能不代替防复读。SQLite日志是否启用沿用用户设置，公开包不自动开启。
 
-## v1.7.15 升级与修复
+## v1.7.16 升级与修复
+
+统计轮询在同一个15秒桶内复用请求URL，手动选择区间仍使用精确时间；迟到的成功或错误响应不覆盖新数据及加载状态。环比的日历起点也取该请求的时间，修复跨日/周/月时出现倒置区间的问题。
+
+国内版可显式设置`WB_CN_CHAT_UPSTREAM=https://www.workbuddy.cn`，会影响国内桌面/CLI对话、刷新、目录及成长任务；账号`X-Domain`和国际版不变。默认继续原地址，不修改现有路由，也不主动测试真实模型。
 
 日志按钮使用原生浏览器日志页，Windows/Linux/NAS均可打开，不再创建服务端窗口；管理型部署仍拒绝进程内停止。桌面停止须先收到明确确认，再以有超时的健康探测复核；401/403/断网、无确认、探测超时/HTTP错误或仍在运行时保持轮询。当前看板与Python代码一起安装/回滚和校验指纹。
 
@@ -63,11 +69,11 @@
 先保存旧镜像、源码、配置和数据，在新目录获取两个准确版本：
 
 ~~~sh
-git clone --depth 1 --branch v1.7.15-ops.20261018.1 https://github.com/wushuai0802/workbuddy2api-hub-ops-patch.git ops-patch-v1715
-git clone --depth 1 --branch v1.7.15 https://github.com/ardeyouxipianyi/workbuddy2api-hub.git workbuddy2api-hub-v1.7.15
-git -C workbuddy2api-hub-v1.7.15 rev-parse HEAD
-python3 -B ops-patch-v1715/apply.py --verify-package
-python3 -B ops-patch-v1715/apply.py --target ./workbuddy2api-hub-v1.7.15 --dry-run
+git clone --depth 1 --branch v1.7.16-ops.20261018.1 https://github.com/wushuai0802/workbuddy2api-hub-ops-patch.git ops-patch-v1716
+git clone --depth 1 --branch v1.7.16 https://github.com/ardeyouxipianyi/workbuddy2api-hub.git workbuddy2api-hub-v1.7.16
+git -C workbuddy2api-hub-v1.7.16 rev-parse HEAD
+python3 -B ops-patch-v1716/apply.py --verify-package
+python3 -B ops-patch-v1716/apply.py --target ./workbuddy2api-hub-v1.7.16 --dry-run
 ~~~
 
 提交必须匹配上面的完整SHA。预检通过后，按[安装指南](docs/INSTALL.md)暂停唯一目标服务、应用完整补丁、构建并定向切换。已有旧补丁（包括v1.7.3）不能直接叠加；不要删除状态/备份绕过检查。旧Release/tag继续保留。
@@ -76,7 +82,7 @@ python3 -B ops-patch-v1715/apply.py --target ./workbuddy2api-hub-v1.7.15 --dry-r
 
 ## 验证与边界
 
-离线runner包含162组Python回归（36组补丁及全部126组官方Python），另有44组官方Node及1组补丁Node；新增阶段期限、连续前缀、默认恢复提示、匿名证据持久化及可选日志库测试；面板使用官方Node合成DOM测试。CI检查Linux3.11/3.12与Windows3.11，实际结果见[验证记录](docs/VERIFICATION.md)。
+离线runner包含163组Python回归（36组补丁及全部127组官方Python），另有45组官方Node及2组补丁Node；新增阶段期限、连续前缀、默认恢复提示、匿名证据持久化及可选日志库测试；面板使用官方Node合成DOM测试。CI检查Linux3.11/3.12与Windows3.11，实际结果见[验证记录](docs/VERIFICATION.md)。
 
 测试使用合成账号、空数据和本机HTTP，不含真实会话。检测仍以单次生成为范围，尚无通用跨工具回合业务进展熔断。健康、模块指纹或离线测试不等于真实长会话输出质量验收。
 

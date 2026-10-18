@@ -30,9 +30,10 @@ def main():
     (gateway / 'dashboard.html').write_bytes(bundle.payload.get('dashboard.html', (upstream / 'dashboard.html').read_bytes()))
     shutil.copytree(upstream / 'tests', gateway / 'tests', ignore=shutil.ignore_patterns('__pycache__'))
     suites = sorted((gateway / 'tests').glob('_test_*.js'))
-    assert len(suites) == 44, 'pinned dashboard suite inventory changed'
+    assert len(suites) == 45, 'pinned dashboard suite inventory changed'
     prepare_dashboard_fixtures(gateway)
     suites.append(ROOT / 'tests/test_dashboard_controls.js')
+    suites.append(ROOT / 'tests/test_dashboard_ranges.js')
     env = {key: val for key, val in os.environ.items()
            if key.upper() not in ('API_KEY', 'WB_PROXY_KEY', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NODE_OPTIONS')
            and not key.startswith('WB_')}
@@ -47,7 +48,7 @@ def main():
         if result.returncode:
             print(log.read_text(encoding='utf8', errors='replace')[-4000:])
     report = {'passed': all(row['passed'] for row in rows), 'patch_id': bundle.meta['patch_id'],
-              'suites': rows, 'model_requests': 0, 'official_suites': 44, 'patch_suites': 1,
+              'suites': rows, 'model_requests': 0, 'official_suites': 45, 'patch_suites': 2,
               'data': 'synthetic DOM/fetch fixtures with the installed patched dashboard'}
     (run / 'summary.json').write_text(json.dumps(report, indent=2) + '\n', encoding='utf8')
     print(json.dumps({'passed': report['passed'], 'suites': len(rows), 'report': str(run / 'summary.json')}))

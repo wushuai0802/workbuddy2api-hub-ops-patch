@@ -1,24 +1,24 @@
 # 安装、升级与回滚
 
-本包 `v1.7.15-ops.20261018.1` 只支持官方v1.7.15 / `497db0d99487c0046c3732d880e4ac86582801b5`。以下路径、Compose参数和服务名需要按自己的部署填写。Python3.11+，Linux/macOS示例；Windows使用同一安装器参数及完整路径。
+本包 `v1.7.16-ops.20261018.1` 只支持官方v1.7.16 / `75fa346d9fcc4a116c1f3d1be0405c19b637c1dc`。以下路径、Compose参数和服务名需要按自己的部署填写。Python3.11+，Linux/macOS示例；Windows使用同一安装器参数及完整路径。
 
 ## 核对输入
 
-[Release下载](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.7.15-ops.20261018.1)含ZIP和SHA256SUMS.txt；ZIP顶层目录为`workbuddy2api-hub-ops-patch/`。
+[Release下载](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.7.16-ops.20261018.1)含ZIP和SHA256SUMS.txt；ZIP顶层目录为`workbuddy2api-hub-ops-patch/`。
 
 ~~~sh
 sha256sum -c SHA256SUMS.txt
-git clone --depth 1 --branch v1.7.15 https://github.com/ardeyouxipianyi/workbuddy2api-hub.git workbuddy2api-hub-v1.7.15
-git -C workbuddy2api-hub-v1.7.15 rev-parse HEAD
+git clone --depth 1 --branch v1.7.16 https://github.com/ardeyouxipianyi/workbuddy2api-hub.git workbuddy2api-hub-v1.7.16
+git -C workbuddy2api-hub-v1.7.16 rev-parse HEAD
 PATCH_DIR='/absolute/path/to/workbuddy2api-hub-ops-patch'
-TARGET_DIR='/absolute/path/to/workbuddy2api-hub-v1.7.15'
+TARGET_DIR='/absolute/path/to/workbuddy2api-hub-v1.7.16'
 python3 -B "$PATCH_DIR/apply.py" --verify-package
 python3 -B "$PATCH_DIR/apply.py" --target "$TARGET_DIR" --dry-run
 ~~~
 
 SHA必须匹配上述完整提交；预检通过只代表可以应用，尚未部署。已有旧补丁或未知改动时，另建准确干净源码，保留旧部署。不删除状态/备份或重写校验绕过拒绝。回滚旧源码补丁使用其原版本安装器；当前安装器不能卸载旧包。
 
-这也适用于旧补丁→v1.7.15：在新基线整体安装，不直接覆盖旧已安装树。运行时独立`usage/ops-observations.jsonl`不属于安装器修改范围；它有界轮换且可用`WB_OPS_OBSERVE=0`关闭，不改写原usage历史。
+这也适用于旧补丁→v1.7.16：在新基线整体安装，不直接覆盖旧已安装树。运行时独立`usage/ops-observations.jsonl`不属于安装器修改范围；它有界轮换且可用`WB_OPS_OBSERVE=0`关闭，不改写原usage历史。
 
 ## 保存部署与数据
 
@@ -28,7 +28,7 @@ SHA必须匹配上述完整提交；预检通过只代表可以应用，尚未�
 COMPOSE_FILE='/absolute/path/to/your/compose.yaml'
 SERVICE='your-hub-service'
 BACKUP_DIR='/absolute/path/to/private-backups/pre-ops-20261018'
-PATCHED_IMAGE='your-local/workbuddy2api-hub:1.7.15-ops.20261018.1'
+PATCHED_IMAGE='your-local/workbuddy2api-hub:1.7.16-ops.20261018.1'
 ROLLBACK_IMAGE='your-local/workbuddy2api-hub:rollback-before-ops-20261018'
 docker compose -f "$COMPOSE_FILE" config --services
 CONTAINER_ID=$(docker compose -f "$COMPOSE_FILE" ps -q "$SERVICE")
@@ -70,6 +70,8 @@ docker compose -f "$COMPOSE_FILE" up -d --no-deps --no-build --pull never "$SERV
 
 ## 兼容与验收
 
+v1.7.16提供可选`WB_CN_CHAT_UPSTREAM`，仅需要国内版改址时显式配置并重启；缺省沿用原址。它统一影响国内桌面/CLI对话、token刷新、模型目录和成长任务，账号X-Domain及国际版保持。示例为`https://www.workbuddy.cn`，公开安装器不设置此环境变量。
+
 公共默认请求体仍16MiB。确有更大历史需求可显式设置`WB_MAX_PAYLOAD_BYTES=52428800`，评估并发内存。新checkpoint缓存可能重建，应保留原JSONL；退出身份、出口退避、账号权重/备注和国际活跃模型沿用原配置，不因更新自动开启新策略。补签/抽奖按原生规则使用卡券或次数。
 
 v1.7.13～1.7.15新增额度窗口探针，原生`window_probe`缺省为true，会在重置时主动发起模型请求且不依赖签到开关。若保持旧版无主动探针行为，停服备份后仅添加`settings.json`的`"window_probe": false`，保留其它字段及权限。`quota_scan_models`默认空，主动额度扫描需自行选择模型。公开安装器不改这两项配置。
@@ -87,7 +89,7 @@ python3 -B "$PATCH_DIR/apply.py" --target "$TARGET_DIR" --rollback --dry-run
 python3 -B "$PATCH_DIR/apply.py" --target "$TARGET_DIR" --rollback
 ~~~
 
-恢复安装前的官方v1.7.15字节，不恢复更旧版本或业务数据；代码被再次修改时拒绝覆盖，需先检查。
+恢复安装前的官方v1.7.16字节，不恢复更旧版本或业务数据；代码被再次修改时拒绝覆盖，需先检查。
 
 Docker用户暂停请求，将image改回旧ROLLBACK_IMAGE，沿原参数定向启动。镜像缺失时从私有rollback-image.tar加载；当前账号/usage继续沿用，不自动用旧数据覆盖。恢复数据会丢失备份点之后新增内容，须另行保留当前数据并核对。
 
