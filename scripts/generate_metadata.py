@@ -7,11 +7,11 @@ from pathlib import Path
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
-COMMIT = '7e5c38dd18d78e6582f6f5730bc2f050c601d142'
-TAG = 'v1.7.10'
-PATCH_ID = 'v1.7.10-ops.20261016.2'
+COMMIT = 'e7055ea6c9e06e9556052659c65539c4a3df1bde'
+TAG = 'v1.7.12'
+PATCH_ID = 'v1.7.12-ops.20261018.1'
 PATCH_SOURCE = 'wushuai0802/workbuddy2api-hub-ops-patch'
-MODULES = ('wb_proxy.py', 'wb_webtools.py', 'wb_accounts.py', 'wb_ops.py', 'wb_stall.py', 'wb_upstream_pool.py', 'wb_observe.py')
+MODULES = ('dashboard.html', 'wb_proxy.py', 'wb_webtools.py', 'wb_accounts.py', 'wb_ops.py', 'wb_stall.py', 'wb_upstream_pool.py', 'wb_observe.py')
 PUBLIC_DIRS = ('files', 'tests', 'docs', 'scripts', 'patches', '.github')
 PUBLIC_ROOT = ('README.md', 'README.en.md', 'LICENSE', 'NOTICE.md', 'THIRD-PARTY-zh.md', 'CHANGELOG.md',
                'release-notes.md', '.gitignore', '.gitattributes', 'apply.py', 'BASELINE.json')
@@ -57,7 +57,7 @@ def main():
             payload.decode('utf8').splitlines(keepends=True),
             fromfile='a/' + name if base is not None else '/dev/null', tofile='b/' + name))
     dependencies = sorted([path.name for path in upstream.glob('wb_*.py') if path.name not in MODULES]
-                          + ['dashboard.html'])
+                          + [name for name in ('dashboard.html',) if name not in MODULES])
     payload_identity = hashlib.sha256(''.join(
         name + ':' + files[name]['patched_sha256'] + '\n' for name in sorted(files)
     ).encode('ascii')).hexdigest()

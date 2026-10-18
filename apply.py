@@ -18,18 +18,18 @@ import uuid
 STATE = ".ops-patch-state.json"
 BACKUPS = ".ops-patch-backups"
 LOCK = ".ops-patch.lock"
-FILES = {"wb_proxy.py", "wb_webtools.py", "wb_accounts.py", "wb_ops.py", "wb_stall.py", "wb_upstream_pool.py", "wb_observe.py"}
+FILES = {"dashboard.html", "wb_proxy.py", "wb_webtools.py", "wb_accounts.py", "wb_ops.py", "wb_stall.py", "wb_upstream_pool.py", "wb_observe.py"}
 NEW_FILES = {"wb_ops.py", "wb_stall.py", "wb_observe.py"}
 DEPENDENCIES = {
-    "dashboard.html", "wb_activity.py", "wb_agents.py",
+    "wb_activity.py", "wb_agents.py",
     "wb_atrest.py", "wb_catalog.py", "wb_egress.py", "wb_fingerprint.py", "wb_identity.py",
     "wb_ipintel.py", "wb_modelsdev.py", "wb_pricing.py", "wb_probes.py",
     "wb_logstore.py",
     "wb_prompt.py", "wb_scheduler.py", "wb_settings.py", "wb_tasks.py",
     "wb_updates.py", "wb_webagent.py",
 }
-BASE_TAG = "v1.7.10"
-UPSTREAM_COMMIT = "7e5c38dd18d78e6582f6f5730bc2f050c601d142"
+BASE_TAG = "v1.7.12"
+UPSTREAM_COMMIT = "e7055ea6c9e06e9556052659c65539c4a3df1bde"
 
 
 def digest(data):
@@ -162,7 +162,8 @@ class Bundle:
             data = (self.root / payload_name).read_bytes()
             if source_digest(data) != entry["patched_sha256"]:
                 raise ValueError("payload/source checksum mismatch: " + name)
-            ast.parse(data.decode("utf-8"), filename=name)
+            if name.endswith('.py'):
+                ast.parse(data.decode("utf-8"), filename=name)
             self.payload[name] = data
 
     def target(self, directory):

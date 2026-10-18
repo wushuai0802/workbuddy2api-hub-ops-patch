@@ -374,8 +374,10 @@ REALM_CONFIGS = {
         "billing_upstream": "https://www.workbuddy.ai",
         "origin": "https://www.workbuddy.ai",
         "domain": "www.workbuddy.ai",
-        "chat_ua": "WorkBuddy/5.5.2 WorkBuddy AI/5.5.2 CLI/5.5.2",
-        "billing_ua": "WorkBuddy/5.5.2",
+        # 5.8.4 实测（2026-10-16 抓包）：桌面端 UA 是三段式，末段是客户端内置
+        # CLI 的版本；取值与 wb_identity.DESKTOP_UA_INTL 保持同一来源。
+        "chat_ua": wb_identity.DESKTOP_UA_INTL,
+        "billing_ua": "WorkBuddy/%s" % wb_identity.DESKTOP_VERSION_INTL,
         "info_filename": "workbuddy-desktop-ai.info",
         "cache_dir_name": ".workbuddy-ai",
         "has_checkin": False,
@@ -386,8 +388,10 @@ REALM_CONFIGS = {
         "billing_upstream": "https://www.codebuddy.cn",
         "origin": "https://www.codebuddy.cn",
         "domain": "copilot.tencent.com",
-        "chat_ua": "WorkBuddy/5.5.6 WorkBuddy/5.5.6 CLI/2.137.1",
-        "billing_ua": "WorkBuddy/5.5.6",
+        # 国内版没有对应抓包，取值维持原样，但同样从 wb_identity 取，
+        # 免得两处各写一份（国际版 5.8.4 对齐时就漏改过 intl 那一份）。
+        "chat_ua": wb_identity.DESKTOP_UA_CN,
+        "billing_ua": "WorkBuddy/%s" % wb_identity.DESKTOP_VERSION_CN,
         "info_filename": "workbuddy-desktop.info",
         "cache_dir_name": ".workbuddy",
         "has_checkin": True,
@@ -409,7 +413,10 @@ ENTERPRISE_USAGE_PATH = "/billing/meter/get-enterprise-user-usage"
 LOGIN_PENDING = 11217
 LOGIN_TTL_SECONDS = 600
 USER_AGENT = REALM_CONFIGS['intl']['chat_ua']
-DEFAULT_UA_VERSION = '5.5.2'
+#: 国际版桌面端的版本号。以前这里硬编码 5.5.2，和 wb_identity 的
+#: DESKTOP_VERSION_INTL 各写一份，改版本时容易只改一处（5.8.4 对齐时
+#: 就漏了这个常量）。现在统一从 wb_identity 取，保持单一来源。
+DEFAULT_UA_VERSION = wb_identity.DESKTOP_VERSION_INTL
 
 def get_realm_config(realm):
     return REALM_CONFIGS.get(realm) or REALM_CONFIGS["intl"]
@@ -459,6 +466,29 @@ FREE_CAP_MODELS = {
     "intl": frozenset({"hy4-preview-f", "hy3", "deepseek-v4.1-flash"}),
     "cn": frozenset({"hy4-preview-f", "hy3"}),
 }
+
+
+def normalise_disabled_models(raw):
+    """把「人工禁用的模型名单」归一成干净的 list[str]。
+
+    供账号档加载与面板写入两条路共用，保证「内存里的判断」和「落盘的内容」
+    口径一致：保留非空字符串、按小写归一（与 is_model_banned 同口径）、去重、
+    保持输入顺序。非列表输入一律当作「没配」返回空列表——坏数据不至于让账号
+    加载失败。
+    """
+    out = []
+    if not isinstance(raw, (list, tuple)):
+        return out
+    seen = set()
+    for mid in raw:
+        if not isinstance(mid, str):
+            continue
+        m = mid.strip().lower()
+        if not m or m in seen:
+            continue
+        seen.add(m)
+        out.append(m)
+    return out
 
 
 def is_free_cap_model(realm, model):
@@ -725,6 +755,18 @@ class Account(object):
         # 写过，超长截断，别让一条长备注把账号行撑爆。
         raw_note = data.get("note")
         self.note = (raw_note if isinstance(raw_note, str) else "").strip()[:200]
+        # 该账号**人工**禁用的模型名单（面板 / 接口配置）。与 weight、note 同款：
+        # 随凭证档持久化 —— 这是使用者的明确意图，不该在重启后悄悄回到默认。
+        #
+        # 与 model_cooldowns / model_caps 那些**自动**节流区分开：那些表达「暂时
+        # 不该用」（限流或额度撞线的恢复窗口），这里表达「这个号就别碰这几个
+        # 模型」。典型用途：某个号在某些模型上有授权/合规限制，但同一个模型还想
+        # 走别的号——那就禁这一对组合，而不是把整个号停掉。
+        #
+        # 模型 id 统一**小写**存储与比较（与 is_model_banned 的口径一致），
+        # 只做精确匹配不做前缀：行为可预期，不会误伤同前缀的其他模型。
+        raw_deny = data.get("disabledModels")
+        self.disabled_models = normalise_disabled_models(raw_deny)
         # Live error state, never restored from the credential file: the label
         # describes the last upstream answer, not the credential. It used to be
         # persisted and read back, so a 429 that had long since recovered came
@@ -768,6 +810,8 @@ class Account(object):
         self.degrade_until = 0.0
         # 最近一次记失败的时刻：FAIL_WINDOW 用它判断「连续」是否还成立。
         self.last_fail_at = 0.0
+        # 最近一次软限流（429）的时刻：两条软限流阶梯用同一个时间窗。
+        self.last_soft_at = 0.0
         self.credits = data.get("credits") or None
         self.last_checkin = data.get("lastCheckin") or None
         self.last_daily_chat = data.get("lastDailyChat") or None
@@ -876,6 +920,7 @@ class Account(object):
             "enabled": self.enabled,
             "weight": self.weight,
             "note": self.note,
+            "disabledModels": list(self.disabled_models),
             "lastError": self.last_error,
             "cooldownUntil": self.cooldown_until,
             "credits": self.credits,
@@ -929,6 +974,7 @@ class Account(object):
             "enabled": bool(self.enabled),
             "weight": int(self.weight),
             "note": self.note,
+            "disabledModels": list(self.disabled_models),
             "source": self.source,
             "proxySlot": self.proxy_slot,
             "proxy": self.proxy,
@@ -1277,6 +1323,10 @@ class Account(object):
             return "已停用"
         if not self.access_token:
             return "无凭证"
+        # 与 ready() 同序：人工黑名单排在所有「暂时不可用」之前，所以
+        # 「所有账号都禁用了这个模型」时，池子抽干的报错里会逐个号写明原因。
+        if self.model_disabled(model):
+            return "该模型已被人工禁用"
         now = time.time()
         # 四种惩罚的到期时间各走各的，谁把时间推得最远就报谁：只报「冷却」
         # 会让人往 429 的方向查，而实际可能是上游连续断连触发的熔断（30 分钟
@@ -1287,7 +1337,15 @@ class Account(object):
             penalties.append(("模型 %s 冷却" % model, self.model_cooldowns.get(model, 0.0)))
         label, until = max(penalties, key=lambda item: item[1])
         if until > now:
-            return "%s 剩余 %s" % (label, _human_delta(until - now) or "?")
+            # 剩余时间要精确到秒：还剩 42 秒时写「0 min」，读起来就是「已经该能用
+            # 了却还被挡着」——生产日志里那串「软限流冷却 剩余 0 min」就是这么
+            # 来的。连续次数一并带上，才看得出是在升级还是刚开始。
+            streak = ""
+            if label == "软限流冷却" and self.soft_streak > 1:
+                streak = "（连续第 %d 次）" % self.soft_streak
+            elif label.startswith("模型") and self.unscoped_streak > 1:
+                streak = "（连续第 %d 次）" % self.unscoped_streak
+            return "%s 剩余 %s%s" % (label, _human_left(until - now), streak)
         if self.reserve_blocked():
             return "余额低于保留线"
         if self.daily_limit_blocked():
@@ -1301,8 +1359,23 @@ class Account(object):
             return "凭证已过期"
         return ""
 
+    def model_disabled(self, model):
+        """这个账号被人工禁用了该模型？空名单恒为 False。
+
+        与自动节流区分：`model_cooldowns` / `model_caps` 表达「暂时不该用」，
+        这里是使用者明确指定的「这个号就别碰这几个模型」。精确匹配（名单在
+        加载时已按小写归一），不做前缀匹配。
+        """
+        if not model or not self.disabled_models:
+            return False
+        return str(model).strip().lower() in self.disabled_models
+
     def ready(self, model=None):
         if not self.enabled or not self.access_token:
+            return False
+        # 人工黑名单排在最前：它是静态配置（最便宜），而且在语义上优先于所有
+        # 「暂时不可用」的判断 —— 被禁用的模型不该因为账号恰好恢复了就漏进来。
+        if self.model_disabled(model):
             return False
         if self.throttle_wait(model=model) > 0:
             return False
@@ -2376,11 +2449,26 @@ class Account(object):
     def note_soft_rate(self, message):
         """Account-level rate limit: soft cooldown with exponential backoff."""
         with self._throttle_lock:
+            self._decay_soft_streak()
             self.soft_streak += 1
             wait = soft_backoff(self.soft_streak)
             self.last_error = str(message)[:200]
             self.cooldown_until = max(self.cooldown_until, time.time() + wait)
         return wait
+
+    def _decay_soft_streak(self):
+        """软限流阶梯也要有时间窗（调用方已持有 _throttle_lock）。
+
+        这两条阶梯原先只加不减、只有成功才归零：昨天被限过 3 次，今天第一个
+        429 就直接从 2400s 起步，后天起步更高，直到 7200s 封顶——账号明明已经
+        恢复正常（面板测试通过），却动不动被按几十分钟到两小时，这正是「不断
+        软限流」的另一半。窗口内才算连续，隔得久就回到第一档（600s / 60s）。
+        """
+        now = time.time()
+        if FAIL_WINDOW and self.last_soft_at and now - self.last_soft_at > FAIL_WINDOW:
+            self.soft_streak = 0
+            self.unscoped_streak = 0
+        self.last_soft_at = now
 
     def note_unscoped_rate(self, model):
         """An unscoped soft 429: grow its own streak, return this model's window.
@@ -2393,6 +2481,7 @@ class Account(object):
         request clears both through note_success().
         """
         with self._throttle_lock:
+            self._decay_soft_streak()
             self.unscoped_streak += 1
             return unverified_soft_backoff(self.unscoped_streak)
 
@@ -2445,6 +2534,7 @@ class Account(object):
             self.fails = 0
             self.degrade_count = 0
             self.last_fail_at = 0.0
+            self.last_soft_at = 0.0
             self.breaker_until = 0.0
             self.degrade_until = 0.0
             self.last_error = ""
@@ -2500,6 +2590,25 @@ def _human_delta(seconds):
     hours = seconds / 3600.0
     if hours >= 1: return "%.1f hours" % hours
     return "%d min" % int(seconds / 60)
+
+def _human_left(seconds):
+    """还剩多久，精确到秒（对外解释「为什么现在不能用」时用）。
+
+    `_human_delta` 是给凭据有效期那种以天计的场景用的，小于一分钟一律写
+    「0 min」；而冷却/熔断的剩余时间经常就是几十秒，写成 0 分钟会让人以为
+    账号已经可用、网关还在挡它。
+    """
+    secs = max(0, int(round(seconds)))
+    if secs < 60:
+        return "%ds" % secs
+    if secs < 3600:
+        m, s = divmod(secs, 60)
+        return "%dm%02ds" % (m, s) if s else "%dm" % m
+    if secs < 86400:
+        h, rem = divmod(secs, 3600)
+        m = rem // 60
+        return "%dh%02dm" % (h, m) if m else "%dh" % h
+    return "%.1f days" % (secs / 86400.0)
 
 class SessionAffinity(object):
     """Which upstream account served a conversation, so the next turn can go
@@ -2961,6 +3070,23 @@ class AccountPool(object):
         if account is None:
             return None
         account.note = str(note or "").strip()[:200]
+        account.save(self.dir)
+        return account.public()
+
+    def set_disabled_models(self, uid, models):
+        """设置该账号**人工**禁用的模型名单，落盘并回公共视图。
+
+        语义：这些模型不再派给这个账号。不影响该账号的其他模型，也不影响其他
+        账号对同一模型的可用性 —— 请求会自动落到池子里别的号上。传空列表 =
+        清空禁用、恢复原行为。
+
+        名单按 normalise_disabled_models 归一；坏输入退化成空列表（= 不禁用）
+        而不是抛错：面板传进来什么形状都不该让一个账号加载失败。
+        """
+        account = self.get(uid)
+        if account is None:
+            return None
+        account.disabled_models = normalise_disabled_models(models)
         account.save(self.dir)
         return account.public()
 

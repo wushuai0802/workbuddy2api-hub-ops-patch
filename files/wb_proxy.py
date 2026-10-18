@@ -60,6 +60,7 @@ import math
 import urllib.error
 import urllib.request
 import uuid
+import subprocess
 import wb_accounts
 import wb_activity
 import wb_atrest
@@ -269,6 +270,86 @@ def install_console_close_handler():
         return handler
     except Exception:
         return None
+
+# ---------------------------------------------------------------------------
+# 日志终端查看器（双进程模型）
+#
+# 服务进程以 pythonw 静默后台运行（无窗口、关闭任何窗口都不停）。用户看到的
+# "终端"是一个独立的 console_tail.py 进程——它只连本地 /logs 接口实时打印日志，
+# 关掉它不影响服务。启动脚本会弹一个；面板眼睛按钮可以再开/关一个。
+# ---------------------------------------------------------------------------
+CONSOLE_VIEWER_PROC = None
+_LISTEN_PORT = 8788
+
+def _console_python():
+    """Find a console (windowed) python next to the running interpreter.
+
+    The service is launched with pythonw (GUI subsystem, no console), so
+    sys.executable is pythonw.exe. To open a visible viewer window we need the
+    console sibling (python.exe) in the same directory.
+    """
+    exe = sys.executable or "python"
+    d = os.path.dirname(exe)
+    cand = os.path.join(d, "python.exe")
+    if os.path.exists(cand):
+        return cand
+    if exe.lower().endswith("pythonw.exe"):
+        cand2 = exe[: -len("pythonw.exe")] + "python.exe"
+        if os.path.exists(cand2):
+            return cand2
+    return exe
+
+def _console_viewer_running():
+    return bool(CONSOLE_VIEWER_PROC and CONSOLE_VIEWER_PROC.poll() is None)
+
+def _launch_console_viewer():
+    """Launch console_tail.py in its own NEW console window.
+
+    Returns True on launch, False if already running, None if the script is
+    missing. A server-generated panel token is passed so the viewer works even
+    if the panel password was changed from the default.
+    """
+    global CONSOLE_VIEWER_PROC
+    if _console_viewer_running():
+        return False
+    here = os.path.dirname(os.path.abspath(__file__))
+    script = os.path.join(here, "console_tail.py")
+    if not os.path.exists(script):
+        return None
+    py = _console_python()
+    try:
+        token = PANEL.create()
+    except Exception:
+        token = ""
+    try:
+        proc = subprocess.Popen(
+            [py, "-u", script, "--port", str(_LISTEN_PORT), "--token", token],
+            creationflags=0x00000010,  # CREATE_NEW_CONSOLE
+            stdin=subprocess.DEVNULL,
+        )
+        CONSOLE_VIEWER_PROC = proc
+        return True
+    except Exception:
+        return None
+
+def _kill_console_viewer():
+    global CONSOLE_VIEWER_PROC
+    if _console_viewer_running():
+        try:
+            CONSOLE_VIEWER_PROC.terminate()
+        except Exception:
+            pass
+        CONSOLE_VIEWER_PROC = None
+        return True
+    CONSOLE_VIEWER_PROC = None
+    return False
+
+def _console_capabilities():
+    managed = server_deployment_form()
+    viewer_script = os.path.join(os.path.dirname(__file__), "console_tail.py")
+    return {"supported": os.name == "nt" and not managed and os.path.isfile(viewer_script),
+            "shutdown_supported": not managed}
+
 UPSTREAM = "https://www.workbuddy.ai"
 CHAT_PATH = "/v2/chat/completions"
 MODELS_PATH = "/v2/enterprises/personal/models"
@@ -517,6 +598,45 @@ def identify_key(supplied):
     """
     extra = () if configured_keys() else (API_KEY,)
     return wb_settings.match_api_key(ACCOUNTS_DIR, supplied, extra_keys=extra)
+# ---------------------------------------------------------------------------
+# API Key 的日志显示名（issue #397）
+# ---------------------------------------------------------------------------
+# 请求日志原本只到账号粒度（`acct=`）。多人共用一个网关时，看到异常流量分不清
+# 「是哪个人发起的」——只能事后去用量页倒推。这里把 key 的 name（没填 name 就
+# 回退 id）拼进日志行。
+#
+# 只做「id -> 显示名」的只读查表：key 本身仍由调用方显式传入（理由见
+# record_usage 的说明），不引入线程局部的隐式通道。名单带短 TTL 缓存，
+# 避免每条请求都读一次 settings.json。
+_KEY_LABEL_TTL = 5.0
+_KEY_LABEL_FALLBACK = "(切换前)"
+_key_label_cache = {"at": 0.0, "map": {}}
+_key_label_lock = threading.Lock()
+
+
+def key_label(key_id):
+    """key 的 settings id -> 日志里显示的名字；name 为空就回退 id。
+
+    空 id（未带 key / 面板会话 / 未配置 key 的部署）返回空串 —— 调用方据此
+    决定要不要拼这一段；未知 id 原样返回，日志里仍能对上一个具体的 key。
+    """
+    if not key_id:
+        return ""
+    now = time.time()
+    with _key_label_lock:
+        if (now - _key_label_cache["at"]) > _KEY_LABEL_TTL:
+            try:
+                _key_label_cache["map"] = {
+                    str(entry.get("id")): (str(entry.get("name") or "").strip()
+                                           or str(entry.get("id")))
+                    for entry in configured_keys()
+                }
+            except Exception:
+                _key_label_cache["map"] = {}
+            _key_label_cache["at"] = now
+        return _key_label_cache["map"].get(str(key_id)) or str(key_id)
+
+
 def _empty_stats():
     return {"requests": 0, "errors": 0, "prompt_tokens": 0, "completion_tokens": 0,
             "reasoning_tokens": 0, "cached_tokens": 0, "total_tokens": 0,
@@ -829,9 +949,10 @@ def record_usage(model, usage, stream=None, elapsed_ms=None, ttft_ms=None, gen_m
         t_tokens = fields.get("total_tokens", 0)
         dur = f" {elapsed_ms:.0f}ms" if elapsed_ms is not None else ""
         acc_tag = f" acct={account[:8]}" if account else ""
+        key_tag = f" key={key_label(key)}" if key else ""
         speed_tag = f" {row.get('tokens_per_sec', 0)}t/s" if row.get("tokens_per_sec") else ""
         miss_tag = " usage=missing" if usage_missing else ""
-        log(f"chat done: model={model}{acc_tag}{dur} tokens={t_tokens} (in={fields.get('prompt_tokens',0)} out={fields.get('completion_tokens',0)}){speed_tag}{miss_tag}", tag="chat")
+        log(f"chat done: model={model}{acc_tag}{key_tag}{dur} tokens={t_tokens} (in={fields.get('prompt_tokens',0)} out={fields.get('completion_tokens',0)}){speed_tag}{miss_tag}", tag="chat")
     except Exception:
         pass
     return row
@@ -5732,6 +5853,9 @@ def recent_usage(limit=100, realm=None, page=1):
     # are all None when the row is unpriced - the panel must say so rather
     # than show a made-up 0.
     for r in page_rows:
+        # 面板「最近请求」要显示发起方，而 usage.jsonl 里存的是 key 的 id；
+        # 这里补一个可读的显示名（见 key_label），前端直接渲染成列。
+        r["key_name"] = key_label(r.get("key"))
         cost = wb_pricing.cost_for_row(r)
         r["cost_cny"] = round(cost["cny"], 6) if cost["known"] else None
         r["cost_band"] = cost["band"] if cost["known"] else None
@@ -9902,7 +10026,7 @@ def runtime_settings_view():
         "accounts_dir": ACCOUNTS_DIR,
         "usage_dir": USAGE_DIR,
         "settings_file": wb_settings.settings_path(ACCOUNTS_DIR),
-        "version": "1.7.10",
+        "version": "1.7.12",
     }
 def current_account():
     """Account used for display purposes (health / usage summaries)."""
@@ -11060,7 +11184,7 @@ def retry_snapshot():
 def _patch_payload_fingerprint():
     """Identify this source payload without reading any account or settings."""
     directory = os.path.dirname(__file__)
-    names = ('wb_accounts.py', 'wb_observe.py', 'wb_ops.py', 'wb_proxy.py', 'wb_stall.py', 'wb_upstream_pool.py', 'wb_webtools.py')
+    names = ('dashboard.html', 'wb_accounts.py', 'wb_observe.py', 'wb_ops.py', 'wb_proxy.py', 'wb_stall.py', 'wb_upstream_pool.py', 'wb_webtools.py')
     records = []
     try:
         for name in names:
@@ -11072,7 +11196,7 @@ def _patch_payload_fingerprint():
     return hashlib.sha256(''.join(records).encode('ascii')).hexdigest()
 
 _OPS_PATCH_FINGERPRINT = _patch_payload_fingerprint()
-_OPS_PATCH_ID = "v1.7.10-ops.20261016.2"
+_OPS_PATCH_ID = "v1.7.12-ops.20261018.1"
 _OBSERVATION_STORE = None
 _OBSERVATION_STORE_LOCK = threading.Lock()
 
@@ -14624,6 +14748,13 @@ def open_upstream(payload, session_key=None, target_realm=None,
                 continue
             charge_account(account, str(exc)[:120], unknown=True)
             account.note_error(str(exc)[:120], cooldown=60, single_account=(total <= 1))
+            # 这一类失败以前是静默的：账号被记一笔 + 冷却 3/60 秒，日志里一个字
+            # 都没有。于是「账号不断冷却、可面板测试又是绿的」在生产上只能靠猜
+            # ——池子空了的报错只说得清「谁在冷却」，说不清「是谁把它记成冷却的」。
+            # 把 uid、异常原文与刚设的冷却时长打出来，下次对上号就能直接定位。
+            log("account %s: %s, cooling %.0fs (fails=%d, ready=%d)"
+                % (account.uid[:8], exc_detail(exc, 160),
+                   3.0 if total <= 1 else 60.0, account.fails, total))
             last_error = exc
             continue
     # Only spend credits after every enabled, credential-bearing account in
@@ -18017,7 +18148,7 @@ class Handler(BaseHTTPRequestHandler):
             super().finish()
         except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
             pass
-    server_version = "wb-proxy/1.7.10"
+    server_version = "wb-proxy/1.7.12"
     def log_message(self, fmt, *args):
         # 静默过滤前端看板高频定时心跳的正常 200 GET 请求（/logs、/usage、/accounts 轮询等）
         # 避免自增死循环刷屏与日志污染。遇 4xx/5xx 异常或所有非 GET 业务操作依然如实记录。
@@ -18491,6 +18622,10 @@ class Handler(BaseHTTPRequestHandler):
             return True
         if path.startswith("/logs"):
             return True
+        # 控制台窗口显隐 / 服务关闭是本机操作者的面板功能，与 /updates、
+        # /logs 同属 panel-only。
+        if path.startswith("/console"):
+            return True
         # The pricing table is the panel's own view of the estimate, not part
         # of the OpenAI-compatible surface: its writes (/pricing/refresh,
         # /pricing/mapping) were already panel-only, and the read side returns
@@ -18525,6 +18660,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._get_dashboard()
         if path == "/panel/status":
             return self._get_panel_status()
+        if path == "/console/state":
+            return self._get_console_state()
         if path == "/health":
             return self._get_health()
         if path == "/health/retry":
@@ -18620,6 +18757,57 @@ class Handler(BaseHTTPRequestHandler):
         # process, and the settings endpoint only reports a masked form.
         info["api_key_set"] = bool(API_KEY)
         return self._json(200, info)
+
+    def _get_console_state(self):
+        capabilities = _console_capabilities()
+        return self._json(200, dict(capabilities,
+                          visible=capabilities["supported"] and _console_viewer_running()))
+
+    def _route_console_toggle(self):
+        # 按钮请求均携带 `{}` body 但不解析：必须把残留字节读掉，否则同一条
+        # keep-alive 连接上的下一个请求会以 "{}POST /console/toggle" 进场 →
+        # 501（2026-10-16 面板连点按钮实测）。顺序与 _error 相同：先应对
+        # Expect: 100-continue，否则排空会等待一个永远不会发出的 body。
+        self._handle_expect_continue()
+        self._discard_body()
+        self._body_consumed = True
+        if not _console_capabilities()["supported"]:
+            return self._error(403, "Log viewer windows are unavailable for this deployment", "invalid_request_error")
+        if _console_viewer_running():
+            _kill_console_viewer()
+            visible = False
+        else:
+            launched = _launch_console_viewer()
+            if launched is None:
+                return self._error(503, "Log viewer could not be opened", "server_error")
+            visible = bool(launched) or _console_viewer_running()
+        return self._json(200, {"ok": True, "visible": visible})
+
+    def _route_shutdown(self):
+        # 同 toggle：按钮的 `{}` body 不解析也必须排空，否则它会污染同一条
+        # keep-alive 连接上的下一个请求（连点触发 501）。
+        self._handle_expect_continue()
+        self._discard_body()
+        self._body_consumed = True
+        if not _console_capabilities()["shutdown_supported"]:
+            return self._error(403, "Stop this service through its deployment manager", "invalid_request_error")
+        # 先关掉日志终端窗口：服务一旦退出，查看器轮询 /logs 会持续报
+        # 「上游拒绝连接」。先把窗口结束掉，用户就看不到任何报错。
+        # 然后回响应、延迟退出：0.4s 让 _json 的 body 先 flush 到
+        # socket；端口随进程释放，下次启动走原来的启动脚本。
+        try:
+            _kill_console_viewer()
+        except Exception:
+            pass
+        def _bye():
+            time.sleep(0.4)
+            try:
+                sys.stdout.flush()
+            except Exception:
+                pass
+            os._exit(0)
+        threading.Thread(target=_bye, daemon=True).start()
+        return self._json(200, {"ok": True, "shutting_down": True})
 
     def _get_health(self):
         # Always answer (the launcher uses this to detect a running copy),
@@ -20735,6 +20923,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(404, "no such account")
             log("account %s note set (%d chars)"
                 % (uid[:8], len(updated.get("note") or "")))
+        if "disabledModels" in payload:
+            # 人工黑名单：这些模型不再派给该账号，其他模型与别的账号都不受影响。
+            # 传空数组 = 清空禁用。
+            updated = POOL.set_disabled_models(uid, payload.get("disabledModels"))
+            if updated is None:
+                return self._error(404, "no such account")
+            log("account %s disabled models: %s"
+                % (uid[:8],
+                   ",".join(updated.get("disabledModels") or []) or "(none)"))
         if updated is None:
             return self._error(
                 400,
@@ -20843,11 +21040,11 @@ class Handler(BaseHTTPRequestHandler):
         t_start = time.time()
         fp = prompt_fingerprint(chat_req.get("messages"))
         log(
-            "responses: model=%s stream=%s msgs=%d effort=%r tools=%d/%d custom_tools=%s"
+            "responses: model=%s stream=%s msgs=%d effort=%r tools=%d/%d custom_tools=%s key=%s"
             % (model, want_stream, len(chat_req.get("messages") or []),
                chat_req.get("reasoning_effort"),
                len(chat_req.get("tools") or []), len(all_tools),
-               sorted(custom_names) or "-")
+               sorted(custom_names) or "-", key_label(self._key_id()) or "-")
         )
         try:
             req_realm = self._request_realm() or CURRENT_REALM
@@ -21136,9 +21333,10 @@ class Handler(BaseHTTPRequestHandler):
             client_ip = self.client_address[0] if self.client_address else ""
         except Exception:
             client_ip = ""
-        log("messages: model=%s stream=%s msgs=%d effort=%r tools=%d"
+        log("messages: model=%s stream=%s msgs=%d effort=%r tools=%d key=%s"
             % (model, want_stream, len(chat_req.get("messages") or []),
-               chat_req.get("reasoning_effort"), len(chat_req.get("tools") or [])))
+               chat_req.get("reasoning_effort"), len(chat_req.get("tools") or []),
+               key_label(self._key_id()) or "-"))
         try:
             req_realm = self._request_realm() or CURRENT_REALM
             blocked = self._cross_realm_error(chat_req.get("model"), req_realm)
@@ -21319,6 +21517,19 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = self.path.split("?")[0]
+        if path == "/console/toggle":
+            # Panel-only management write: 收起/唤出本进程自己的控制台窗口，
+            # 与设置、定价那几个写入同一个门。按钮带 `{}` body，
+            # 路由内负责排空（见 _route_console_toggle）。
+            if not self._panel_ok():
+                return self._error(401, "panel password required", "invalid_request_error")
+            return self._route_console_toggle()
+        if path == "/shutdown":
+            # 面板顶栏的「关闭服务」：优雅退出（先回响应再 os._exit），
+            # 端口随进程释放；再次启动走原来的启动脚本。
+            if not self._panel_ok():
+                return self._error(401, "panel password required", "invalid_request_error")
+            return self._route_shutdown()
         if path == "/settings/save":
             if not self._panel_ok():
                 return self._error(401, "panel password required", "invalid_request_error")
@@ -21497,13 +21708,14 @@ class Handler(BaseHTTPRequestHandler):
         given = client_effort_of(payload) or payload.get("reasoning") \
             or payload.get("thinking") or payload.get("enable_thinking")
         log(
-            "chat: model=%s client_effort=%r -> upstream_effort=%r stream=%s msgs=%d"
+            "chat: model=%s client_effort=%r -> upstream_effort=%r stream=%s msgs=%d key=%s"
             % (
                 payload.get("model"),
                 given,
                 upstream_effort_of(forwarded, payload.get("model")),
                 bool(payload.get("stream")),
                 len(forwarded.get("messages") or []),
+                key_label(self._key_id()) or "-",
             )
         )
         session_key = extract_session_key(self.headers, payload)
@@ -21686,7 +21898,9 @@ def running_version():
     return Handler.server_version.split("/", 1)[-1]
 
 def main():
+    global _LISTEN_PORT
     args = _parse_cli_args()
+    _LISTEN_PORT = args.port
     _apply_cli_overrides(args)
     if _probe_running_instance(args):
         return
@@ -22023,6 +22237,14 @@ def _serve_forever(args):
             pass
 
 if __name__ == "__main__":
+    # pythonw (GUI subsystem) starts with sys.stdout/sys.stderr == None; any
+    # print/log would raise. Redirect to /dev/null so the process runs headless
+    # with no console window (nothing in the taskbar), while the in-memory log
+    # buffer the panel "运行日志" page reads stays fully intact.
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w")
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w")
     try:
         # Keep console output readable regardless of the active code page.
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
