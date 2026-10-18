@@ -4,17 +4,17 @@
 
 为 WorkBuddy 网关提供 DeepSeek 复读保护、受限认证续期、推理历史与工具图片兼容，以及流式协议边界修复。基于[官方项目](https://github.com/ardeyouxipianyi/workbuddy2api-hub)，可检查、可回退，遵循 MIT。
 
-当前版本：**v1.7.12-ops.20261018.1**。
+当前版本：**v1.7.15-ops.20261018.1**。
 
-纳入软限流衰减、账号模型黑名单、Key调用追踪和错峰调度；修复管理型部署误报桌面控制能力、停止请求失败却冻结轮询、日志窗口启动失败却报成功。看板纳入安装/回滚及运行指纹，原防复读/期限/用量/连接保护保持。
+纳入v1.7.13～1.7.15的出站身份/账号连接隔离、工具Schema与图片/配对修复、积分护栏、可配置排程及冷却展示。保留防复读与期限保护，完善401同号重试、定址账号恢复隔离，以及管理型部署的停止保护。
 
-- [下载 ZIP 与 SHA256SUMS.txt](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.7.12-ops.20261018.1)
-- 文件名：`workbuddy2api-hub-v1.7.12-wushuai0802-ops-20261018-r1.zip`
-- 仅支持官方 **v1.7.12**，提交 `e7055ea6c9e06e9556052659c65539c4a3df1bde`。
+- [下载 ZIP 与 SHA256SUMS.txt](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.7.15-ops.20261018.1)
+- 文件名：`workbuddy2api-hub-v1.7.15-wushuai0802-ops-20261018-r1.zip`
+- 仅支持官方 **v1.7.15**，提交 `497db0d99487c0046c3732d880e4ac86582801b5`。
 - Python 3.11+。Docker 用户从打过完整补丁的准确源码重新构建镜像。
 - 安装器替换四个上游Python模块（proxy、accounts、webtools、upstream_pool）及看板，新增 ops、stall、observe 三个模块；不操作账号、Key、配置、历史或部署。
 
-本版把已有补丁迁移到官方 v1.7.12，保留混合复读、推理别名预算、工具图片、拒答、用量结算和连接所有权保护。来源与许可见 [NOTICE.md](NOTICE.md) 和 [THIRD-PARTY-zh.md](THIRD-PARTY-zh.md)。
+本版把已有补丁迁移到官方 v1.7.15，保留混合复读、推理别名预算、工具图片、拒答、用量结算和连接所有权保护。来源与许可见 [NOTICE.md](NOTICE.md) 和 [THIRD-PARTY-zh.md](THIRD-PARTY-zh.md)。
 
 本次修复响应头预算被固定45秒覆盖的问题：响应头尊重面板设置，返回后才开始45秒首帧预算；初始连接、恢复和网页工具后续生成共享原300秒总期限。纯推理循环的唯一一次安全恢复默认加入简短接续提示，可用 `WB_OPS_LOOP_RECOVERY_HINT=0` 关闭提示。连续已知失败前缀最多清理16段/65536字符，保留未知后缀和客户端原历史。持久观察新增匿名规则、窗口计数和恢复停止原因；检测阈值保持。
 
@@ -32,9 +32,13 @@
 
 上游 v1.7.4/1.7.5 增加默认关闭的SQLite日志及保留限制、checkpoint修复、凭据手动导入、新主题/统计面板、每日及手动模型目录刷新、来源标记和原始目录归档。模型目录/倍率现在优先使用实际API结果，显示可能变化；这些原生功能不代替防复读。SQLite日志是否启用沿用用户设置，公开包不自动开启。
 
-## v1.7.12 升级与修复
+## v1.7.15 升级与修复
 
-新增的账号模型黑名单默认空，不替你禁模型；软限流计数按600秒窗口衰减，Key调用方标识、账号间错峰及新版主题/积分看板保留。管理型部署的桌面窗口和停止按钮禁用；Windows桌面需有原生console_tail.py才启用日志窗口。停止请求未确认成功时继续轮询并显示失败。当前看板与Python代码一起安装/回滚和校验指纹。
+日志按钮使用原生浏览器日志页，Windows/Linux/NAS均可打开，不再创建服务端窗口；管理型部署仍拒绝进程内停止。桌面停止须先收到明确确认，再以有超时的健康探测复核；401/403/断网、无确认、探测超时/HTTP错误或仍在运行时保持轮询。当前看板与Python代码一起安装/回滚和校验指纹。
+
+401只走有界请求刷新，不叠加后台三次重试；成功后优先原账号，并重新检查模型禁用/可用性。刷新超时、响应过大及HTML代理401不再误标为凭据过期，错误正文也受原期限与4096字节上限约束。新增`/u/<ref>/v1/...`定址路由在跨线程恢复中不会丢失账号限制，也不会自动转积分版。
+
+保留上游403/11140限制持久化与整池暂停、证书校验失败不轮换、可选私有CA，以及工具Schema规整/插入消息配对/结构化图片。DeepSeek工具消息图片仍按兼容规则处理，用户图片保持。额度扫描默认空名单；原生窗口探针默认开启，会在额度重置时发起模型请求。希望保持旧版无主动探针行为时，部署前显式设置`settings.window_probe=false`。安装器不改配置或签到时段。
 
 ## 既有 v1.7.10 变更
 
@@ -59,11 +63,11 @@
 先保存旧镜像、源码、配置和数据，在新目录获取两个准确版本：
 
 ~~~sh
-git clone --depth 1 --branch v1.7.12-ops.20261018.1 https://github.com/wushuai0802/workbuddy2api-hub-ops-patch.git ops-patch-v1712
-git clone --depth 1 --branch v1.7.12 https://github.com/ardeyouxipianyi/workbuddy2api-hub.git workbuddy2api-hub-v1.7.12
-git -C workbuddy2api-hub-v1.7.12 rev-parse HEAD
-python3 -B ops-patch-v1712/apply.py --verify-package
-python3 -B ops-patch-v1712/apply.py --target ./workbuddy2api-hub-v1.7.12 --dry-run
+git clone --depth 1 --branch v1.7.15-ops.20261018.1 https://github.com/wushuai0802/workbuddy2api-hub-ops-patch.git ops-patch-v1715
+git clone --depth 1 --branch v1.7.15 https://github.com/ardeyouxipianyi/workbuddy2api-hub.git workbuddy2api-hub-v1.7.15
+git -C workbuddy2api-hub-v1.7.15 rev-parse HEAD
+python3 -B ops-patch-v1715/apply.py --verify-package
+python3 -B ops-patch-v1715/apply.py --target ./workbuddy2api-hub-v1.7.15 --dry-run
 ~~~
 
 提交必须匹配上面的完整SHA。预检通过后，按[安装指南](docs/INSTALL.md)暂停唯一目标服务、应用完整补丁、构建并定向切换。已有旧补丁（包括v1.7.3）不能直接叠加；不要删除状态/备份绕过检查。旧Release/tag继续保留。
@@ -72,7 +76,7 @@ python3 -B ops-patch-v1712/apply.py --target ./workbuddy2api-hub-v1.7.12 --dry-r
 
 ## 验证与边界
 
-离线runner包含151组Python回归（35组补丁及全部116组官方Python），另有42组官方Node及1组补丁Node；新增阶段期限、连续前缀、默认恢复提示、匿名证据持久化及可选日志库测试；面板使用官方Node合成DOM测试。CI检查Linux3.11/3.12与Windows3.11，实际结果见[验证记录](docs/VERIFICATION.md)。
+离线runner包含162组Python回归（36组补丁及全部126组官方Python），另有44组官方Node及1组补丁Node；新增阶段期限、连续前缀、默认恢复提示、匿名证据持久化及可选日志库测试；面板使用官方Node合成DOM测试。CI检查Linux3.11/3.12与Windows3.11，实际结果见[验证记录](docs/VERIFICATION.md)。
 
 测试使用合成账号、空数据和本机HTTP，不含真实会话。检测仍以单次生成为范围，尚无通用跨工具回合业务进展熔断。健康、模块指纹或离线测试不等于真实长会话输出质量验收。
 

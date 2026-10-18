@@ -1,7 +1,37 @@
 """Adapt pinned upstream test stubs without changing their assertions."""
 
 
+def prepare_dashboard_fixtures(gateway):
+    # Native tests cover an unmanaged server with an acknowledged shutdown;
+    # the patch additionally requires its explicit capability contract first.
+    path = gateway / 'tests/_test_console_shutdown.js'
+    source = path.read_text(encoding='utf8')
+    old = '  // 服务还在：/shutdown 成功，但 /health 一直 200（容器自动拉起）。'
+    assert source.count(old) == 1, 'pinned shutdown fixture changed'
+    source = source.replace(old, "  page.getJSON = async()=>({supported:true, mode:'web', shutdown_supported:true});\n"
+                            "  page.postJSON = async()=>({ok:true, shutting_down:true});\n"
+                            "  await page.initConsoleButtons();\n" + old)
+    path.write_text(source, encoding='utf8')
+
+
+def prepare_refresh_fixtures(gateway):
+    # Native 401 tests stub the unbounded background refresh and omit a refresh
+    # token. Bind the same success/failure stub to the bounded request API;
+    # all original retry count and same-account assertions remain in place.
+    path = gateway / 'tests/_test_breaker_fairness.py'
+    source = path.read_text(encoding='utf8')
+    old = '        def refresh():\n            self.refreshes += 1'
+    assert source.count(old) == 1, 'pinned 401 refresh fixture changed'
+    source = source.replace(old, '        def refresh(*args, **kwargs):\n            self.refreshes += 1')
+    old = '        self.account.refresh = refresh'
+    assert source.count(old) == 1
+    source = source.replace(old, '        self.account.refresh_token = "synthetic-refresh"\n'
+                            '        self.account.refresh_after_401 = refresh')
+    path.write_text(source, encoding='utf8')
+
+
 def prepare_test_fixtures(gateway):
+    prepare_refresh_fixtures(gateway)
     path = gateway / 'tests/_test_local_web_tools.py'
     source = path.read_text(encoding='utf8')
     for name in ('fake_open_upstream', 'always_tool_body', 'capture_open', 'passthrough_open'):

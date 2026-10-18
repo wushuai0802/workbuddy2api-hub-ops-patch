@@ -18,38 +18,33 @@ class V1712Tests(unittest.TestCase):
         h._discard_body = mock.Mock()
         return h
 
-    def test_capabilities_follow_platform_management_and_optional_viewer(self):
-        for platform, managed, exists, viewer, shutdown in (
-                ('nt', False, True, True, True), ('nt', False, False, False, True),
-                ('posix', False, True, False, True), ('nt', True, True, False, False),
-                ('posix', True, True, False, False)):
-            with self.subTest(platform=platform, managed=managed, exists=exists), \
+    def test_web_logs_follow_all_platforms_and_only_shutdown_depends_on_management(self):
+        for platform, managed in (('nt', False), ('posix', False), ('nt', True), ('posix', True)):
+            with self.subTest(platform=platform, managed=managed), \
                  mock.patch.object(wb.os, 'name', platform), \
-                 mock.patch.object(wb, 'server_deployment_form', return_value=managed), \
-                 mock.patch.object(wb.os.path, 'isfile', return_value=exists):
-                self.assertEqual(wb._console_capabilities(), {'supported': viewer, 'shutdown_supported': shutdown})
+                 mock.patch.object(wb, 'server_deployment_form', return_value=managed):
+                self.assertEqual(wb._console_capabilities(), {'supported': True, 'shutdown_supported': not managed})
 
     def test_server_state_does_not_probe_a_desktop_viewer(self):
         h = self.handler()
         with mock.patch.object(wb, '_SERVER_DEPLOYMENT', True), \
-             mock.patch.object(wb, '_console_viewer_running') as running:
+             mock.patch('subprocess.Popen') as running:
             code, value = h._get_console_state()
         self.assertEqual(code, 200)
-        self.assertEqual(value, {'supported': False, 'shutdown_supported': False, 'visible': False})
+        self.assertEqual(value, {'supported': True, 'mode': 'web', 'shutdown_supported': False, 'visible': False})
         running.assert_not_called()
 
     def test_server_rejects_controls_after_consuming_body_without_process_actions(self):
-        for route in ('_route_console_toggle', '_route_shutdown'):
+        for route in ('_route_shutdown',):
             h = self.handler()
             with self.subTest(route=route), mock.patch.object(wb, '_SERVER_DEPLOYMENT', True), \
-                 mock.patch.object(wb, '_launch_console_viewer') as launch, \
-                 mock.patch.object(wb, '_kill_console_viewer') as kill, \
+                 mock.patch('subprocess.Popen') as launch, \
                  mock.patch.object(wb.threading, 'Thread') as thread:
                 self.assertEqual(getattr(h, route)()[0], 403)
                 h._handle_expect_continue.assert_called_once()
                 h._discard_body.assert_called_once()
                 self.assertTrue(h._body_consumed)
-                launch.assert_not_called(); kill.assert_not_called(); thread.assert_not_called()
+                launch.assert_not_called(); thread.assert_not_called()
 
     def test_panel_auth_is_required_before_either_control(self):
         for path in ('/shutdown', '/console/toggle'):
@@ -58,19 +53,17 @@ class V1712Tests(unittest.TestCase):
                 self.assertEqual(wb.Handler.do_POST(h)[0], 401)
                 capabilities.assert_not_called()
 
-    def test_desktop_viewer_launch_failure_is_not_reported_as_success(self):
+    def test_legacy_toggle_reports_the_web_log_page_without_spawning(self):
         h = self.handler()
-        with mock.patch.object(wb, '_console_capabilities', return_value={'supported': True}), \
-             mock.patch.object(wb, '_console_viewer_running', return_value=False), \
-             mock.patch.object(wb, '_launch_console_viewer', return_value=None):
-            self.assertEqual(h._route_console_toggle()[0], 503)
+        with mock.patch('subprocess.Popen') as launch:
+            self.assertEqual(h._route_console_toggle(), (200, {'ok': True, 'mode': 'web',
+                            'url': '/dashboard?tab=logs', 'visible': False}))
             self.assertTrue(h._body_consumed)
-            h._json.assert_not_called()
+            launch.assert_not_called()
 
     def test_desktop_shutdown_remains_available_and_acknowledged(self):
         h = self.handler()
         with mock.patch.object(wb, '_console_capabilities', return_value={'shutdown_supported': True}), \
-             mock.patch.object(wb, '_kill_console_viewer'), \
              mock.patch.object(wb.threading, 'Thread') as thread, \
              mock.patch.object(wb.time, 'sleep'), mock.patch.object(wb.os, '_exit') as exit_process:
             self.assertEqual(h._route_shutdown(), (200, {'ok': True, 'shutting_down': True}))
@@ -95,7 +88,7 @@ class V1712Tests(unittest.TestCase):
         client = http.client.HTTPConnection(*server.server_address, timeout=3)
         try:
             with mock.patch.object(wb, '_SERVER_DEPLOYMENT', True), \
-                 mock.patch.object(wb, '_launch_console_viewer') as launch:
+                 mock.patch('subprocess.Popen') as launch:
                 for route in ('/console/toggle', '/shutdown'):
                     for chunked in (False, True):
                         body = [b'{', b'}'] if chunked else b'{}'
@@ -103,11 +96,11 @@ class V1712Tests(unittest.TestCase):
                         if chunked: headers['Transfer-Encoding'] = 'chunked'
                         client.request('POST', route, body=body, headers=headers, encode_chunked=chunked)
                         response = client.getresponse(); data = json.loads(response.read())
-                        self.assertEqual(response.status, 403, data)
+                        self.assertEqual(response.status, 200 if route == '/console/toggle' else 403, data)
                         client.request('GET', '/console/state')
                         response = client.getresponse(); value = json.loads(response.read())
                         self.assertEqual(response.status, 200)
-                        self.assertFalse(value['supported']); self.assertFalse(value['shutdown_supported'])
+                        self.assertTrue(value['supported']); self.assertFalse(value['shutdown_supported'])
                 launch.assert_not_called()
                 self.assertEqual(server.shutdown_threads, 0)
         finally:

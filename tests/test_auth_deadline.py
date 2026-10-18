@@ -299,6 +299,22 @@ class DeadlineSocketTests(unittest.TestCase):
         self.assertEqual(credential.refresh_token, "synthetic-refresh")
         self.assertEqual(len(self.server.requests), 1)
 
+    def test_html_401_is_bounded_and_does_not_expire_a_healthy_credential(self):
+        self.server.scenarios['/html-401'] = {'status': 401, 'body': b'<html>proxy 401</html>'}
+        credential, result, elapsed = self.refresh('/html-401')
+        self.assertFalse(result)
+        self.assertFalse(credential.token_expired)
+        self.assertLess(elapsed, .5)
+        self.assertEqual(credential.access_token, 'synthetic-old')
+
+    def test_slow_401_error_body_keeps_original_absolute_deadline(self):
+        self.server.scenarios['/slow-401'] = {'status': 401, 'drip_body': True}
+        credential, result, elapsed = self.refresh('/slow-401')
+        self.assertFalse(result)
+        self.assertFalse(credential.token_expired)
+        self.assertLess(elapsed, .5)
+        self.assertEqual(credential.access_token, 'synthetic-old')
+
     def test_header_drip_stops_by_the_same_deadline(self):
         self.server.scenarios["/headers"] = {"drip_headers": True}
         credential, result, elapsed = self.refresh("/headers")
@@ -316,6 +332,7 @@ class DeadlineSocketTests(unittest.TestCase):
                 credential, result, elapsed = self.refresh(path, budget=2)
                 self.assertFalse(result)
                 self.assertIn("1MiB", credential.last_error)
+                self.assertFalse(credential.token_expired)
                 self.assertLess(elapsed, 1)
                 self.assertEqual(credential.access_token, "synthetic-old")
         self.assertEqual(len(self.server.requests), 2)

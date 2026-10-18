@@ -27,7 +27,13 @@ class Account:
     def chat_base_url(self):
         return "https://example.invalid"
 
-    def headers(self, purpose="chat"):
+    def is_cli_identity(self):
+        return self.product == 'cli'
+
+    def ready(self, model=None):
+        return self.admitted and self.enabled
+
+    def headers(self, purpose="chat", **_identity_context):
         return {"Authorization": "Bearer " + self.access_token}
 
     def refresh_after_401(self, rejected_access_token, timeout=30, deadline_at=None):

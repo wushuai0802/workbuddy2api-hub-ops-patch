@@ -7,9 +7,9 @@ from pathlib import Path
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
-COMMIT = 'e7055ea6c9e06e9556052659c65539c4a3df1bde'
-TAG = 'v1.7.12'
-PATCH_ID = 'v1.7.12-ops.20261018.1'
+COMMIT = '497db0d99487c0046c3732d880e4ac86582801b5'
+TAG = 'v1.7.15'
+PATCH_ID = 'v1.7.15-ops.20261018.1'
 PATCH_SOURCE = 'wushuai0802/workbuddy2api-hub-ops-patch'
 MODULES = ('dashboard.html', 'wb_proxy.py', 'wb_webtools.py', 'wb_accounts.py', 'wb_ops.py', 'wb_stall.py', 'wb_upstream_pool.py', 'wb_observe.py')
 PUBLIC_DIRS = ('files', 'tests', 'docs', 'scripts', 'patches', '.github')

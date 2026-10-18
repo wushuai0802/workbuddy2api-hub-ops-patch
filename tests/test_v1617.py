@@ -1,5 +1,6 @@
 """New-baseline contracts: instruction preservation, six adapters and accounting."""
 import copy
+import gzip
 import io
 import json
 import os
@@ -56,7 +57,9 @@ class MigrationTests(IntegrationTests):
                     'https://example.invalid',403,'denied',{},io.BytesIO(b'denied'))) as opened:
             with self.assertRaises(wb.ContentRejected): wb.open_upstream(payload)
             self.assertEqual(opened.call_count,1); trigger.assert_not_called()
-            self.assertIn('KEEP_RULE',opened.call_args.args[0].data.decode())
+            raw = opened.call_args.args[0].data
+            if raw.startswith(b'\x1f\x8b'): raw = gzip.decompress(raw)
+            self.assertIn('KEEP_RULE', raw.decode())
 
     def test_public_upstream_triple_preserves_effort_success_and_timeout(self):
         account = mock.Mock(uid='synthetic', realm='intl', proxy=None)

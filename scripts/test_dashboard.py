@@ -1,4 +1,4 @@
-"""Run the unchanged pinned dashboard's synthetic Node suites in a copy."""
+"""Run pinned native and patch Node suites against the installed dashboard."""
 import argparse
 import json
 import os
@@ -11,6 +11,7 @@ import uuid
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from apply import Bundle
+from scripts.offline_fixtures import prepare_dashboard_fixtures
 
 
 def main():
@@ -29,7 +30,8 @@ def main():
     (gateway / 'dashboard.html').write_bytes(bundle.payload.get('dashboard.html', (upstream / 'dashboard.html').read_bytes()))
     shutil.copytree(upstream / 'tests', gateway / 'tests', ignore=shutil.ignore_patterns('__pycache__'))
     suites = sorted((gateway / 'tests').glob('_test_*.js'))
-    assert len(suites) == 42, 'pinned dashboard suite inventory changed'
+    assert len(suites) == 44, 'pinned dashboard suite inventory changed'
+    prepare_dashboard_fixtures(gateway)
     suites.append(ROOT / 'tests/test_dashboard_controls.js')
     env = {key: val for key, val in os.environ.items()
            if key.upper() not in ('API_KEY', 'WB_PROXY_KEY', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NODE_OPTIONS')
@@ -45,7 +47,7 @@ def main():
         if result.returncode:
             print(log.read_text(encoding='utf8', errors='replace')[-4000:])
     report = {'passed': all(row['passed'] for row in rows), 'patch_id': bundle.meta['patch_id'],
-              'suites': rows, 'model_requests': 0, 'official_suites': 42, 'patch_suites': 1,
+              'suites': rows, 'model_requests': 0, 'official_suites': 44, 'patch_suites': 1,
               'data': 'synthetic DOM/fetch fixtures with the installed patched dashboard'}
     (run / 'summary.json').write_text(json.dumps(report, indent=2) + '\n', encoding='utf8')
     print(json.dumps({'passed': report['passed'], 'suites': len(rows), 'report': str(run / 'summary.json')}))
