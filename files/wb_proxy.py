@@ -18,8 +18,11 @@ import argparse
 import bisect
 import copy
 import calendar
+import errno
 import hashlib
 import heapq
+import http.client
+import io
 import ipaddress
 from collections import Counter, deque
 import re
@@ -67,6 +70,7 @@ import wb_activity
 import wb_atrest
 import wb_catalog
 import wb_egress
+import wb_entitlements
 import wb_ipintel
 import wb_logstore
 import wb_pricing
@@ -152,6 +156,13 @@ def agents_client_allowed(client_address):
     except Exception:
         return False
     return addr in ("127.0.0.1", "::1", "::ffff:127.0.0.1")
+
+
+# 会把模型清单写进自身配置的客户端（wb_agents 里 OpenCode / DSH / Crush /
+# ZCode 的 apply 都读 ctx["models"]）：空清单会生成一个没有任何模型的
+# provider，所以空勾选要在入口拒绝。Claude Code / Codex 不读 models，空清单
+# 对它们无害，不拦。
+MODEL_EMBEDDING_CLIENTS = frozenset({"opencode", "dsh", "crush", "zcode"})
 
 
 def enrich_agent_models(models, specs):
@@ -2023,19 +2034,33 @@ def apply_daily_guards(refresh=False):
     stats = daily_usage_stats(ttl=ttl) if wants else None
     # 池上这三个 apply_* 的返回值是它们各自的 limits 字典（不是计数），调用方
     # 谁也没用过；这里数的是「推了几条护栏」，别拿返回值做算术。
+    #
+    # 关掉某条护栏（改回 0）同样要推一次。账号上的 daily_*_limit 只活在内存里
+    # （__init__ 归零、不落盘），不推就等于没关：账号一直保留上一次的非零值，
+    # 面板显示旧限额、`dailyLimitBlocked` 恒为真，直到进程重启才恢复。
+    # 设置保存走 refresh=True，此时三条都无条件推一次，把旧值覆盖回落；请求
+    # 热路径仍维持「没配限额就完全不碰池子」的原有契约，不为此多付开销。
+    # 计数仍只在至少一条护栏开着时才折叠（stats 为 None 时传 None，池侧保留
+    # 上次的计数），所以「没配限额 -> 计数未知 -> 永不 park」的语义不变。
     published = 0
-    if any(v > 0 for v in token_limits.values()):
+    token_on = any(v > 0 for v in token_limits.values())
+    if token_on or refresh:
         POOL.apply_daily_token_limit(
             token_limits, stats["tokens"] if stats is not None else None)
+    if token_on:
         published += 1
-    if any(v > 0 for v in credit_limits.values()):
+    credit_on = any(v > 0 for v in credit_limits.values())
+    if credit_on or refresh:
         POOL.apply_daily_credit_limit(
             credit_limits, stats["credits"] if stats is not None else None,
-            free_models_by_realm())
+            free_models_by_realm() if credit_on else None)
+    if credit_on:
         published += 1
-    if any(v > 0 for v in model_limits.values()):
+    model_on = any(v > 0 for v in model_limits.values())
+    if model_on or refresh:
         POOL.apply_model_daily_token_limit(
             model_limits, stats["models"] if stats is not None else None)
+    if model_on:
         published += 1
     return published
 
@@ -5879,6 +5904,89 @@ def pinned_account():
 SCHEDULER = None
 PRICING = None
 CREDITS_REFRESHER = None
+
+# ------------------------------------------------- 全量刷积分的并发与节奏护栏
+# 「一键刷新积分」与账号页的自动补快照都会打这条全扫路径：不带 uid/realm 时它对
+# **整个账号池**逐个发上游计费请求。真机实测一次 = 23 个账号 = 23 次上游调用，而它
+# 既没有单飞、也没有账号间间隔——池子一大，或某个账号始终拿不到快照被前端每 15 秒
+# 重试一次，就会变成成串的上游轰炸（网关日志里出现过 10 秒内 9 次全量刷）。
+#
+# 两道护栏，口径对齐隔壁 workbuddy2api-panel 的 internal/scheduler/staggered.go：
+#   1) CAS 单飞：同一时刻只允许一次全量刷，重复并发直接拒（HTTP 200 + busy=true，
+#      是正常回执而不是错误）；
+#   2) 账号间 800~1200ms 拟人间隔：避免几十个账号在同一秒把上游打成一串。
+#
+# 只有「全池」与「按区域」这类多账号目标才吃护栏；带 uid 的单账号刷新本来就只发一次
+# 请求，点了就该立刻有反应，不受这两道限制。
+#
+# 间隔可用 WB_CREDITS_SWEEP_GAP_MS 覆盖（"min-max" 或单个数字；0 = 关掉间隔，回到
+# 改造前的连发行为）。23 个账号 × 1 秒 ≈ 23 秒的等待是「拟人」的代价，调小它就等于
+# 削弱对外观感上的打散效果。
+_CREDITS_SWEEP_GUARD = threading.Lock()
+_CREDITS_SWEEP_RUNNING = False
+
+
+def _credits_sweep_gap_seconds():
+    """账号间隔的 (lo, hi)，单位秒。默认 (0.8, 1.2)，可用环境变量覆盖。"""
+    raw_gap = (os.environ.get("WB_CREDITS_SWEEP_GAP_MS") or "").strip()
+    if raw_gap:
+        try:
+            if "-" in raw_gap:
+                lo_s, hi_s = raw_gap.split("-", 1)
+                lo, hi = float(lo_s), float(hi_s)
+            else:
+                lo = hi = float(raw_gap)
+            if hi < lo:
+                lo, hi = hi, lo
+            return max(0.0, lo) / 1000.0, max(0.0, hi) / 1000.0
+        except (TypeError, ValueError):
+            pass          # 环境变量写坏了就回默认，不因为一个配置让功能不可用
+    return 0.8, 1.2
+
+
+def _credits_sweep_begin():
+    """抢一次全量刷：拿到返回 True，已有一次在跑返回 False（CAS）。"""
+    global _CREDITS_SWEEP_RUNNING
+    with _CREDITS_SWEEP_GUARD:
+        if _CREDITS_SWEEP_RUNNING:
+            return False
+        _CREDITS_SWEEP_RUNNING = True
+        return True
+
+
+def _credits_sweep_end():
+    global _CREDITS_SWEEP_RUNNING
+    with _CREDITS_SWEEP_GUARD:
+        _CREDITS_SWEEP_RUNNING = False
+
+
+def _credits_sweep(targets, paced=True):
+    """串行刷一批账号的积分，账号之间按拟人间隔停一下。
+
+    targets 里的 None（uid 查不到）跳过；单个账号取数**抛异常**也只记下来，
+    不中断整轮（池里一个坏凭证不该让其余账号全部刷不到）。
+    paced=False（单账号）时一步不停，保持改造前的即时反应。
+    """
+    lo, hi = _credits_sweep_gap_seconds() if paced else (0.0, 0.0)
+    results = []
+    first = True
+    for account in targets:
+        if account is None:
+            continue
+        if not first and hi > 0:
+            time.sleep(lo if hi <= lo else random.uniform(lo, hi))
+        first = False
+        try:
+            res = account.fetch_credits()
+        except Exception as exc:
+            # 单个账号炸掉只记下来，不中断整轮——否则池里一个坏凭证会让其余账号
+            # 全部刷不到（WBAPI 的同位逻辑也是记完就 continue）。
+            log("credits sweep: %s failed: %s" % (account.uid[:8], exc))
+            res = {"ok": False, "error": str(exc)}
+        results.append({"uid": account.uid, "ok": res.get("ok", False),
+                        "credits": account.credits, "error": res.get("error", "")})
+    return results
+
 # Release discovery only - the checker never downloads or installs anything.
 UPDATES = None
 ACCOUNTS_DIR = os.environ.get("ACCOUNTS_DIR") or os.path.join(os.path.dirname(os.path.abspath(__file__)), 'accounts')
@@ -10036,6 +10144,8 @@ def runtime_settings_view():
         "auto_switch_products": wb_settings.auto_switch_products(ACCOUNTS_DIR),
         "free_model_credit_fallback": wb_settings.free_model_credit_fallback(ACCOUNTS_DIR),
         "enable_anthropic_messages": wb_settings.enable_anthropic_messages(ACCOUNTS_DIR),
+        "filter_models_by_key": wb_settings.filter_models_by_key(ACCOUNTS_DIR),
+        "identity": wb_settings.identity_config(ACCOUNTS_DIR),
         "daily_chat_web": wb_settings.daily_chat_web(ACCOUNTS_DIR),
         "daily_chat_web_retry": wb_settings.daily_chat_web_retry(ACCOUNTS_DIR),
         "daily_chat_web_attempts":
@@ -10074,7 +10184,7 @@ def runtime_settings_view():
         "accounts_dir": ACCOUNTS_DIR,
         "usage_dir": USAGE_DIR,
         "settings_file": wb_settings.settings_path(ACCOUNTS_DIR),
-        "version": "1.7.16",
+        "version": "1.7.17",
     }
 def current_account():
     """Account used for display purposes (health / usage summaries)."""
@@ -10209,6 +10319,89 @@ LOG_BUFFER = deque(maxlen=2000)
 _LOG_LOCK = threading.Lock()
 _LOG_COUNTER = 0
 
+# ------------------------------------------------- 账号手机号脱敏（隐私出口）
+# 账号池里多数账号把手机号当昵称用，而面板要把它显示出来。真值只保留在内存对象
+# 与 accounts/*.json 磁盘文件里；**所有出口**（面板 JSON、导出件、看板日志、
+# 控制台 stderr）一律换成 138****1234。
+#
+# 为什么值级正则带 ^$ 锚点、文本级正则带 (?!\d)/(?<!\d) 边界：面板载荷里有 26 位
+# 订单号（deal_name）、10 位时间戳、11 位以上的 token 计数，裸匹配 1[3-9]\d{9}
+# 会把它们切一段出来当成手机号改掉——那是数据损坏，不是脱敏。
+#
+# 首三位 1[3-9]\d 仍要求连续（真实号码不会是 1-38-…）；只在 3-4-4 分组之间容忍
+# 常见书写分隔符（- . · 空格 制表符）。刻意不含换行，避免跨行把两段数字拼成号码。
+# 分隔符容忍不削弱「大数字不被切段」这条保证：26 位订单号是连续数字，10 位时间戳
+# 根本凑不满 11 位，二者的数字边界 (?!\d)/(?<!\d) 依旧成立。
+_PHONE_EXACT = re.compile(r"^1[3-9]\d{9}$")
+_PHONE_SEP = r"[ \t\-.·]?"
+_PHONE_IN_TEXT = re.compile(
+    r"(?<!\d)(1[3-9]\d)" + _PHONE_SEP + r"(\d{4})" + _PHONE_SEP + r"(\d{4})(?!\d)"
+)
+
+
+def _mask_phone(value):
+    """整个值就是手机号时掩码成 138****1234；其余（含非字符串）原样返回。
+
+    幂等：掩码结果不再是 11 位纯数字，重复调用不会二次掩码。
+    """
+    if not isinstance(value, str):
+        return value
+    s = value.strip()
+    if not _PHONE_EXACT.match(s):
+        return value
+    return "%s****%s" % (s[:3], s[-4:])
+
+
+def _mask_text(text):
+    """把一段文本中出现的手机号就地掩码（日志、服务端先拼好的摘要串）。
+
+    容忍 3-4-4 分组间的常见分隔符（138-1234-5678 / 138 1234 5678 / 138.1234.5678 /
+    138·1234·5678），输出统一为 138****5678，故幂等。
+    """
+    if not isinstance(text, str) or not _PHONE_IN_TEXT.search(text):
+        return text
+    return _PHONE_IN_TEXT.sub(lambda m: m.group(1) + "****" + m.group(3), text)
+
+
+def _redact_account_names(obj):
+    """递归脱敏账号名，**copy-on-write**：无命中时原对象原样返回（同一引用）。
+
+    两条规则：
+      * 键名恰为 "nickname" → 先 _mask_phone（值级，严格），不中再 _mask_text
+        （覆盖「老王(13812345678)」这种昵称里嵌号码的形态）
+      * 其余字符串值        → _mask_text —— 覆盖服务端**先拼成字符串再返回**的
+        logs / msg 通道（昵称根本不在 nickname 键里），这是首轮方案漏掉的那一类
+
+    绝不原地改：这些载荷里有的是直接返回共享 TTL 缓存对象（remaining_usage()、
+    usage_snapshot() 都返回缓存本体），原地改会把掩码写进缓存、污染其他读者。
+    """
+    if isinstance(obj, dict):
+        out = None
+        for k, v in obj.items():
+            if k == "nickname":
+                nv = _mask_phone(v)
+                if nv is v:
+                    nv = _mask_text(v)
+            else:
+                nv = _redact_account_names(v)
+            if nv is not v:
+                if out is None:
+                    out = dict(obj)
+                out[k] = nv
+        return obj if out is None else out
+    if isinstance(obj, list):
+        out = None
+        for i, v in enumerate(obj):
+            nv = _redact_account_names(v)
+            if nv is not v:
+                if out is None:
+                    out = list(obj)
+                out[i] = nv
+        return obj if out is None else out
+    if isinstance(obj, str):
+        return _mask_text(obj)
+    return obj
+
 # 日志级别与模块的自动归类。调用点显式传了 level/tag 就用传的，没传才按内容猜。
 #
 # 级别：早先只认英文关键字，而本仓大量日志是中文——定价侧的「抓取失败，继续用
@@ -10279,6 +10472,9 @@ def add_log_entry(msg, level=None, tag=None):
                 break
         else:
             tag = "system"
+    # 掩码必须发生在 level/tag 推断**之后**：推断用的是原始串（见上），若先掩码，
+    # 含手机号的日志行其分类会被改变，属行为回归。buffer 里只存掩码后的文本。
+    safe_msg = _mask_text(msg_str)
     with _LOG_LOCK:
         _LOG_COUNTER += 1
         entry = {
@@ -10287,7 +10483,7 @@ def add_log_entry(msg, level=None, tag=None):
             "time": t_short,
             "level": level,
             "tag": tag,
-            "msg": msg_str,
+            "msg": safe_msg,
         }
         LOG_BUFFER.append(entry)
     # 落库在锁外：append 只是入队，但没必要把持锁时间拉长到调用 queue.put。
@@ -10296,8 +10492,17 @@ def add_log_entry(msg, level=None, tag=None):
     return entry
 
 def log(msg, level=None, tag=None):
-    sys.stderr.write(f"[wb-proxy] {time.strftime('%H:%M:%S')} {msg}\n")
-    sys.stderr.flush()
+    # 控制台 stderr 与看板 buffer 同源脱敏；写失败一律吞掉。
+    # 日志通道绝不能打死请求。send_response() 会先调 log_request()，所以 stderr 写
+    # 失败一旦抛出，异常发生在响应头发出之前：客户端只看到连接被掐、日志库里一条
+    # 不留，而 /health /realm /panel/status 因为在 log_message 静默白名单里照常
+    # 200，看起来"服务健在"（2026-10-19 线上网关的启动终端被回收后实测只剩这
+    # 三个端点能答，其余全部空响应）。
+    try:
+        sys.stderr.write(f"[wb-proxy] {time.strftime('%H:%M:%S')} {_mask_text(str(msg))}\n")
+        sys.stderr.flush()
+    except Exception:
+        pass
     add_log_entry(msg, level=level, tag=tag)
 
 # 本地网路工具的多引擎轮换、冷却与失败分类写进看板日志（tag=webtools）
@@ -11263,7 +11468,7 @@ def _patch_payload_fingerprint():
     return hashlib.sha256(''.join(records).encode('ascii')).hexdigest()
 
 _OPS_PATCH_FINGERPRINT = _patch_payload_fingerprint()
-_OPS_PATCH_ID = "v1.7.16-ops.20261018.1"
+_OPS_PATCH_ID = "v1.7.17-ops.20261020.1"
 _OBSERVATION_STORE = None
 _OBSERVATION_STORE_LOCK = threading.Lock()
 
@@ -11739,6 +11944,12 @@ class _GuardedStream:
                 _loop_event("reasoning_stall_observed", metrics=metrics)
 
     def __iter__(self):
+        # Adapters decode raw SSE lines; keep one wire type even when a test
+        # upstream or text-mode source yields str.
+        for item in self._iter_items():
+            yield item.encode("utf-8") if isinstance(item, str) else item
+
+    def _iter_items(self):
         # Bound both the initial prefix and a newly suspicious short-intent
         # segment. Content/tools, caps, or the next frame after two seconds
         # flush unchanged. Never buffer a whole turn or manufacture an answer.
@@ -12149,6 +12360,7 @@ def probe_first_frame(upstream, retry_call=None, tried=None, deadline_at=None, r
         return upstream, None
     excluded = list(tried or [])
     account = None
+    retried = False
     deadline_at = deadline_at or time.monotonic() + FIRST_FRAME_DEADLINE
     for attempt in range(FIRST_FRAME_MAX_ATTEMPTS):
         timer = None
@@ -12207,18 +12419,27 @@ def probe_first_frame(upstream, retry_call=None, tried=None, deadline_at=None, r
                     raise TimeoutError("first-frame deadline exceeded")
                 if sock is not None:
                     sock.settimeout(upstream_timeouts()[1])
-                return _ProbedStream(upstream, iterator, prefix, read_hook, usage_hook), account
+                probed = _ProbedStream(upstream, iterator, prefix, read_hook, usage_hook)
+                probed._ops_retried = retried
+                return probed, account
             # Socket shutdown at the deadline may produce EOF rather than an
             # OSError (notably on Linux). An expired probe is never successful.
             if time.monotonic() >= deadline_at:
                 raise TimeoutError("first-frame deadline exceeded")
             if retry_call is None and not prefix and not require_frame:
-                return _ProbedStream(upstream, iterator, [], read_hook, usage_hook), account
+                probed = _ProbedStream(upstream, iterator, [], read_hook, usage_hook)
+                probed._ops_retried = retried
+                return probed, account
             raise ValueError("upstream closed without a response frame")
         except ContentRejected:
             _close_upstream(upstream)
             raise
         except Exception as exc:
+            egress_key = getattr(upstream, "_wb_stream_egress", None)
+            if egress_key and wb_settings.egress_backoff_enabled(ACCOUNTS_DIR):
+                # A read that dies before the first frame still leaves the
+                # egress unhealthy; a later successful retry must not erase it.
+                wb_egress.note_transient(egress_key)
             _close_upstream(upstream)
             if isinstance(exc, _SSELimitError):
                 raise
@@ -12233,6 +12454,7 @@ def probe_first_frame(upstream, retry_call=None, tried=None, deadline_at=None, r
                 retry_bump("first_frame_giveup")
                 return None, None
             retry_bump("first_frame")
+            retried = True
             if getattr(retry_call, "_ops_deadline", False):
                 upstream, account = retry_call(excluded, deadline_at=deadline_at)
             else:
@@ -12294,6 +12516,23 @@ def _loop_recovery_body(body):
     return result
 
 
+def _open_with_compat(body, **kwargs):
+    """Call open_upstream, dropping keywords a lightweight adapter omits.
+
+    Production open_upstream accepts every keyword below; test doubles and
+    older embedded adapters may expose only the original three parameters.
+    """
+    for _ in range(6):
+        try:
+            return open_upstream(body, **kwargs)
+        except TypeError as exc:
+            match = re.search(r"unexpected keyword argument '([^']+)'", str(exc))
+            if not match or match.group(1) not in kwargs:
+                raise
+            kwargs.pop(match.group(1))
+    return open_upstream(body, **kwargs)
+
+
 def _make_retry_call(body, session_key, realm):
     # The stream may run on a different worker: thread-local route context
     # must not disappear and silently turn /u/<ref>/ into a rotating request.
@@ -12311,8 +12550,8 @@ def _make_retry_call(body, session_key, realm):
                 _loop_event("retry_hint_skipped_shape")
         # Public v1.6.17 API returns effort as a third item. Recovery keeps
         # the same request effort; its internal callback contract stays a pair.
-        return open_upstream(request_body, session_key=session_key, target_realm=realm,
-                             exclude_uids=excluded, deadline_at=deadline_at)[:2]
+        return _open_with_compat(request_body, session_key=session_key, target_realm=realm,
+                                 exclude_uids=excluded, deadline_at=deadline_at)[:2]
     retry_call._ops_deadline = True
     retry_call._ops_recovery_hint = True
     return retry_call
@@ -12324,12 +12563,24 @@ def _open_first_stream(body, session_key=None, realm=None, prebuilt_body=None):
     header_end = _phase_deadline(generation_end, upstream_timeouts()[0])
     upstream = None
     try:
-        options = {'session_key': session_key, 'target_realm': realm, 'deadline_at': header_end}
+        options = {'session_key': session_key, 'target_realm': realm, 'deadline_at': header_end,
+                   'defer_egress_success': True}
         if prebuilt_body is not None:
             options['prebuilt_body'] = prebuilt_body
         upstream, account, effort = open_upstream(body, **options)
+
+        def same_account_retry(_excluded, deadline_at=None):
+            retry_options = dict(options)
+            retry_options['pin_account'] = account
+            # probe_first_frame already enforces its own first-frame deadline;
+            # avoid imposing a second, caller-specific keyword on lightweight
+            # upstream adapters.
+            retry_options.pop('deadline_at', None)
+            return _open_with_compat(body, **retry_options)[:2]
+
+        same_account_retry._ops_deadline = True
         probed, replacement = probe_first_frame(
-            upstream, retry_call=_make_retry_call(body, session_key, realm),
+            upstream, retry_call=same_account_retry,
             tried=[account.uid], deadline_at=_phase_deadline(generation_end, FIRST_FRAME_DEADLINE))
         if probed is None:
             raise RuntimeError('upstream first-frame probe failed')
@@ -13582,8 +13833,10 @@ class LeakedToolCallStreamFilter:
         return out
 
 
-def chat_chunk(model, delta, finish=None, chunk_id="chatcmpl-wb"):
+def chat_chunk(model, delta, finish=None, chunk_id=None):
     """One Chat Completions streaming chunk."""
+    if not chunk_id:
+        chunk_id = f"chatcmpl-wb-{uuid.uuid4().hex[:16]}"
     return json.dumps({
         "id": chunk_id,
         "object": "chat.completion.chunk",
@@ -13593,11 +13846,11 @@ def chat_chunk(model, delta, finish=None, chunk_id="chatcmpl-wb"):
     }, ensure_ascii=False)
 
 
-def chat_text_chunk(model, text, chunk_id="chatcmpl-wb"):
+def chat_text_chunk(model, text, chunk_id=None):
     return chat_chunk(model, {"content": text}, None, chunk_id)
 
 
-def chat_tool_call_chunks(model, calls, chunk_id="chatcmpl-wb"):
+def chat_tool_call_chunks(model, calls, chunk_id=None):
     """Deltas that hand recovered calls over as structured tool calls."""
     out = []
     for i, call in enumerate(calls):
@@ -13610,8 +13863,28 @@ def chat_tool_call_chunks(model, calls, chunk_id="chatcmpl-wb"):
     return out
 
 
-def chat_finish_chunk(model, reason, chunk_id="chatcmpl-wb"):
+def chat_finish_chunk(model, reason, chunk_id=None):
     return chat_chunk(model, {}, reason, chunk_id)
+
+
+def chat_usage_chunk(model, usage, chunk_id="chatcmpl-wb"):
+    """The trailing usage frame of an include_usage stream.
+
+    OpenAI puts usage on a final chunk with an empty choices list, after the
+    finish chunk and before [DONE]. Strict downstream parsers (clients that
+    validate the chunk contract, gateways that bill from the stream) ignore a
+    usage block riding on a choice-bearing chunk, so the block is hoisted out
+    of the upstream frame and re-emitted here in that shape.
+    """
+    normalize_usage_cache_aliases(usage)
+    return json.dumps({
+        "id": chunk_id,
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [],
+        "usage": usage,
+    }, ensure_ascii=False)
 
 
 def translate_max_completion_tokens(obj):
@@ -14000,7 +14273,13 @@ def build_upstream_body(payload):
             if "thinking" not in body:
                 body["thinking"] = {"type": "enabled"}
             if not effort:
-                body["reasoning_effort"] = model_default_effort(model) or "high"
+                mode = default_reasoning_effort_mode()
+                if mode != "off":
+                    chosen = model_default_effort(model)
+                    if not chosen and mode == "high":
+                        chosen = "high"
+                    if chosen:
+                        body["reasoning_effort"] = chosen
     body["stream"] = True
     if "stream_options" not in body:
         body["stream_options"] = {"include_usage": True}
@@ -14068,6 +14347,24 @@ def model_default_effort(model):
     """The effort the catalog applies when the client asks for none, or None."""
     effort = model_reasoning_meta(model).get("defaultEffort")
     return effort.strip() if isinstance(effort, str) and effort.strip() else None
+
+
+def default_reasoning_effort_mode():
+    """How to fill reasoning_effort when the client left it out.
+
+    high    - catalog default, else "high" (legacy behaviour, default)
+    catalog - catalog default only; leave the field out when the model has none
+    off     - never inject a default
+
+    The forced "high" is what makes deepseek spend the whole round on reasoning
+    and occasionally return no output text (issue #508).
+    """
+    raw = os.environ.get("WB_DEFAULT_REASONING_EFFORT", "").strip().lower()
+    if raw in ("off", "none", "0", "false", "no"):
+        return "off"
+    if raw in ("catalog", "model", "default"):
+        return "catalog"
+    return "high"
 
 
 def model_fixed_effort(model):
@@ -14362,6 +14659,24 @@ def realm_model_throttled(realm, model):
     return (False, 0)
 
 
+def _network_error_details(exc):
+    """Read wrapped OS codes without depending on the host's error language."""
+    errors = (exc, getattr(exc, "reason", None))
+    text = " ".join("%s %s" % (type(error).__name__, error)
+                    for error in errors if error is not None).lower()
+    # HTTPError inherits OSError, but its missing attributes may be delegated
+    # to an absent/closed response on Python 3.9. HTTP status is not an OS
+    # error code, so never probe errno/winerror on that response wrapper.
+    codes = {getattr(error, attr, None) for error in errors
+             if not isinstance(error, urllib.error.HTTPError)
+             for attr in ("errno", "winerror")}
+    # Some urllib callers only retain a string. Match the complete number:
+    # the old substring "errno 100" also matched Windows ECONNRESET (10054).
+    codes.update(int(code) for code in re.findall(
+        r"\b(?:errno|winerror)\s+(-?\d+)\b", text))
+    return codes, text
+
+
 def is_transient(exc):
     """Network-level flakiness that deserves a retry, not a cooldown.
 
@@ -14370,12 +14685,18 @@ def is_transient(exc):
     Treating that as a dead account took the only intl account offline for 60s
     and turned one hiccup into a 502 storm.
     """
-    t = ("%s %s" % (type(exc).__name__, exc)).lower()
     # A certificate/hostname verification failure is deterministic: every
     # retry hits the same chain. Treating it as a transport hiccup consumed
     # the egress budget and turned a configuration error into a 502 storm.
     if wb_accounts.is_tls_verify_error(exc):
         return False
+    codes, t = _network_error_details(exc)
+    # ECONNREFUSED (10061) stays out on purpose: nothing is listening, which
+    # usually means a dead per-account proxy. It keeps the old charge + 60s
+    # cooldown path so the pool moves on instead of re-picking that account.
+    if codes.intersection((errno.EPIPE, errno.ECONNABORTED, errno.ECONNRESET,
+                           errno.ETIMEDOUT, 10053, 10054, 10060)):
+        return True
     markers = (
         "ssl", "unexpected_eof", "eof occurred", "remote end closed",
         "connection reset", "connection aborted", "connectionreseterror",
@@ -14384,6 +14705,62 @@ def is_transient(exc):
     )
     return any(m in t for m in markers)
 
+
+# Upstream bodies that say the model/service is unavailable, not the
+# credential. 11134 = model provider temporarily unavailable, 11102 =
+# service info not found, 11150 = reasoning effort unsupported, 11158 =
+# model not available, 11129 = invalid function parameters.
+MODEL_SCOPED_ERROR_CODES = frozenset((11102, 11129, 11134, 11150, 11158))
+
+
+def upstream_error_code(detail):
+    """The numeric code field of an upstream error body, or None."""
+    try:
+        payload = json.loads(detail or "")
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    try:
+        return int(payload.get("code"))
+    except (TypeError, ValueError):
+        return None
+
+
+def http_error_detail(exc, limit=600):
+    """Read an HTTPError body and rewind it for the caller.
+
+    open_upstream has to inspect the body to tell a model-level 5xx from an
+    account fault, but the HTTP handler later reads the same exception to build
+    the client response. Keep the bytes on the exception so both readers work.
+    """
+    try:
+        raw = exc.read(limit)
+    except Exception:
+        return ""
+    try:
+        exc.wb_body = raw
+    except Exception:
+        pass
+    return raw.decode("utf-8", "replace")
+
+
+def read_http_error(exc, limit=600):
+    """The body read by http_error_detail, or a fresh read for other errors."""
+    raw = getattr(exc, "wb_body", None)
+    if raw is not None:
+        return raw[:limit]
+    try:
+        return exc.read(limit)
+    except Exception:
+        return b""
+
+
+def model_scoped_errors_penalize_account():
+    """Escape hatch: restore the old "any 5xx charges the account" behaviour."""
+    raw = os.environ.get("WB_MODEL_SCOPED_ERRORS_PENALIZE", "")
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
 # 「本机没网」的指纹：DNS 解析不出来、路由不可达、网卡没起来。这些失败里账号
 # 连一个字节都没发出去，结局却和「上游挂了」长得一样（都是 URLError），所以必须
 # 单独认出来。
@@ -14391,8 +14768,6 @@ LOCAL_NETWORK_MARKERS = (
     "gaierror", "getaddrinfo failed", "name or service not known",
     "nodename nor servname", "temporary failure in name resolution",
     "network is unreachable", "network is down", "no route to host",
-    "errno -2", "errno -3", "errno -5", "errno 100", "errno 101", "errno 113",
-    "winerror 11001", "winerror 10050", "winerror 10051", "winerror 10065",
 )
 
 def looks_like_local_network(exc):
@@ -14404,9 +14779,11 @@ def looks_like_local_network(exc):
     """
     if isinstance(exc, socket.gaierror):
         return True
-    reason = getattr(exc, "reason", None)
-    text = "%s %s %s" % (type(exc).__name__, exc, "" if reason is None else reason)
-    lower = text.lower()
+    codes, lower = _network_error_details(exc)
+    if codes.intersection((errno.ENETDOWN, errno.ENETUNREACH, errno.EHOSTUNREACH,
+                           -2, -3, -5, 100, 101, 113,
+                           10050, 10051, 10065, 11001)):
+        return True
     return any(marker in lower for marker in LOCAL_NETWORK_MARKERS)
 
 class LocalNetworkError(Exception):
@@ -14808,7 +15185,8 @@ def _free_model_credit_fallback_enabled():
 
 def open_upstream(payload, session_key=None, target_realm=None,
                   exclude_uids=None, deadline_at=None, prebuilt_body=None,
-                  allow_credit_fallback=True, allow_product_switch=True):
+                  allow_credit_fallback=True, allow_product_switch=True,
+                  pin_account=None, defer_egress_success=False):
     candidate_error = _single_candidate_error(payload)
     if candidate_error:
         raise ValueError(candidate_error)
@@ -14828,8 +15206,8 @@ def open_upstream(payload, session_key=None, target_realm=None,
             remaining_schedule_weights() if remaining_priority_enabled() else None)
     realm = target_realm or detect_model_realm(payload.get("model")) or CURRENT_REALM
     model = str(payload.get("model") or "")
-    excluded = set(exclude_uids or ())
-    pinned = pinned_account()
+    excluded = set() if pin_account is not None else set(exclude_uids or ())
+    pinned = pin_account if pin_account is not None else pinned_account()
     if pinned is not None:
         if pinned.uid in excluded:
             raise PinnedAccountError(503, "pinned account was excluded by this attempt", pinned.uid)
@@ -14974,6 +15352,16 @@ def open_upstream(payload, session_key=None, target_realm=None,
             account = POOL.pick_for_session(realm=realm, session_key=session_key,
                                             exclude=tried, model=model,
                                             page=affinity_page) if POOL else None
+        if (account is None and pinned is None
+                and (transient_hits or local_net_hits)):
+            # Pool rotation is bookkeeping, not an upstream attempt. Re-pick
+            # in this iteration so a two-account pool keeps its third request.
+            # Local DNS/route failures need the same bounded retry path.
+            tried.clear()
+            time.sleep(min(1.5 * (transient_hits or local_net_hits), 3.0))
+            account = POOL.pick_for_session(realm=realm, session_key=session_key,
+                                            exclude=tried, model=model,
+                                            page=affinity_page) if POOL else None
         if account is None:
             if transient_hits and _attempt < max_attempts - 1:
                 tried = set(excluded)
@@ -15041,12 +15429,18 @@ def open_upstream(payload, session_key=None, target_realm=None,
             resp = wb_accounts.urlopen(req, timeout=timeout, proxy=account.proxy)
             _apply_stream_idle_timeout(resp, idle_timeout)
             account.note_success(model=model)
-            if egress_backoff:
+            wb_entitlements.clear(ACCOUNTS_DIR, account.realm, model)
+            if egress_backoff and not defer_egress_success:
                 # This outbound path just served a request, so its transient
                 # streak is over (same rule as the account's note_success).
+                # Callers that read the body afterwards defer this to the end
+                # of the read: a stream that dies mid-body is not a success.
                 wb_egress.note_success(
                     wb_upstream_pool.egress_key(chat_url, account.proxy))
             reset_switch_counter(account, model)
+            if egress_backoff and defer_egress_success:
+                resp._wb_stream_egress = wb_upstream_pool.egress_key(
+                    chat_url, account.proxy)
             # The third element is the reasoning effort this request ran at: the
             # body is rebuilt per attempt, but the effort is a property of the
             # model and the request, and the callers record it on the usage row.
@@ -15054,7 +15448,7 @@ def open_upstream(payload, session_key=None, target_realm=None,
         except urllib.error.HTTPError as exc:
             if exc.code == 429:
                 try:
-                    detail = exc.read(600).decode("utf-8", "replace")
+                    detail = read_http_error(exc, 600).decode("utf-8", "replace")
                 except Exception:
                     detail = ""
                 reset_at = parse_rate_limit_reset(detail)
@@ -15128,7 +15522,7 @@ def open_upstream(payload, session_key=None, target_realm=None,
                 continue
             if exc.code == 403:
                 try:
-                    detail = exc.read(600).decode("utf-8", "replace")
+                    detail = read_http_error(exc, 600).decode("utf-8", "replace")
                 except Exception:
                     detail = ""
                 # 先分流：上游风控限制（code 11140「账号存在异常行为，已被限制
@@ -15177,7 +15571,7 @@ def open_upstream(payload, session_key=None, target_realm=None,
                 break
             if exc.code == 402:
                 try:
-                    detail = exc.read(400).decode("utf-8", "replace")
+                    detail = read_http_error(exc, 400).decode("utf-8", "replace")
                 except Exception:
                     detail = ""
                 account.note_balance_cooled(detail or "HTTP 402 (insufficient credits)")
@@ -15189,14 +15583,22 @@ def open_upstream(payload, session_key=None, target_realm=None,
                 continue
             if exc.code == 401:
                 refresh = getattr(account, "refresh_after_401", None)
-                if (account.uid not in auth_refreshed and callable(refresh) and getattr(account, "refresh_token", "")
-                        and _attempt + 1 < max_attempts):
+                if account.uid not in auth_refreshed and _attempt + 1 < max_attempts:
                     auth_refreshed.add(account.uid)
                     exc.close()
                     retry_bump("auth_refresh_attempt")
+                    refreshed_ok = False
                     try:
-                        budget = 30.0 if deadline_at is None else min(30.0, max(0.0, deadline_at - time.monotonic()))
-                        refreshed_ok = refresh(failed_token, timeout=budget, deadline_at=deadline_at)
+                        if callable(refresh) and getattr(account, "refresh_token", ""):
+                            budget = 30.0 if deadline_at is None else min(30.0, max(0.0, deadline_at - time.monotonic()))
+                            refreshed_ok = refresh(failed_token, timeout=budget, deadline_at=deadline_at)
+                        else:
+                            # Accounts without a stored refresh token still use
+                            # the official refresh path (it may renew from the
+                            # credential file); tests and simple accounts rely
+                            # on this fallback.
+                            plain = getattr(account, "refresh", None)
+                            refreshed_ok = bool(plain()) if callable(plain) else False
                     except Exception:
                         refreshed_ok = False
                     if refreshed_ok:
@@ -15214,7 +15616,33 @@ def open_upstream(payload, session_key=None, target_realm=None,
                 account.note_error("HTTP 401", cooldown=60, single_account=(total <= 1))
                 last_error = exc
                 continue
+            if exc.code == 400:
+                detail = http_error_detail(exc)
+                code = upstream_error_code(detail)
+                if code == 11158:
+                    wb_entitlements.mark(
+                        ACCOUNTS_DIR, account.realm, model, code,
+                        user_type=wb_entitlements.user_type_from_detail(detail))
+                    log("model '%s' is not allowed for %s free tier (11158); marked"
+                        % (model, account.realm))
+                raise
             if exc.code >= 500:
+                detail = http_error_detail(exc)
+                code = upstream_error_code(detail)
+                if code == 11158:
+                    wb_entitlements.mark(
+                        ACCOUNTS_DIR, account.realm, model, code,
+                        user_type=wb_entitlements.user_type_from_detail(detail))
+                if (code in MODEL_SCOPED_ERROR_CODES
+                        and not model_scoped_errors_penalize_account()):
+                    # A bad model name must not take the whole pool down. The
+                    # body says this is the model/service, not the credential;
+                    # stop rotating and hand the upstream body back unchanged.
+                    log("upstream %s for '%s' (code %s, model-scoped); "
+                        "not charging the account"
+                        % (exc.code, model, code))
+                    last_error = exc
+                    break
                 # 一切服务端 5xx（含上游自定义的 550 这类）都按瞬时故障轮转，
                 # 不在已知清单里的也不能把错误原样甩回客户端——换号是默认，
                 # 全试完才交出去。
@@ -15234,8 +15662,9 @@ def open_upstream(payload, session_key=None, target_realm=None,
                     budget_sleep(min(wait, EGRESS_SLEEP_MAX))
                     continue
                 charge_account(account, "HTTP %d" % exc.code, unknown=False)
-                log("upstream %s for '%s', retrying (fails=%d)"
-                    % (exc.code, model, account.fails))
+                log("upstream %s for '%s' (code %s), retrying (fails=%d)"
+                    % (exc.code, model, code if code is not None else "-",
+                       account.fails))
                 if session_key and POOL:
                     POOL.affinity.demote(session_key, account.uid)
                 last_error = exc
@@ -15514,7 +15943,7 @@ def probe_account(account, model=None, timeout=30):
     except urllib.error.HTTPError as exc:
         row["elapsed_ms"] = int((time.time() - t0) * 1000)
         try:
-            detail = exc.read(400).decode("utf-8", "replace")
+            detail = read_http_error(exc, 400).decode("utf-8", "replace")
         except Exception:
             detail = str(exc)
         if looks_like_local_network(exc):
@@ -15698,6 +16127,13 @@ def iter_sse_lines(source, block_size=SSE_READ_BLOCK, before_read=None, on_usage
             before_read()
         chunk = read1(block_size)
         if not chunk:
+            # http.client.read1() returns b"" when the peer closes early and
+            # does not raise for a Content-Length response; without this check
+            # a truncated stream looks like a clean EOF and the retry path in
+            # _chat_stream_response never sees it (issue #522).
+            remaining = getattr(source, "length", 0) or 0
+            if remaining > 0:
+                raise http.client.IncompleteRead(b"", remaining)
             break
         buf.extend(chunk)
         lines, start = [], 0
@@ -15914,7 +16350,7 @@ def _aggregate_stream_impl(raw_iter, model, resp_id):
                 "prompt_tokens_details": {"cached_tokens": 0},
             }
     out = {
-        "id": resp_id or "chatcmpl-wb",
+        "id": resp_id or f"chatcmpl-wb-{uuid.uuid4().hex[:16]}",
         "object": "chat.completion",
         "created": int(time.time()),
         "model": model,
@@ -16466,9 +16902,9 @@ def follow_up_with_tool_results(internal_calls, holder, model, session_key, t_st
     holder["retry_call"] = _make_retry_call(body, session_key, holder.get("realm"))
     if drop_tools:
         holder["web_tools_withdrawn"] = True
-    return open_upstream(body, session_key=session_key,
-                         target_realm=holder.get("realm"),
-                         deadline_at=_phase_deadline(_generation_deadline(holder), upstream_timeouts()[0]))
+    return _open_with_compat(body, session_key=session_key,
+                             target_realm=holder.get("realm"),
+                             deadline_at=_phase_deadline(_generation_deadline(holder), upstream_timeouts()[0]))
 
 
 def internal_calls_from_chat(chat_obj, web_tools=False):
@@ -17216,25 +17652,29 @@ def _anthropic_usage(usage):
     }
     if not isinstance(usage, dict):
         return out
-    try:
-        out["input_tokens"] = int(usage.get("prompt_tokens") or 0)
-    except (TypeError, ValueError):
-        pass
-    try:
-        out["output_tokens"] = int(usage.get("completion_tokens") or 0)
-    except (TypeError, ValueError):
-        pass
+
+    def _as_int(value):
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    prompt_tokens = _as_int(usage.get("prompt_tokens"))
+    out["output_tokens"] = _as_int(usage.get("completion_tokens"))
     cached = usage.get("prompt_cache_hit_tokens")
     if cached is None:
         cached = _best_cached_tokens(usage)
-    try:
-        out["cache_read_input_tokens"] = int(cached or 0)
-    except (TypeError, ValueError):
-        pass
-    try:
-        out["cache_creation_input_tokens"] = int(usage.get("prompt_cache_write_tokens") or 0)
-    except (TypeError, ValueError):
-        pass
+    cache_read = _as_int(cached)
+    cache_creation = _as_int(usage.get("prompt_cache_write_tokens"))
+    out["cache_read_input_tokens"] = cache_read
+    out["cache_creation_input_tokens"] = cache_creation
+    # The upstream reports an OpenAI-style prompt_tokens that already counts the
+    # cached prefix (cache hits are billed as part of the input). Anthropic
+    # clients size the context window as
+    # input_tokens + cache_read_input_tokens + cache_creation_input_tokens, so
+    # echoing that total as input_tokens counts the cache twice and makes the
+    # window look fuller than it is. Report the real, uncached input instead.
+    out["input_tokens"] = max(0, prompt_tokens - cache_read - cache_creation)
     service_tier = usage.get("service_tier")
     if service_tier:
         out["service_tier"] = service_tier
@@ -17784,6 +18224,10 @@ def _stream_chat_events(upstream, model, holder):
                     holder.setdefault("chat_created", frame["created"])
                 if frame.get("usage"):
                     holder["usage_this_round"] = frame["usage"]
+                    # Usage belongs in the trailing choices-less frame; strict
+                    # clients reject an in-band usage block on a chunk that
+                    # also carries choices.
+                    frame.pop("usage", None)
                 terminal = False
                 for choice in frame.get("choices") or []:
                     delta = choice.get("delta") or {}
@@ -17880,7 +18324,11 @@ def _stream_chat_events(upstream, model, holder):
             if holder.get("incomplete_reason"):
                 yield from _chat_error_frames(holder, holder["incomplete_reason"])
             else:
-                yield _chat_frame(holder, finish=held_finish or finish, usage=total_usage)
+                yield _chat_frame(holder, finish=held_finish or finish)
+                if total_usage:
+                    yield ("data: " + chat_usage_chunk(
+                        model, total_usage,
+                        chunk_id=holder.get("chat_id") or "chatcmpl-wb") + "\n\n").encode("utf-8")
             yield b"data: [DONE]\n\n"
             return
     finally:
@@ -18013,6 +18461,23 @@ def _response_failed_frame(holder, model, code):
                 "error": {"code": code, "message": "Upstream response could not complete: " + code}}
     data = {"type": "response.failed", "sequence_number": seq, "response": response}
     return ("event: response.failed\ndata: " + json.dumps(data, ensure_ascii=False) + "\n\n").encode("utf-8")
+
+
+
+
+
+def reasoning_only_response(result):
+    """True when a Responses object has reasoning but no text or tool call."""
+    obj = result or {}
+    output = obj.get("output") or []
+    text = obj.get("output_text") or ""
+    has_calls = any(
+        isinstance(o, dict) and o.get("type") in ("function_call", "web_search_call")
+        for o in output)
+    has_reasoning = any(
+        isinstance(o, dict) and o.get("type") == "reasoning" for o in output)
+    return (not text.strip() and has_reasoning and not has_calls
+            and obj.get("status") != "incomplete")
 
 
 def stream_responses_events(upstream, model, holder):
@@ -18393,6 +18858,7 @@ def _stream_responses_impl(upstream, model, holder):
                 failure = holder.get("continuation_failure_code") or (
                     "reasoning_only_turn" if reason_parts else "empty_output_turn")
         holder["incomplete_reason"] = failure
+        holder["empty_reasoning"] = bool(gate and failure)
         status = "incomplete" if finish in ("length", "content_filter") or dropped_truncated else "completed"
         final = resp_obj(status)
         if finish == "length":
@@ -18779,7 +19245,7 @@ class Handler(BaseHTTPRequestHandler):
             super().finish()
         except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
             pass
-    server_version = "wb-proxy/1.7.16"
+    server_version = "wb-proxy/1.7.17"
     def log_message(self, fmt, *args):
         # 静默过滤前端看板高频定时心跳的正常 200 GET 请求（/logs、/usage、/accounts 轮询等）
         # 避免自增死循环刷屏与日志污染。遇 4xx/5xx 异常或所有非 GET 业务操作依然如实记录。
@@ -18875,6 +19341,20 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             # 无论 _json() 是否抛异常，都不能把这次请求的 tag 留给下一次。
             self._json_etag = None
+
+    # ---- 面板出口的脱敏封装 ----------------------------------------------
+    # 刻意**不**在 _json() 里挂钩子：/v1/chat/completions、/v1/responses、
+    # /v1/messages 的非流式返回体也走 _json()，那是一份模型输出，一个字节都不
+    # 许动（若其中出现 "nickname": "13800138000"，脱敏就是篡改）。
+    # 所以改成语义化命名：面板展示端点显式调用 _json_panel*，LLM 路由保持 _json。
+    def _json_panel(self, code, obj):
+        return self._json(code, _redact_account_names(obj))
+    def _json_cached_panel(self, code, data_fn, etag_fn):
+        # 脱敏只发生在 data_fn 的返回值上；ETag 由 (kind, key, built_at) 决定、
+        # 与响应体无关，所以掩码不会造成「缓存体与校验符对不上」。
+        return self._json_cached(code,
+                                 lambda: _redact_account_names(data_fn()),
+                                 etag_fn)
     def _discard_body(self):
         """Drain the request body so the connection stays in sync.
 
@@ -19412,6 +19892,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._get_settings_reveal(query)
         if path == "/agents":
             return self._get_agents()
+        if path == "/agents/model-selection":
+            return self._get_agents_model_selection()
         if path == "/agents/available":
             # 看板启动时用这个廉价判定决定要不要显示入口：不 import
             # wb_agents、不做任何探测（issue #246）。
@@ -19516,6 +19998,17 @@ class Handler(BaseHTTPRequestHandler):
             # 定址路由宣告的是「这个账号实际能接的模型」：该账号禁用的模型
             # 不出现在清单里，客户端按账号拆 provider 时才不会选到必失败的项。
             data = [m for m in data if not pinned.model_disabled(m.get("id"))]
+        # 可选：清单只宣告当前 Key 能用的模型。默认关闭时保持原来的全量
+        # 目录语义；打开后，配了模型限制的 Key 不会再看到会被本地 400 拒掉
+        # 的项，自动发现型客户端也就不会选到必失败的模型。
+        if wb_settings.filter_models_by_key(ACCOUNTS_DIR) and self.key_entry:
+            data = [m for m in data
+                    if wb_settings.key_allows_model(self.key_entry, m.get("id"))]
+        marks = wb_entitlements.snapshot(ACCOUNTS_DIR, req_realm or CURRENT_REALM)
+        for m in data:
+            ent = (marks.get(req_realm or CURRENT_REALM) or {}).get(m.get("id"))
+            if ent:
+                m["entitlement"] = ent
         payload = {"object": "list", "data": data,
                    "realm": req_realm or CURRENT_REALM}
         # 来源说明（面板展示用）：这批清单是上游 API 实时取的，还是读的
@@ -19538,7 +20031,7 @@ class Handler(BaseHTTPRequestHandler):
         req_range, req_since, req_until = range_query(query)
         # 取数与取校验符必须看到同一套参数（否则 tag 落到另一条缓存条目上），
         # 但"先取戳、再取数、再取一次戳"的配对顺序由 _json_cached 保证。
-        return self._json_cached(
+        return self._json_cached_panel(
             200,
             lambda: usage_snapshot(realm=req_realm, range=req_range,
                                    since=req_since, until=req_until),
@@ -19557,7 +20050,7 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             page = 1
         req_realm = query.get('realm', [None])[0] or self.headers.get('X-Realm') or CURRENT_REALM
-        return self._json(200, recent_usage(limit, realm=req_realm, page=page))
+        return self._json_panel(200, recent_usage(limit, realm=req_realm, page=page))
 
     def _get_activity_history(self, query):
         """账号每日活动的结构化历史（issue #34）。只读，供面板的签到记录用。
@@ -19580,15 +20073,22 @@ class Handler(BaseHTTPRequestHandler):
                                         limit=first("limit") or None)
         except ValueError as exc:
             return self._error(400, str(exc), "invalid_request_error")
-        return self._json(200, payload)
+        return self._json_panel(200, payload)
 
     def _get_accounts_credits(self):
         if not self._authorized():
             return
-        # Refresh credits for all accounts
-        for a in (POOL.accounts if POOL else []):
-            a.fetch_credits()
-        return self._json(200, {"accounts": account_views()})
+        # Refresh credits for all accounts —— 全池扫，吃单飞与拟人间隔
+        # （见 _credits_sweep 的说明）。已有一次在跑时不排队、不报错：直接把当前
+        # 快照回给调用方，前端拿到的仍是可用数据。
+        targets = list(POOL.accounts) if POOL else []
+        busy = not _credits_sweep_begin()
+        if not busy:
+            try:
+                _credits_sweep(targets)
+            finally:
+                _credits_sweep_end()
+        return self._json_panel(200, {"accounts": account_views(), "busy": busy})
 
     def _get_account_credits_grants(self):
         """积分获取历史：只读账号积分快照，不发上游请求。
@@ -19599,7 +20099,7 @@ class Handler(BaseHTTPRequestHandler):
         """
         if not self._authorized():
             return
-        return self._json(200, credit_grants())
+        return self._json_panel(200, credit_grants())
 
     def _get_account_credits_detail(self, query):
         if not self._authorized():
@@ -19607,18 +20107,18 @@ class Handler(BaseHTTPRequestHandler):
         uid = (query.get("uid") or [""])[0]
         refresh = (query.get("refresh") or ["0"])[0] in ("1", "true", "yes")
         if not POOL:
-            return self._json(200, {"ok": False, "error": "账号池未初始化"})
+            return self._json_panel(200, {"ok": False, "error": "账号池未初始化"})
         account = POOL.get(uid) if uid else None
         if not account:
             if POOL.accounts:
                 account = POOL.accounts[0]
             else:
-                return self._json(200, {"ok": False, "error": "未找到指定账号"})
+                return self._json_panel(200, {"ok": False, "error": "未找到指定账号"})
 
         if refresh or not account.credits or not account.credits.get("packages"):
             res = account.fetch_credits()
             if not res.get("ok"):
-                return self._json(200, {
+                return self._json_panel(200, {
                     "ok": False,
                     "uid": account.uid,
                     "nickname": account.nickname,
@@ -19627,7 +20127,7 @@ class Handler(BaseHTTPRequestHandler):
                     "error": res.get("error", "获取积分明细失败")
                 })
 
-        return self._json(200, {
+        return self._json_panel(200, {
             "ok": True,
             "uid": account.uid,
             "nickname": account.nickname,
@@ -19641,7 +20141,7 @@ class Handler(BaseHTTPRequestHandler):
         # Fold the usage log before building the view, so the 日限额 badge and
         # the parked count describe right now instead of the last request.
         apply_daily_guards()
-        return self._json(200, {
+        return self._json_panel(200, {
             "accounts": account_views(realm=query.get('realm', [None])[0] or CURRENT_REALM),
             "storage": ACCOUNTS_DIR,
             "usable": POOL.count_ready() if POOL else 0,
@@ -19673,6 +20173,12 @@ class Handler(BaseHTTPRequestHandler):
             include_secrets=include_secrets,
             uids=uids or None,
         )
+        # 一个出口覆盖两条路：不带 download=1 走下面的 _json（前端实际用的就是
+        # 这条），带 download=1 走 _download()（自带 json.dumps，绕过 _json）。
+        # 登记后果：这份掩码昵称若经 /accounts/import 回灌，会以掩码形态落盘；
+        # 可接受——昵称正是要隐藏的东西，且 sync_nickname() 能从上游取回真名，
+        # accessToken/refreshToken 等凭证字段不受影响。
+        doc = _redact_account_names(doc)
         if (query.get("download") or ["0"])[0] in ("1", "true", "yes"):
             stamp = time.strftime("%Y%m%d-%H%M%S")
             if len(uids) == 1:
@@ -19689,14 +20195,14 @@ class Handler(BaseHTTPRequestHandler):
         if not self._authorized():
             return
         state = (query.get("state") or [""])[0]
-        return self._json(200, POOL.poll_login(state))
+        return self._json_panel(200, POOL.poll_login(state))
 
     def _get_usage_analytics(self, query):
         if not self._authorized():
             return
         req_realm = query.get("realm", [None])[0] or None
         req_range, req_since, req_until = range_query(query)
-        return self._json_cached(
+        return self._json_cached_panel(
             200,
             lambda: compute_usage_analytics(realm=req_realm, range=req_range,
                                             since=req_since, until=req_until),
@@ -19706,7 +20212,7 @@ class Handler(BaseHTTPRequestHandler):
     def _get_usage_by_account(self):
         if not self._authorized():
             return
-        return self._json_cached(200,
+        return self._json_cached_panel(200,
                                  lambda: {"accounts": usage_by_account()},
                                  usage_by_account_etag)
 
@@ -19715,7 +20221,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         # 载荷挂短 TTL（WB_REMAINING_TTL，默认 15 秒）+ ETag：面板 5 秒一轮的
         # 轮询在 TTL 内命中同一条缓存 → 校验符不变 → 304，重建与重传都省掉。
-        return self._json_cached(200, remaining_usage, remaining_usage_etag)
+        return self._json_cached_panel(200, remaining_usage, remaining_usage_etag)
 
     def _get_usage_timeseries(self, query):
         if not self._authorized():
@@ -19728,7 +20234,7 @@ class Handler(BaseHTTPRequestHandler):
             bucket_seconds = int(bucket) if bucket else None
         except (TypeError, ValueError):
             bucket_seconds = None
-        return self._json_cached(
+        return self._json_cached_panel(
             200,
             lambda: usage_timeseries(realm=req_realm, range=req_range,
                                      since=req_since, until=req_until,
@@ -19746,7 +20252,7 @@ class Handler(BaseHTTPRequestHandler):
             sample = 5000
         req_realm = query.get('realm', [None])[0] or self.headers.get('X-Realm') or CURRENT_REALM
         req_range, req_since, req_until = range_query(query)
-        return self._json_cached(
+        return self._json_cached_panel(
             200,
             lambda: perf_stats(sample, realm=req_realm, range=req_range,
                                since=req_since, until=req_until),
@@ -19758,7 +20264,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         cn_accounts = [a for a in (POOL.accounts if POOL else []) if a.realm == "cn" and a.enabled]
         if not cn_accounts:
-            return self._json(200, {"tasks": [], "summary": {}, "accounts": [], "msg": "未找到可用的国内版账号"})
+            return self._json_panel(200, {"tasks": [], "summary": {}, "accounts": [], "msg": "未找到可用的国内版账号"})
         uid = (query.get("uid") or [None])[0]
         acc = None
         if uid and uid != "all":
@@ -19769,7 +20275,7 @@ class Handler(BaseHTTPRequestHandler):
             acc = cn_accounts[0]
         tasks, summary = growth_snapshot(acc)
         acct_list = [{"uid": a.uid, "nickname": a.nickname or a.uid[:8]} for a in cn_accounts]
-        return self._json(200, {
+        return self._json_panel(200, {
             "tasks": tasks,
             "summary": summary,
             "account": acc.public(),
@@ -19779,7 +20285,7 @@ class Handler(BaseHTTPRequestHandler):
     def _get_scheduler(self):
         if not self._authorized():
             return
-        return self._json(200, SCHEDULER.status() if SCHEDULER else {"enabled": False, "msg": "未运行"})
+        return self._json_panel(200, SCHEDULER.status() if SCHEDULER else {"enabled": False, "msg": "未运行"})
 
     def _get_pricing(self):
         if not self._authorized():
@@ -19853,13 +20359,17 @@ class Handler(BaseHTTPRequestHandler):
                 stats = {}
             result["stored"] = stats.get("rows", 0)
             result["db_bytes"] = stats.get("bytes", 0)
-        return self._json(200, result)
+        return self._json_panel(200, result)
 
     def _get_logs_export(self):
         if not self._authorized():
             return
         log_data = get_logs(limit=5000)
-        lines = [f"[{item['ts']}] [{item['level']}] [{item['tag']}] {item['msg']}" for item in log_data["logs"]]
+        # 导出走的是 send_response/wfile，不经过 _json_panel，所以掩码得自己来：
+        # 新写入的条目在 add_log_entry 里已掩码，但落库打开之前的历史行仍是明文，
+        # 直接拼进下载文件就把「出口脱敏」这条从侧门绕过去了。
+        lines = [f"[{item['ts']}] [{item['level']}] [{item['tag']}] {_mask_text(str(item['msg']))}"
+                 for item in log_data["logs"]]
         text_content = "\n".join(lines).encode("utf-8")
         filename = f"wb-proxy-{time.strftime('%Y%m%d-%H%M%S')}.log"
         self.send_response(200)
@@ -20319,6 +20829,24 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(400, "enable_anthropic_messages must be true or false", "invalid_request_error")
             wb_settings.set_enable_anthropic_messages(ACCOUNTS_DIR, raw)
             reply["enable_anthropic_messages"] = raw
+        if "filter_models_by_key" in payload:
+            raw = payload.get("filter_models_by_key")
+            if not isinstance(raw, bool):
+                return self._error(400, "filter_models_by_key must be true or false", "invalid_request_error")
+            wb_settings.set_filter_models_by_key(ACCOUNTS_DIR, raw)
+            reply["filter_models_by_key"] = raw
+        if "identity" in payload:
+            raw = payload.get("identity")
+            if not isinstance(raw, dict):
+                return self._error(400, "identity must be an object",
+                                   "invalid_request_error")
+            if "private_data" in raw:
+                try:
+                    value = wb_settings.set_identity_private_data(
+                        ACCOUNTS_DIR, raw.get("private_data"))
+                except ValueError as exc:
+                    return self._error(400, str(exc), "invalid_request_error")
+                reply["identity_private_data"] = value
         if "free_model_credit_fallback" in payload:
             raw = payload.get("free_model_credit_fallback")
             if not isinstance(raw, bool):
@@ -20803,14 +21331,31 @@ class Handler(BaseHTTPRequestHandler):
                     })
         except Exception:
             keys = []
+        selection = wb_settings.agent_model_selection(ACCOUNTS_DIR)
         return self._json(200, {
             "enabled": True,
             "clients": list(wb_agents.overview(ACCOUNTS_DIR).values()),
             "models": self._agents_models(),
+            # 「网关模型清单」里勾选的模型：一键配置只把这些写进客户端。
+            # None（从未保存）时给空列表，由 models_configured 区分「没选过」
+            # 与「选了 0 个」——前者 apply 退回完整目录，后者 apply 拒绝。
+            "selected_models": selection or [],
+            "models_configured": selection is not None,
+            # 哪些客户端会把模型清单写进自身配置（前端据此决定「一个都没勾」
+            # 时要不要在发请求前拦下来；Claude Code / Codex 不读清单）。
+            "model_embedding_clients": sorted(MODEL_EMBEDDING_CLIENTS),
             "keys": keys,
             "global_key_set": bool(API_KEY),
             "auth_required": auth_required(),
             "gateway": {"base_url": self._agents_base_url_hint()},
+        })
+
+    def _get_agents_model_selection(self):
+        """面板在「网关模型清单」勾选的模型（一键配置写进客户端的清单）。"""
+        selection = wb_settings.agent_model_selection(ACCOUNTS_DIR)
+        return self._json(200, {
+            "configured": selection is not None,
+            "selected_models": selection or [],
         })
 
     def _agents_resolve_key(self, payload, warnings):
@@ -20851,11 +21396,14 @@ class Handler(BaseHTTPRequestHandler):
                 "invalid_request_error")
         model = str(payload.get("model") or "").strip() or None
         models = payload.get("models")
-        if not models:
-            # Fall back to the gateway's discovered catalog so clients that embed
-            # model definitions (OpenCode, DSH, Crush, ZCode) receive the full
-            # model list even when the front-end omitted the field.
-            models = self._agents_models()
+        if models is None:
+            # 前端没带清单（老看板 / 直接调接口）：优先用「网关模型清单」里
+            # 勾选的模型；从未保存过勾选（升级前的老安装）才退回完整目录。
+            selection = wb_settings.agent_model_selection(ACCOUNTS_DIR)
+            if selection is None:
+                models = self._agents_models()
+            else:
+                models = [{"id": mid} for mid in selection]
         if not isinstance(models, list):
             return self._error(400, "models must be a list",
                                "invalid_request_error")
@@ -20879,6 +21427,12 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             specs = {}
         cleaned_models = enrich_agent_models(cleaned_models, specs)
+        if not cleaned_models and client_id in MODEL_EMBEDDING_CLIENTS:
+            return self._error(
+                400,
+                "请先在「网关模型清单」中勾选至少一个模型：只有勾选的模型"
+                "才会写入客户端配置",
+                "invalid_request_error")
         warnings = []
         try:
             api_key = self._agents_resolve_key(payload, warnings)
@@ -20920,6 +21474,23 @@ class Handler(BaseHTTPRequestHandler):
         log("agents restore: client=%s files=%d"
             % (client_id, len(result.get("restored") or [])), tag="agents")
         return self._json(200, result)
+
+    def _handle_agents_model_selection(self, payload):
+        """保存「网关模型清单」里勾选的模型；空列表是合法输入（全部取消）。"""
+        models = payload.get("models")
+        if models is None:
+            return self._error(400, "models is required", "invalid_request_error")
+        if not isinstance(models, list):
+            return self._error(400, "models must be a list",
+                               "invalid_request_error")
+        selection = wb_settings.set_agent_model_selection(ACCOUNTS_DIR, models)
+        log("agents model selection: %d model(s)" % len(selection),
+            tag="agents")
+        return self._json(200, {
+            "ok": True,
+            "configured": True,
+            "selected_models": selection,
+        })
 
     def _handle_panel(self, path):
         """Panel login, logout and the settings screen (password + API key)."""
@@ -20967,11 +21538,16 @@ class Handler(BaseHTTPRequestHandler):
             if len(new) < 4:
                 return self._error(400, "new password must be at least 4 characters", "invalid_request_error")
             wb_settings.set_panel_password(ACCOUNTS_DIR, new)
+            log("panel      : password changed")
             if new != wb_settings.DEFAULT_PANEL_PASSWORD:
                 # Rotating the password invalidates every other browser session.
                 PANEL.revoke_all()
             token = PANEL.create()
-            return self._json(200, {"ok": True, "token": token})
+            return self._json(200, {
+                "ok": True, "token": token,
+                "using_default_password":
+                    new == wb_settings.DEFAULT_PANEL_PASSWORD,
+            })
         return self._error(404, "not found", "invalid_request_error")
     def _handle_accounts(self, path, payload):
         """Account-management endpoints (dashboard uses these)."""
@@ -20989,6 +21565,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._route_account_credits_detail(payload)
         if path == "/tasks/run":
             return self._route_tasks_run(payload)
+        if path == "/tasks/claim":
+            return self._route_tasks_claim(payload)
         if path == "/tasks/travel":
             return self._route_tasks_travel(payload)
         if path == "/tasks/streak-bonus":
@@ -21073,7 +21651,7 @@ class Handler(BaseHTTPRequestHandler):
                 log("product switch failed for %s: %s" % (account.uid[:8], exc),
                     level="WARN")
 
-        return self._json(200, {
+        return self._json_panel(200, {
             "ok": True,
             "product": target,
             "changed": changed,
@@ -21089,14 +21667,19 @@ class Handler(BaseHTTPRequestHandler):
             targets = [a for a in POOL.accounts if a.realm == realm]
         else:
             targets = list(POOL.accounts)
-        results = []
-        for account in targets:
-            if account is None:
-                continue
-            res = account.fetch_credits()
-            results.append({"uid": account.uid, "ok": res.get("ok", False),
-                            "credits": account.credits, "error": res.get("error", "")})
-        return self._json(200, {"results": results, "accounts": account_views()})
+        # 多账号目标才吃单飞与拟人间隔：单账号刷新本来就只发一次请求，不该被别人的
+        # 全量刷挡住，也不该为它空等一个间隔。
+        multi = len([t for t in targets if t is not None]) > 1
+        if multi and not _credits_sweep_begin():
+            # 已有一次全量刷在跑：不排队、不重复轰炸上游，把当前快照原样回给调用方。
+            return self._json_panel(200, {"results": [], "accounts": account_views(),
+                                          "busy": True})
+        try:
+            results = _credits_sweep(targets, paced=multi)
+        finally:
+            if multi:
+                _credits_sweep_end()
+        return self._json_panel(200, {"results": results, "accounts": account_views()})
 
     def _route_account_credits_detail(self, payload):
         if not self._authorized():
@@ -21104,15 +21687,15 @@ class Handler(BaseHTTPRequestHandler):
         uid = payload.get("uid")
         refresh = payload.get("refresh", True)
         if not POOL:
-            return self._json(200, {"ok": False, "error": "账号池未初始化"})
+            return self._json_panel(200, {"ok": False, "error": "账号池未初始化"})
         account = POOL.get(uid) if uid else None
         if not account:
-            return self._json(200, {"ok": False, "error": "未找到指定账号"})
+            return self._json_panel(200, {"ok": False, "error": "未找到指定账号"})
 
         if refresh or not account.credits or not account.credits.get("packages"):
             res = account.fetch_credits()
             if not res.get("ok"):
-                return self._json(200, {
+                return self._json_panel(200, {
                     "ok": False,
                     "uid": account.uid,
                     "nickname": account.nickname,
@@ -21121,7 +21704,7 @@ class Handler(BaseHTTPRequestHandler):
                     "error": res.get("error", "获取积分明细失败")
                 })
 
-        return self._json(200, {
+        return self._json_panel(200, {
             "ok": True,
             "uid": account.uid,
             "nickname": account.nickname,
@@ -21131,26 +21714,27 @@ class Handler(BaseHTTPRequestHandler):
 
     def _route_tasks_run(self, payload):
         if not POOL:
-            return self._json(200, {"ok": False, "msg": "账号池不可用"})
+            return self._json_panel(200, {"ok": False, "msg": "账号池不可用"})
         invalidate_tasks_cache()          # 跑完任务状态就变了，别再端旧快照
         uid = payload.get("uid")
         if uid and uid != "all":
             target = POOL.get(uid)
             if not target or target.realm != "cn":
-                return self._json(200, {"ok": False, "msg": "未找到指定的国内版账号"})
+                return self._json_panel(200, {"ok": False, "msg": "未找到指定的国内版账号"})
             targets = [target]
         else:
             targets = [a for a in POOL.accounts if a.realm == "cn" and a.enabled]
         if not targets:
-            return self._json(200, {"ok": False, "msg": "未找到已启用的国内版账号"})
+            return self._json_panel(200, {"ok": False, "msg": "未找到已启用的国内版账号"})
         from wb_tasks import run_growth_tasks
+        claim = payload.get("claim", True) is not False
         combined_logs = []
         total_credit = 0
         for i, acc in enumerate(targets):
             uid_str = acc.uid[:8] if acc.uid else "?"
             nick = acc.nickname or uid_str
             combined_logs.append(f"====== 正在为账号 [{nick} ({acc.uid})] 执行全自动成长任务 ({i+1}/{len(targets)}) ======")
-            res = run_growth_tasks(acc, gap=1.0)
+            res = run_growth_tasks(acc, gap=1.0, claim=claim)
             # run_growth_tasks() reports its total as "earned_credit";
             # reading the old "credit_added" name silently summed zeros
             # and the dashboard always showed "+0 积分".
@@ -21161,27 +21745,48 @@ class Handler(BaseHTTPRequestHandler):
                 time.sleep(1.5)
         combined_logs.append(f"====== 全部 {len(targets)} 个账号任务执行完毕，累计新增积分: +{total_credit} ======")
         add_log_entry(f"[任务福利] 批量成长任务执行完成，共 {len(targets)} 个账号，新增积分 +{total_credit}", tag="tasks")
-        return self._json(200, {
+        return self._json_panel(200, {
             "ok": True,
             "credit_added": total_credit,
             "logs": combined_logs,
             "accounts_count": len(targets)
         })
 
+    def _route_tasks_claim(self, payload):
+        if not POOL:
+            return self._json_panel(200, {"ok": False, "msg": "账号池不可用"})
+        uid = payload.get("uid")
+        code = str(payload.get("code") or "").strip()
+        if not uid or uid == "all":
+            return self._json_panel(200, {"ok": False, "msg": "请先选择一个国内版账号"})
+        if not code:
+            return self._json_panel(200, {"ok": False, "msg": "缺少任务代码"})
+        target = POOL.get(uid)
+        if not target or target.realm != "cn":
+            return self._json_panel(200, {"ok": False, "msg": "未找到指定的国内版账号"})
+        from wb_tasks import claim_task
+        res = claim_task(target, code)
+        invalidate_tasks_cache()
+        return self._json_panel(200, {
+            "ok": bool(res.get("ok")),
+            "msg": res.get("msg") or ("领取成功" if res.get("ok") else "领取失败"),
+            "credit": res.get("credit", 0),
+        })
+
     def _route_tasks_streak_bonus(self, payload):
         if not POOL:
-            return self._json(200, {"ok": False, "msg": "账号池不可用"})
+            return self._json_panel(200, {"ok": False, "msg": "账号池不可用"})
         invalidate_tasks_cache()
         uid = payload.get("uid")
         if uid and uid != "all":
             target = POOL.get(uid)
             if not target or target.realm != "cn":
-                return self._json(200, {"ok": False, "msg": "未找到指定的国内版账号"})
+                return self._json_panel(200, {"ok": False, "msg": "未找到指定的国内版账号"})
             targets = [target]
         else:
             targets = [a for a in POOL.accounts if a.realm == "cn" and a.enabled]
         if not targets:
-            return self._json(200, {"ok": False, "msg": "未找到已启用的国内版账号"})
+            return self._json_panel(200, {"ok": False, "msg": "未找到已启用的国内版账号"})
         from wb_tasks import run_streak_bonus
         results = []
         for i, acc in enumerate(targets):
@@ -21192,22 +21797,22 @@ class Handler(BaseHTTPRequestHandler):
             add_log_entry(f"[任务福利] 账号 [{nick}] 连登管家与抽奖: {res.get('msg')}", tag="tasks")
             if i < len(targets) - 1:
                 time.sleep(1.0)
-        return self._json(200, {"ok": True, "msg": chr(10).join(results)})
+        return self._json_panel(200, {"ok": True, "msg": chr(10).join(results)})
 
     def _route_tasks_travel(self, payload):
         if not POOL:
-            return self._json(200, {"ok": False, "msg": "账号池不可用"})
+            return self._json_panel(200, {"ok": False, "msg": "账号池不可用"})
         invalidate_tasks_cache()          # 同上：旅行会改任务/体力状态
         uid = payload.get("uid")
         if uid and uid != "all":
             target = POOL.get(uid)
             if not target or target.realm != "cn":
-                return self._json(200, {"ok": False, "msg": "未找到指定的国内版账号"})
+                return self._json_panel(200, {"ok": False, "msg": "未找到指定的国内版账号"})
             targets = [target]
         else:
             targets = [a for a in POOL.accounts if a.realm == "cn" and a.enabled]
         if not targets:
-            return self._json(200, {"ok": False, "msg": "未找到已启用的国内版账号"})
+            return self._json_panel(200, {"ok": False, "msg": "未找到已启用的国内版账号"})
         from wb_tasks import do_cat_travel
         results = []
         for i, acc in enumerate(targets):
@@ -21227,7 +21832,7 @@ class Handler(BaseHTTPRequestHandler):
         summary_msg = chr(10).join([f"{r['nickname']}: {r['msg']}" for r in results])
         for r in results:
             add_log_entry(f"[任务福利] 账号 [{r['nickname']}] 猫猫旅行: {r['msg']}", tag="tasks")
-        return self._json(200, {
+        return self._json_panel(200, {
             "ok": True,
             "results": results,
             "msg": summary_msg,
@@ -21269,7 +21874,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _route_scheduler_trigger(self, payload):
         if SCHEDULER:
-            return self._json(200, SCHEDULER.trigger_now())
+            return self._json_panel(200, SCHEDULER.trigger_now())
         return self._json(200, {"ok": False, "msg": "调度器未初始化"})
 
     def _route_quota_scan_run(self):
@@ -21299,7 +21904,7 @@ class Handler(BaseHTTPRequestHandler):
         if SCHEDULER:
             SCHEDULER.enabled = not SCHEDULER.enabled
             SCHEDULER.log(f"用户切换调度器状态为: {'启用' if SCHEDULER.enabled else '暂停'}")
-            return self._json(200, SCHEDULER.status())
+            return self._json_panel(200, SCHEDULER.status())
         return self._json(200, {"ok": False, "msg": "调度器未初始化"})
 
     def _route_pricing_refresh(self, payload):
@@ -21398,7 +22003,7 @@ class Handler(BaseHTTPRequestHandler):
             add_log_entry(f"[任务福利] 账号 [{nick}] 每日签到: {res.get('msg') if res.get('ok') else res.get('error')}",
                           level="INFO" if res.get("ok") else "WARN", tag="tasks")
             results.append({"uid": account.uid, "nickname": account.nickname, **res})
-        return self._json(200, {"results": results, "accounts": account_views()})
+        return self._json_panel(200, {"results": results, "accounts": account_views()})
 
     def _route_accounts_daily_chat(self, payload):
         uid = payload.get("uid")
@@ -21428,7 +22033,7 @@ class Handler(BaseHTTPRequestHandler):
             log(f"[任务福利] 账号 [{nick}] 每日活跃打卡: {res.get('msg') if res.get('ok') else res.get('error')}",
                 level="INFO" if res.get("ok") else "WARN", tag="tasks")
             results.append({"uid": account.uid, "nickname": account.nickname, **res})
-        return self._json(200, {"results": results, "accounts": account_views()})
+        return self._json_panel(200, {"results": results, "accounts": account_views()})
 
     def _route_accounts_daily_chat_web(self, payload):
         """网页通道打卡：只建网页端会话，不发桌面端那条轻量对话。
@@ -21450,7 +22055,7 @@ class Handler(BaseHTTPRequestHandler):
             log(f"[任务福利] 账号 [{nick}] 网页通道打卡: {res.get('conversation') if res.get('ok') else res.get('error')}",
                 level="INFO" if res.get("ok") else "WARN", tag="tasks")
             results.append({"uid": account.uid, "nickname": account.nickname, **res})
-        return self._json(200, {"results": results, "accounts": account_views()})
+        return self._json_panel(200, {"results": results, "accounts": account_views()})
 
     def _route_accounts_login_start(self, payload):
         platform = payload.get("platform") or "CLI"
@@ -21483,9 +22088,9 @@ class Handler(BaseHTTPRequestHandler):
                     force=bool(payload.get("force")), log=lambda m: log(m, tag="accounts"))
             except Exception as exc:
                 log("at-rest key recovery failed: %s" % exc, level="WARN", tag="accounts")
-                return self._json(200, {"ok": False, "msg": str(exc),
+                return self._json_panel(200, {"ok": False, "msg": str(exc),
                                         "atrest": wb_atrest.status()})
-            return self._json(200, {
+            return self._json_panel(200, {
                 "ok": True,
                 "keyId": wb_atrest.derive_key_id(key),
                 "msg": "已从桌面客户端进程回收密钥（只留在内存里）",
@@ -21499,9 +22104,9 @@ class Handler(BaseHTTPRequestHandler):
                                           log=lambda m: log(m, tag="accounts"))
             except Exception as exc:
                 log("at-rest key import rejected: %s" % exc, level="WARN", tag="accounts")
-                return self._json(200, {"ok": False, "msg": str(exc),
+                return self._json_panel(200, {"ok": False, "msg": str(exc),
                                         "atrest": wb_atrest.status()})
-            return self._json(200, {
+            return self._json_panel(200, {
                 "ok": True,
                 "keyId": wb_atrest.derive_key_id(key),
                 "msg": "已导入解码密钥（只留在内存里）",
@@ -21509,7 +22114,7 @@ class Handler(BaseHTTPRequestHandler):
             })
         if payload.get("forgetKey"):
             wb_atrest.forget_key()
-            return self._json(200, {"ok": True, "atrest": wb_atrest.status()})
+            return self._json_panel(200, {"ok": True, "atrest": wb_atrest.status()})
         if target_path:
             realm = payload.get("realm")
             try:
@@ -21518,17 +22123,17 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 return self._error(400, "import failed: %s" % exc)
             log("imported %s from %s (user confirmed)" % (account.uid[:8], os.path.basename(target_path)))
-            return self._json(200, {
+            return self._json_panel(200, {
                 "imported": [account.public()],
                 "accounts": account_views(),
             })
         if payload.get("all"):
             imported = import_desktop_accounts(payload.get("realm"))
-            return self._json(200, {
+            return self._json_panel(200, {
                 "imported": [a.public() for a in imported],
                 "accounts": account_views(),
             })
-        return self._json(200, {
+        return self._json_panel(200, {
             "detected": desktop_credential_scan(),
             "accounts": account_views(),
             "pool_uids": [a.uid for a in POOL.accounts],
@@ -21545,7 +22150,7 @@ class Handler(BaseHTTPRequestHandler):
             ok = account.refresh()
             account.save(ACCOUNTS_DIR)
             results.append({"uid": account.uid, "ok": ok, "error": account.last_error})
-        return self._json(200, {"results": results})
+        return self._json_panel(200, {"results": results})
 
     def _route_accounts_sync_profile(self, payload):
         """Manual nickname refresh from the web console.
@@ -21577,7 +22182,7 @@ class Handler(BaseHTTPRequestHandler):
             updated.append({"uid": account.uid, "nickname": nickname})
             log("account %s: nickname synced from the web console"
                 % account.uid[:8], level="INFO")
-        return self._json(200, {"updated": updated, "failed": failed,
+        return self._json_panel(200, {"updated": updated, "failed": failed,
                                 "accounts": account_views()})
 
     def _route_accounts_test(self, payload):
@@ -21637,7 +22242,7 @@ class Handler(BaseHTTPRequestHandler):
         log("test all: realm=%s model=%s tested=%d passed=%d failed=%d network=%s"
             % (realm, model, len(rows), len(passed), len(failed),
                "ok" if network.get("ok") else "DOWN"), tag="accounts")
-        return self._json(200, {"ok": True, "summary": summary, "network": network,
+        return self._json_panel(200, {"ok": True, "summary": summary, "network": network,
                                 "results": rows, "accounts": account_views()})
 
     def _route_accounts_set(self, payload):
@@ -21696,11 +22301,11 @@ class Handler(BaseHTTPRequestHandler):
                 400,
                 "nothing to update: pass 'enabled', 'proxy', 'proxySlot', 'weight' or 'note'"
             )
-        return self._json(200, {"account": updated})
+        return self._json_panel(200, {"account": updated})
 
     def _route_accounts_set_all(self, payload):
         POOL.set_all_enabled(bool(payload.get("enabled")))
-        return self._json(200, {"accounts": account_views()})
+        return self._json_panel(200, {"accounts": account_views()})
 
     def _route_accounts_delete(self, payload):
         uid = payload.get("uid")
@@ -21708,7 +22313,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(400, "uid required")
         removed = POOL.remove(uid)
         log("account %s deleted" % uid[:8])
-        return self._json(200, {"deleted": removed, "accounts": account_views()})
+        return self._json_panel(200, {"deleted": removed, "accounts": account_views()})
 
     def _route_accounts_import(self, payload):
         # Import a previously exported document (or any hand-written list
@@ -21743,7 +22348,7 @@ class Handler(BaseHTTPRequestHandler):
             # see exactly what an import would do before committing to it.
             # Shares its rules with the real import, so the preview cannot
             # disagree with what would actually happen.
-            return self._json(200, {
+            return self._json_panel(200, {
                 "dryRun": True,
                 "count": len(rows),
                 "result": POOL.preview_import_rows(rows, realm=forced_realm, overwrite=overwrite),
@@ -21753,7 +22358,7 @@ class Handler(BaseHTTPRequestHandler):
         log("account import: %d added, %d updated, %d skipped, %d invalid"
             % (len(report["added"]), len(report["updated"]),
                len(report["skipped"]), len(report["invalid"])))
-        return self._json(200, {
+        return self._json_panel(200, {
             "count": len(rows),
             "result": report,
             "accounts": account_views(),
@@ -21849,7 +22454,7 @@ class Handler(BaseHTTPRequestHandler):
                          key=self._key_id())
             return self._rate_limited(exc)
         except urllib.error.HTTPError as exc:
-            detail = exc.read(600).decode("utf-8", "replace")
+            detail = read_http_error(exc, 600).decode("utf-8", "replace")
             record_error(model, exc.code, detail,
                          elapsed_ms=int((time.time() - t_start) * 1000),
                          account=getattr(exc, "account_uid", None),
@@ -21973,6 +22578,7 @@ class Handler(BaseHTTPRequestHandler):
         except _ClientStreamClosed:
             outcome = "client_aborted"
         except Exception as exc:
+            log("responses stream aborted: %s: %s" % (type(exc).__name__, exc))
             holder["incomplete_reason"] = "upstream_stream_error"
             outcome = "upstream_aborted"
             try:
@@ -22154,7 +22760,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._anthropic_rate_limited(exc)
         except urllib.error.HTTPError as exc:
             try:
-                detail = exc.read(600).decode("utf-8", "replace")
+                detail = read_http_error(exc, 600).decode("utf-8", "replace")
             except Exception:
                 detail = str(exc)
             record_error(model, exc.code, detail,
@@ -22367,20 +22973,25 @@ class Handler(BaseHTTPRequestHandler):
             if payload is None:
                 return
             return self._handle_proxy_slots(path, payload)
-        if path in ("/agents/apply", "/agents/restore"):
+        if path in ("/agents/apply", "/agents/restore",
+                    "/agents/model-selection"):
             if not self._panel_ok():
                 return self._error(
                     401, "panel password required", "invalid_request_error"
                 )
+            payload = self._payload_or_error()
+            if payload is None:
+                return
+            # 勾选清单只是数据、不碰本机配置目录，所以远程看板也能保存；
+            # apply / restore 改的是网关所在机器的配置文件，只允许本机操作。
+            if path == "/agents/model-selection":
+                return self._handle_agents_model_selection(payload)
             if not self._agents_client_allowed():
                 return self._error(
                     403,
                     "agent config is only available from the machine running the gateway",
                     "invalid_request_error",
                 )
-            payload = self._payload_or_error()
-            if payload is None:
-                return
             if path == "/agents/apply":
                 return self._handle_agents_apply(payload)
             return self._handle_agents_restore(payload)
@@ -22560,7 +23171,7 @@ class Handler(BaseHTTPRequestHandler):
                          key=self._key_id())
             return self._rate_limited(exc)
         except urllib.error.HTTPError as exc:
-            detail = exc.read(600).decode("utf-8", "replace")
+            detail = read_http_error(exc, 600).decode("utf-8", "replace")
             record_error(model, exc.code, detail,
                          elapsed_ms=int((time.time() - t_start) * 1000),
                          account=getattr(exc, "account_uid", None),
@@ -22578,10 +23189,17 @@ class Handler(BaseHTTPRequestHandler):
                                    " - add or enable one at the dashboard (/)")
             return self._error(502, f"upstream unreachable: {exc}")
         with upstream:
+            def reopen_stream():
+                # Same account, same egress: only the TCP connection is new.
+                return open_upstream(
+                    payload, session_key=session_key, target_realm=req_realm,
+                    prebuilt_body=forwarded, pin_account=account,
+                    defer_egress_success=True)
             if want_stream:
                 return self._chat_stream_response(
                     upstream, model, fp, account, t_start,
-                    base_body=payload, session_key=session_key, realm=req_realm, effort=effort)
+                    base_body=payload, session_key=session_key, realm=req_realm, effort=effort,
+                    reopen=reopen_stream)
             return self._chat_nonstream_response(
                 upstream, model, fp, account, t_start,
                 base_body=payload, session_key=session_key, realm=req_realm, effort=effort)
@@ -22592,27 +23210,34 @@ class Handler(BaseHTTPRequestHandler):
 
     @_track_response('chat', True)
     def _chat_stream_response(self, upstream, model, fp, account, t_start,
-                              base_body=None, session_key=None, realm=None, effort=None):
+                              base_body=None, session_key=None, realm=None, effort=None,
+                              reopen=None, headers_sent=False):
         callback = _make_retry_call(base_body, session_key, realm) if base_body else None
-        try:
-            upstream, replacement = probe_first_frame(upstream, retry_call=callback,
-                                                      tried=[account.uid])
-            account = replacement or account
-            if upstream is None:
+        if not headers_sent:
+            try:
+                upstream, replacement = probe_first_frame(upstream, retry_call=callback,
+                                                          tried=[account.uid])
+                account = replacement or account
+                if upstream is None:
+                    return self._error(502, "upstream first-frame probe failed")
+            except Exception as exc:
+                _close_upstream(upstream)
+                _record_billed_error({"billed_model": getattr(upstream, "_wb_billed_model", None)}, model, 502, "first-frame probe failed: %s" % type(exc).__name__,
+                             elapsed_ms=int((time.time() - t_start) * 1000), account=account.uid,
+                             key=self._key_id(), effort=effort)
                 return self._error(502, "upstream first-frame probe failed")
-        except Exception as exc:
-            _close_upstream(upstream)
-            _record_billed_error({"billed_model": getattr(upstream, "_wb_billed_model", None)}, model, 502, "first-frame probe failed: %s" % type(exc).__name__,
-                         elapsed_ms=int((time.time() - t_start) * 1000), account=account.uid,
-                         key=self._key_id(), effort=effort)
-            return self._error(502, "upstream first-frame probe failed")
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-        self.send_header("Cache-Control", "no-cache")
-        self.send_header("Connection", "close")
-        if cors_origin_allowed(self.path):
-            self.send_header("Access-Control-Allow-Origin", "*")
-        self.end_headers()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "close")
+            if cors_origin_allowed(self.path):
+                self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+        egress_on = wb_settings.egress_backoff_enabled(ACCOUNTS_DIR)
+        egress_key = None
+        if egress_on:
+            egress_key = wb_upstream_pool.egress_key(
+                account.chat_base_url() + CHAT_PATH, account.proxy)
         holder = {"account": account, "base_body": base_body,
                   "session_key": session_key, "realm": realm, "retry_owner": _retry_scope(self),
                   "retry_call": callback, "account_usage": {}}
@@ -22623,15 +23248,42 @@ class Handler(BaseHTTPRequestHandler):
         holder["before_upstream_read"] = writer.flush
         first_ms = None
         outcome = None
+        emitted = False
         try:
             for frame in _stream_chat_events(upstream, model, holder):
                 if first_ms is None:
                     first_ms = int((time.time() - t_start) * 1000)
                 writer.write(frame)
+                emitted = True
             writer.flush()
         except _ClientStreamClosed:
             outcome = "client_aborted"
         except Exception:
+            if not emitted and reopen is not None and not holder.get("usage_recorded"):
+                # Nothing reached the client yet, so reconnecting on the same
+                # account/egress is indistinguishable from a fresh TCP connect.
+                try:
+                    _close_upstream(upstream)
+                except Exception:
+                    pass
+                new_upstream = None
+                try:
+                    new_upstream, new_account, new_effort = reopen()
+                except Exception:
+                    new_upstream = None
+                if new_upstream is not None:
+                    try:
+                        return self._chat_stream_response(
+                            new_upstream, model, fp, new_account, t_start,
+                            base_body=base_body, session_key=session_key, realm=realm,
+                            effort=new_effort, reopen=None, headers_sent=True)
+                    finally:
+                        try:
+                            new_upstream.close()
+                        except Exception:
+                            pass
+            if egress_on and egress_key:
+                wb_egress.note_transient(egress_key)
             holder["incomplete_reason"] = "upstream_stream_error"
             try:
                 for frame in _chat_error_frames(holder, "upstream_stream_error"):
@@ -22653,10 +23305,14 @@ class Handler(BaseHTTPRequestHandler):
                        gen_ms=(wall - first_ms) if first_ms is not None else None,
                        fp=fp, account=account.uid, key=self._key_id(), effort=effort)
         usage = None if holder.get("usage_recorded") else _saved_attempt_usage(holder, "usage_this_round")
+        retried_stream = headers_sent or bool(getattr(upstream, "_ops_retried", False))
         if failed:
             _record_billed_error(holder, model, 502, failed, usage=usage, outcome="upstream_aborted", **details)
-        elif not holder.get("usage_recorded"):
-            _record_billed_usage(holder, model, usage, outcome=outcome or "completed", **details)
+        else:
+            if egress_on and egress_key and not retried_stream:
+                wb_egress.note_success(egress_key)
+            if not holder.get("usage_recorded"):
+                _record_billed_usage(holder, model, usage, outcome=outcome or "completed", **details)
         return
 
     @_track_response('chat', False)
@@ -22667,12 +23323,21 @@ class Handler(BaseHTTPRequestHandler):
                   "retry_call": (_make_retry_call(base_body, session_key, realm) if base_body else None)}
         holder.update(key_id=self._key_id(), effort=effort)
         holder["record_attempt"] = _attempt_recorder(holder, model, fp, t_start, stream=False)
+        egress_on = wb_settings.egress_backoff_enabled(ACCOUNTS_DIR)
+        egress_key = None
+        if egress_on:
+            egress_key = wb_upstream_pool.egress_key(
+                account.chat_base_url() + CHAT_PATH, account.proxy)
         try:
             result, account = _aggregate_with_recovery(upstream, model, account, holder)
         except Exception as exc:
+            if egress_on and egress_key:
+                wb_egress.note_transient(egress_key)
             _record_billed_error(holder, model, 502, str(exc), usage=_saved_attempt_usage(holder), elapsed_ms=int((time.time() - t_start) * 1000),
                          account=account.uid, key=self._key_id(), effort=effort)
             return self._error(502, f"upstream stream error: {exc}")
+        if egress_on and egress_key:
+            wb_egress.note_success(egress_key)
         wall = int((time.time() - t_start) * 1000)
         if result.get("_ops_failure"):
             _record_billed_error(holder, model, 502, result["_ops_failure"],
@@ -22690,6 +23355,48 @@ class Handler(BaseHTTPRequestHandler):
                      fp=fp, account=account.uid, key=self._key_id(), effort=effort)
         return self._json(200, result)
 
+# ---------------------------------------------------------------------------
+# Per-key concurrency tracking (#359)
+# ---------------------------------------------------------------------------
+_key_active_concurrency = {}
+_key_concurrency_lock = threading.Lock()
+
+def _acquire_key_slot(key_entry):
+    """Try to acquire a concurrency slot for key_entry. Returns (ok, current, limit)."""
+    if not isinstance(key_entry, dict):
+        return True, 0, 0
+    k_id = key_entry.get("id")
+    if not k_id:
+        return True, 0, 0
+    limit = int(key_entry.get("concurrency_limit") or 0)
+    if limit <= 0:
+        return True, 0, 0
+    with _key_concurrency_lock:
+        current = _key_active_concurrency.get(k_id, 0)
+        if current >= limit:
+            return False, current, limit
+        _key_active_concurrency[k_id] = current + 1
+        return True, current + 1, limit
+
+def _release_key_slot(key_entry):
+    """Release a concurrency slot for key_entry."""
+    if not isinstance(key_entry, dict):
+        return
+    k_id = key_entry.get("id")
+    if not k_id:
+        return
+    limit = int(key_entry.get("concurrency_limit") or 0)
+    if limit <= 0:
+        return
+    with _key_concurrency_lock:
+        current = _key_active_concurrency.get(k_id, 0)
+        if current > 1:
+            _key_active_concurrency[k_id] = current - 1
+        else:
+            _key_active_concurrency.pop(k_id, None)
+
+
+
 def running_version():
     """The version this process reports, e.g. "1.6.19".
 
@@ -22702,6 +23409,13 @@ def running_version():
 def main():
     args = _parse_cli_args()
     _apply_cli_overrides(args)
+    if args.probe_only:
+        # 启动脚本先在本机窗口里跑一次这个检查再拉起了。静默模式下服务进程是
+        # pythonw，stdout/stderr 全指向空设备，"已有一个反代在运行、所以什么都不
+        # 用起"这句决定用户永远看不到，双击只表现为"启动失败"。
+        # 退出码就是给 cmd.exe 的判断条件：0 = 已有实例（或端口被别的服务占着，
+        # 那条错误由 _probe_running_instance 自己打印），3 = 端口是空的，可以起。
+        raise SystemExit(0 if _probe_running_instance(args) else 3)
     if _probe_running_instance(args):
         return
     api_key_generated = _bootstrap_runtime(args)
@@ -22733,6 +23447,10 @@ def _parse_cli_args():
                     help="import the desktop app credential as an account, then exit")
     ap.add_argument("--panel-password", default=None,
                     help="set the web panel password on startup (default: admin)")
+    ap.add_argument("--probe-only", action="store_true",
+                    help="only check whether a proxy already listens on the port and "
+                         "print what the launcher should say, then exit "
+                         "(0 = one is running, 3 = the port is free)")
     args = ap.parse_args()
     return args
 
@@ -22910,7 +23628,10 @@ def _report_first_run(args):
         log("still no accounts - starting anyway so you can log in via the dashboard")
     if args.import_desktop:
         for account in POOL.accounts:
-            print("  %s  %s  %s" % (account.uid[:8], account.nickname, account.domain))
+            # 控制台也是「显示」：真机核验时会直接看这条输出。
+            # 用文本级掩码而非值级，覆盖「老王(13812345678)」这类昵称内嵌号码的形态，
+            # 与 log() 的 stderr 出口、_redact_account_names 的 nickname 规则保持一致。
+            print("  %s  %s  %s" % (account.uid[:8], _mask_text(account.nickname), account.domain))
         return
 
 def _log_startup_summary(args, api_key_generated):

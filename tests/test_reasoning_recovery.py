@@ -97,9 +97,13 @@ class RecoveryTests(unittest.TestCase):
         frames = responses(handler)
         content = [c["delta"]["content"] for f in frames for c in f.get("choices", []) if c["delta"].get("content")]
         self.assertEqual(content, [ANSWER])
-        self.assertEqual(sum(bool(c.get("finish_reason")) for f in frames for c in f.get("choices", [])), 1)
-        self.assertEqual(frames[-1]["choices"][0]["finish_reason"], "stop")
-        self.assertEqual(frames[-1]["usage"]["total_tokens"], 14)
+        finish_frames = [f for f in frames
+                         if any(c.get("finish_reason") for c in f.get("choices", []))]
+        usage_frames = [f for f in frames if "usage" in f]
+        self.assertEqual(len(finish_frames), 1)
+        self.assertEqual(finish_frames[0]["choices"][0]["finish_reason"], "stop")
+        self.assertEqual(len(usage_frames), 1)
+        self.assertEqual(usage_frames[0]["usage"]["total_tokens"], 14)
         self.assertEqual(b"".join(handler.written).count(b"[DONE]"), 1)
         opened.assert_not_called()
 

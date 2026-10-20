@@ -37,7 +37,7 @@ def main():
     args = parser.parse_args()
     upstream = args.upstream.resolve(strict=True)
     official_suites = sorted((upstream / 'tests').glob('_test_*.py'))
-    assert len(official_suites) == 127, 'pinned official Python inventory changed'
+    assert len(official_suites) == 139, 'pinned official Python inventory changed'
     bundle = Bundle(ROOT)
     assert set(bundle.status(bundle.target(upstream)).values()) == {'base'}, 'use clean pinned upstream'
     args.output.mkdir(parents=True, exist_ok=True)

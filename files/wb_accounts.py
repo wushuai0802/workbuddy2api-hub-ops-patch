@@ -1632,6 +1632,8 @@ class Account(object):
             session_key=session_key,
             turn_request_id=turn_request_id,
             model=model,
+            private_data=(wb_settings.identity_private_data(
+                os.path.dirname(self.path)) if self.path else "auto"),
         )
         if self.is_cli_identity():
             # 官方 CLI 的 chat 请求由 OpenAI Node SDK 发出：浏览器头一个都没有
