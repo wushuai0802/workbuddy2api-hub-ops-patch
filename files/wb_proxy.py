@@ -12441,6 +12441,12 @@ def probe_first_frame(upstream, retry_call=None, tried=None, deadline_at=None, r
                 # egress unhealthy; a later successful retry must not erase it.
                 wb_egress.note_transient(egress_key)
             _close_upstream(upstream)
+            if (isinstance(exc, http.client.IncompleteRead)
+                    and (time.monotonic() >= deadline_at or socket_deadline_limited)):
+                # Linux returns EOF at the probe deadline without raising a
+                # socket timeout; the short body is deadline expiry, not a
+                # retryable transport failure.
+                raise TimeoutError("first-frame deadline exceeded") from exc
             if isinstance(exc, _SSELimitError):
                 raise
             if retry_call is None:
