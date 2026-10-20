@@ -266,7 +266,7 @@
      tools = bool(meta.get("supportsToolCall"))
      thinks = bool(meta.get("supportsReasoning"))
      inputs = ["text"] + (["image"] if vision else [])
-@@ -11377,6 +11406,1199 @@
+@@ -11377,6 +11406,1198 @@
      if not line or line.startswith(":"):
          return ""
      return line
@@ -1305,8 +1305,7 @@
 +                # egress unhealthy; a later successful retry must not erase it.
 +                wb_egress.note_transient(egress_key)
 +            _close_upstream(upstream)
-+            if (isinstance(exc, http.client.IncompleteRead)
-+                    and (time.monotonic() >= deadline_at or socket_deadline_limited)):
++            if isinstance(exc, http.client.IncompleteRead) and time.monotonic() >= deadline_at:
 +                # Linux returns EOF at the probe deadline without raising a
 +                # socket timeout; the short body is deadline expiry, not a
 +                # retryable transport failure.
@@ -1466,7 +1465,7 @@
  def clean_chunk(raw):
      """Drop the empty noise fields the WorkBuddy gateway pads deltas with."""
      try:
-@@ -11399,11 +12621,16 @@
+@@ -11399,11 +12620,16 @@
          # PATCHED-BY-OPS: 原判断 `if not delta.get("function_call")` 对
          # {"name":"","arguments":""} 为假（非空 dict 是真值），空占位删不掉。
          # 改为显式检查：name 与 arguments 均空才视为占位噪音。
@@ -1484,7 +1483,7 @@
              else:
                  fc_empty = not fc
              if fc_empty:
-@@ -11424,7 +12651,7 @@
+@@ -11424,7 +12650,7 @@
      changed = False
      if isinstance(obj, dict):
          fc = obj.get("function_call")
@@ -1493,7 +1492,7 @@
              obj.pop("function_call", None)
              changed = True
          tc = obj.get("tool_calls")
-@@ -11625,6 +12852,129 @@
+@@ -11625,6 +12851,129 @@
          else:
              out.append(tc)
      return out
@@ -1623,7 +1622,7 @@
  def sanitize_messages(messages):
      out = []
      for m in messages or []:
-@@ -11635,7 +12985,10 @@
+@@ -11635,7 +12984,10 @@
              if "content" in item and not preserve_tool_result:
                  item["content"] = sanitize_content(item["content"])
              if isinstance(item.get("reasoning_content"), str):
@@ -1635,7 +1634,7 @@
              if "tool_calls" in item:
                  item["tool_calls"] = sanitize_tool_calls(item["tool_calls"])
              out.append(item)
-@@ -11918,7 +13271,7 @@
+@@ -11918,7 +13270,7 @@
  # enough on its own: `reasoning` is mirrored with a non-empty value.
  def backfill_reasoning_content(messages, model, thinking_enabled=None):
      if not model or not str(model).lower().startswith("deepseek"):
@@ -1644,7 +1643,7 @@
      if thinking_enabled is None:
          thinking_enabled = False
      has_trace = False
-@@ -11938,17 +13291,28 @@
+@@ -11938,17 +13290,28 @@
      for m in messages:
          if isinstance(m, dict) and m.get("role") == "assistant":
              item = dict(m)
@@ -1674,7 +1673,7 @@
              if not (isinstance(existing, str) and existing):
                  item["reasoning"] = rc if rc else " "
              out.append(item)
-@@ -12410,9 +13774,10 @@
+@@ -12410,9 +13773,10 @@
  
  def could_be_leaked_call(tail):
      """True while `tail` (starting at "<") may still grow into printed markup."""
@@ -1688,7 +1687,7 @@
          return True
      if len(low) > 96 or ">" in low:
          return False
-@@ -12801,6 +14166,11 @@
+@@ -12801,6 +14165,11 @@
      return cfg
  
  
@@ -1700,7 +1699,7 @@
  def apply_prompt_mode(messages):
      """Apply the configured prompt mode to one request's messages.
  
-@@ -12811,7 +14181,7 @@
+@@ -12811,7 +14180,7 @@
      """
      cfg = prompt_mode_config()
      mode = cfg.get("mode") or "passthrough"
@@ -1709,7 +1708,7 @@
      if mode in ("custom", "append"):
          try:
              text = wb_prompt.load_prompt(mode, cfg.get("file"))
-@@ -12846,9 +14216,12 @@
+@@ -12846,9 +14215,12 @@
      # one the upstream sees, with the client's fingerprint-y system text gone.
      messages = apply_prompt_mode(messages)
      messages = sanitize_messages(messages)
@@ -1722,7 +1721,7 @@
      if not messages or (messages[0].get("role") != "system"):
          messages = [{"role": "system", "content": SYSTEM_PROMPT}] + messages
      body = dict(payload)
-@@ -13773,11 +15146,7 @@
+@@ -13773,11 +15145,7 @@
          return False
      if seconds <= 0:
          return False
@@ -1735,7 +1734,7 @@
      if sock is None:
          return False
      try:
-@@ -13820,9 +15189,13 @@
+@@ -13820,9 +15188,13 @@
          "1", "true", "yes", "on")
  
  
@@ -1750,7 +1749,7 @@
      # Refresh the daily guards before picking. The scan underneath is
      # incremental and TTL-cached, so this is a stat() plus a cached dict on
      # the hot path, and an account parked by any of the guards is skipped
-@@ -13839,8 +15212,11 @@
+@@ -13839,8 +15211,11 @@
              remaining_schedule_weights() if remaining_priority_enabled() else None)
      realm = target_realm or detect_model_realm(payload.get("model")) or CURRENT_REALM
      model = str(payload.get("model") or "")
@@ -1762,7 +1761,7 @@
          if pinned.realm != realm:
              raise PinnedAccountError(
                  409, "pinned account '%s' belongs to realm %s, request targets %s"
-@@ -13879,7 +15255,7 @@
+@@ -13879,7 +15254,7 @@
      turn_request_id = wb_identity.new_turn_request_id()
      total = (1 if pinned is not None else
               (max(1, POOL.count_ready(realm, model=model)) if POOL else 1))
@@ -1771,7 +1770,7 @@
      # 这一轮请求已经记过账的账号：重试轮（transient_hits 后 tried.clear() 整池
      # 重轮）会把同一个账号再挑一遍，若每次都记，一次请求就能给同一个账号记上
      # 好几笔 fails/degrade——池子越空、重轮越频繁，越容易把一个刚抖了一下的
-@@ -13888,7 +15264,6 @@
+@@ -13888,7 +15263,6 @@
      # A 401 may simply mean the access token expired before its JWT clock did.
      # Refresh at most once per account per request, then retry that same
      # account instead of silently rotating away from a recoverable credential.
@@ -1779,7 +1778,7 @@
      refresh_uid = None
  
      def pool_account(uid):
-@@ -13921,6 +15296,7 @@
+@@ -13921,6 +15295,7 @@
      last_403_detail = ""
      transient_hits = 0
      degraded_retried = False
@@ -1787,7 +1786,7 @@
      # 一次请求里因为 11140 换过的号数：默认 0，即第一个号被限制就停手。
      restricted_rotations = 0
      # 本机断网的次数：这一轮里只要出现过，最终报错就按「网络不可用」报，不按
-@@ -13943,13 +15319,19 @@
+@@ -13943,13 +15318,19 @@
      # 记过的那一段沿用同一段退避，不重复记。
      egress_wait = {}
  
@@ -1808,7 +1807,7 @@
                      max(2, total) + 1 + (MAX_PRODUCT_SWITCHES if auto_switch else 0))
      # 官方 VSCode 扩展的 X-Conversation-ID 是 32hex、会话稳定；网关没有会话
      # 映射，至少保证同一次 open_upstream（含换号重试）里是同一个 id。桌面端 /
-@@ -13959,11 +15341,19 @@
+@@ -13959,11 +15340,19 @@
      # 忘掉整段对话：重选时优先回到还留着这段前缀的暖号（见 SessionAffinity），
      # 一次大 prompt 的冷启动比重选一次账号贵得多。
      for _attempt in range(max_attempts):
@@ -1830,7 +1829,7 @@
          else:
              account = POOL.pick_for_session(realm=realm, session_key=session_key,
                                              exclude=tried, model=model,
-@@ -13979,6 +15369,10 @@
+@@ -13979,6 +15368,10 @@
                                              exclude=tried, model=model,
                                              page=affinity_page) if POOL else None
          if account is None:
@@ -1841,7 +1840,7 @@
              break
          if account.realm != realm:
              if session_key and POOL: POOL.affinity.demote(session_key, account.uid)
-@@ -14032,9 +15426,13 @@
+@@ -14032,9 +15425,13 @@
          req = urllib.request.Request(chat_url, data=attempt_data, method="POST",
                                       headers=req_headers)
          req.wb_exact_headers = list(req_headers.items())
@@ -1857,7 +1856,7 @@
              _apply_stream_idle_timeout(resp, idle_timeout)
              account.note_success(model=model)
              wb_entitlements.clear(ACCOUNTS_DIR, account.realm, model)
-@@ -14046,6 +15444,9 @@
+@@ -14046,6 +15443,9 @@
                  wb_egress.note_success(
                      wb_upstream_pool.egress_key(chat_url, account.proxy))
              reset_switch_counter(account, model)
@@ -1867,7 +1866,7 @@
              # The third element is the reasoning effort this request ran at: the
              # body is rebuilt per attempt, but the effort is a property of the
              # model and the request, and the callers record it on the usage row.
-@@ -14160,7 +15561,7 @@
+@@ -14160,7 +15560,7 @@
                  # mode is usually a system-prompt fingerprint false positive.
                  # Switch to the minimal neutral prompt until next 00:00 CST
                  # and retry this turn once; custom mode opted out.
@@ -1876,7 +1875,7 @@
                          and prompt_mode_config().get("mode") in ("passthrough", "append")):
                      PROMPT_DEGRADE.trigger()
                      degraded_retried = True
-@@ -14187,27 +15588,38 @@
+@@ -14187,27 +15587,38 @@
                  last_error = exc
                  continue
              if exc.code == 401:
@@ -1928,7 +1927,7 @@
                  last_error = exc
                  continue
              if exc.code == 400:
-@@ -14253,7 +15665,7 @@
+@@ -14253,7 +15664,7 @@
                      if session_key and POOL:
                          POOL.affinity.demote(session_key, account.uid)
                      last_error = exc
@@ -1937,7 +1936,7 @@
                      continue
                  charge_account(account, "HTTP %d" % exc.code, unknown=False)
                  log("upstream %s for '%s' (code %s), retrying (fails=%d)"
-@@ -14281,7 +15693,7 @@
+@@ -14281,7 +15692,7 @@
                      log("local network looks down (%s); not charging any account"
                          % exc_detail(exc))
                  last_error = exc
@@ -1946,7 +1945,7 @@
                  continue
              if is_transient(exc):
                  transient_hits += 1
-@@ -14295,7 +15707,7 @@
+@@ -14295,7 +15706,7 @@
                          "backing off the egress %.1fs"
                          % (account.uid[:8], model, exc_detail(exc), wait))
                      last_error = exc
@@ -1955,7 +1954,7 @@
                      continue
                  charge_account(account, "connection: %s" % exc_detail(exc, 120),
                                 unknown=True)
-@@ -14306,7 +15718,7 @@
+@@ -14306,7 +15717,7 @@
                      "retrying (degrade=%d)"
                      % (account.uid[:8], model, exc_detail(exc), account.degrade_count))
                  last_error = exc
@@ -1964,7 +1963,7 @@
                  continue
              charge_account(account, str(exc)[:120], unknown=True)
              account.note_error(str(exc)[:120], cooldown=60, single_account=(total <= 1))
-@@ -14323,16 +15735,18 @@
+@@ -14323,16 +15734,18 @@
      # this realm has a persisted upstream 6004 cap for this free model. The
      # switch is opt-in because the retry can incur real charges.
      paid_model = _FREE_MODEL_CREDIT_FALLBACKS.get((realm, model))
@@ -1986,7 +1985,7 @@
              allow_credit_fallback=False, allow_product_switch=False)
          try:
              response._wb_billed_model = paid_model
-@@ -14613,7 +16027,65 @@
+@@ -14613,7 +16026,65 @@
  # 摊成「一块一次」，同时不会让首字节延迟变差（见 iter_sse_lines）。
  SSE_READ_BLOCK = 64 * 1024
  
@@ -2053,7 +2052,7 @@
      """按块读取流式响应并逐行产出，把逐行 read 的 syscall 开销摊掉。
  
      直接 `for line in resp` 迭代 http.client.HTTPResponse 时，每一行都要走
-@@ -14634,14 +16106,28 @@
+@@ -14634,14 +16105,28 @@
      攒下的写出掉：一个读取块里的事件因此合成一次 write，而下一个字节一到就
      立刻产出——延迟与逐块写完全一样，只是不再一个 chunk 一次 sendall。
      """
@@ -2085,7 +2084,7 @@
      while True:
          if before_read is not None:
              before_read()
-@@ -14655,24 +16141,59 @@
+@@ -14655,24 +16140,59 @@
              if remaining > 0:
                  raise http.client.IncompleteRead(b"", remaining)
              break
@@ -2154,7 +2153,7 @@
      for line in iter_sse_lines(raw_iter):
          data = strip_data_prefix(line.decode("utf-8", "replace"))
          if not data or data == "[DONE]":
-@@ -14683,6 +16204,12 @@
+@@ -14683,6 +16203,12 @@
              chunk = json.loads(data)
          except Exception:
              continue
@@ -2167,7 +2166,7 @@
          if first_chunk_at is None:
              first_chunk_at = time.time()
          if chunk.get("id"):
-@@ -14697,8 +16224,12 @@
+@@ -14697,8 +16223,12 @@
              delta = choice.get("delta") or {}
              if delta.get("content"):
                  content.append(delta["content"])
@@ -2181,7 +2180,7 @@
              for tc in delta.get("tool_calls") or []:
                  idx = tc.get("index")
                  if idx is None:
-@@ -14729,7 +16260,8 @@
+@@ -14729,7 +16259,8 @@
              # 占位。原判断对空 dict 成立，会凭空生成 tool_call 并伪造 id，
              # 导致 finish_reason 被改成 "tool_calls"（参数全空）→ 严格客户端死等。
              # 故：只要 name 为空即视为无效占位直接跳过。
@@ -2191,7 +2190,7 @@
              if fc and isinstance(fc, dict) and not fc_is_empty:
                  idx = 0
                  if idx not in tool_calls_map:
-@@ -14749,13 +16281,35 @@
+@@ -14749,13 +16280,35 @@
                          entry["function"]["arguments"] += fc["arguments"]
              if choice.get("finish_reason"):
                  finish = choice["finish_reason"]
@@ -2229,7 +2228,7 @@
          finish = "tool_calls"
      # PATCH2-BY-OPS: 二次防御——剔除「无函数名且无参数」的空 tool_call。
      # 即使上游以 tool_calls 数组形式发空占位，也不会泄漏给客户端。
-@@ -14773,6 +16327,8 @@
+@@ -14773,6 +16326,8 @@
              k: v for k, v in tool_calls_map.items()
              if not is_truncated_arguments((v.get("function") or {}).get("arguments"))
          }
@@ -2238,7 +2237,7 @@
      if tool_calls_map:
          ordered_tcs = [tool_calls_map[k] for k in sorted(tool_calls_map.keys())]
          message["tool_calls"] = ordered_tcs
-@@ -14809,6 +16365,8 @@
+@@ -14809,6 +16364,8 @@
      if usage:
          normalize_usage_cache_aliases(usage)
          out["usage"] = usage
@@ -2247,7 +2246,7 @@
      out["elapsed_ms"] = int((time.time() - started) * 1000)
      out["first_chunk_at"] = first_chunk_at
      return out
-@@ -15346,8 +16904,13 @@
+@@ -15346,8 +16903,13 @@
          })
      body["messages"] = convo
      body["stream"] = True
@@ -2263,7 +2262,7 @@
  
  
  def internal_calls_from_chat(chat_obj, web_tools=False):
-@@ -15594,7 +17157,7 @@
+@@ -15594,7 +17156,7 @@
              else:
                  log("responses: WARNING unhandled input item type=%r keys=%s"
                      % (itype, sorted(item.keys())[:8]))
@@ -2272,7 +2271,7 @@
  
  
  def responses_to_chat(payload):
-@@ -16165,6 +17728,9 @@
+@@ -16165,6 +17727,9 @@
      text = _anthropic_text(text)
      if text:
          content.append({"type": "text", "text": text})
@@ -2282,7 +2281,7 @@
      tool_calls = message.get("tool_calls")
      if isinstance(tool_calls, list):
          for call in tool_calls:
-@@ -16319,14 +17885,16 @@
+@@ -16319,14 +17884,16 @@
                  "index": state["thinking_idx"],
                  "delta": {"type": "thinking_delta", "thinking": reason},
              })
@@ -2307,7 +2306,7 @@
          for call in delta.get("tool_calls") or []:
              if not isinstance(call, dict):
                  continue
-@@ -16373,7 +17941,7 @@
+@@ -16373,7 +17940,7 @@
                  })
          finish = choice.get("finish_reason")
          if finish:
@@ -2316,7 +2315,7 @@
      if state["failed"]:
          return
      if not state["started"]:
-@@ -16407,12 +17975,10 @@
+@@ -16407,12 +17974,10 @@
      if not u:
          return None
      det = u.get("completion_tokens_details") or {}
@@ -2330,7 +2329,7 @@
          },
          "output_tokens": u.get("completion_tokens") or 0,
          "output_tokens_details": {"reasoning_tokens": det.get("reasoning_tokens") or 0},
-@@ -16434,7 +18000,8 @@
+@@ -16434,7 +17999,8 @@
      choice = (chat_obj.get("choices") or [{}])[0]
      msg = choice.get("message") or {}
      text = msg.get("content") or ""
@@ -2340,7 +2339,7 @@
      output = []
      if reasoning:
          output.append({
-@@ -16479,21 +18046,26 @@
+@@ -16479,21 +18045,26 @@
                      "arguments": dc.get("arguments") or "{}",
                  })
              text = clean_t
@@ -2371,7 +2370,7 @@
          "model": model,
          "output": output,
          "output_text": text,
-@@ -16511,7 +18083,393 @@
+@@ -16511,7 +18082,393 @@
          obj["usage"] = u
      if finish == "length":
          obj["incomplete_details"] = {"reason": "max_output_tokens"}
@@ -2765,7 +2764,7 @@
  
  
  def reasoning_only_response(result):
-@@ -16529,20 +18487,34 @@
+@@ -16529,20 +18486,34 @@
  
  
  def stream_responses_events(upstream, model, holder):
@@ -2805,7 +2804,7 @@
      custom_names = set(holder.get("custom_names") or ())
      ns_map = holder.get("namespace_map") or {}
      # 由反代代跑的网路工具呼叫，收集起来不转发给客户端
-@@ -16561,13 +18533,13 @@
+@@ -16561,13 +18532,13 @@
              "status": status,
              "model": model,
              "output": [o for o in outputs if o],
@@ -2821,7 +2820,7 @@
          if u:
              obj["usage"] = u
          if ns_map:
-@@ -16576,6 +18548,13 @@
+@@ -16576,6 +18547,13 @@
      def ev(etype, payload):
          nonlocal seq
          seq += 1
@@ -2835,7 +2834,7 @@
          data = {"type": etype, "sequence_number": seq}
          data.update(payload)
          body = json.dumps(data, ensure_ascii=False)
-@@ -16597,14 +18576,66 @@
+@@ -16597,14 +18575,66 @@
      def msg_item(status):
          item = {"id": msg_id, "type": "message", "status": status,
                  "role": "assistant", "content": []}
@@ -2905,7 +2904,7 @@
          if reason_index is not None and outputs[reason_index] is None:
              full_r = "".join(reason_parts)
              yield ev("response.reasoning_summary_text.done", {
-@@ -16618,7 +18649,8 @@
+@@ -16618,7 +18648,8 @@
              yield ev("response.output_item.done",
                       {"output_index": reason_index, "item": outputs[reason_index]})
          # 1. Emit completed structured tool calls
@@ -2915,7 +2914,7 @@
              entry = tool_calls_map[idx]
              if entry.get("custom"):
                  yield ev("response.custom_tool_call_input.done", {
-@@ -16662,11 +18694,13 @@
+@@ -16662,11 +18693,13 @@
              if calls_rem:
                  dsml_tool_calls.extend(calls_rem)
              if clean_rem:
@@ -2930,7 +2929,7 @@
                      })
              text_buffer = ""
          # 2. DSML fallback: emit buffered/parsed DSML tool calls if no structured tool_calls were emitted
-@@ -16677,7 +18711,9 @@
+@@ -16677,7 +18710,9 @@
              if extra_calls:
                  dsml_calls = extra_calls
                  full_text = clean_text
@@ -2941,7 +2940,7 @@
              for dc in dsml_calls:
                  # DSML 形状的网路工具呼叫一样由反代执行
                  if _own_web_tools and wb_webtools.is_internal_tool(dc.get("name")):
-@@ -16720,7 +18756,9 @@
+@@ -16720,7 +18755,9 @@
          # 这一轮如果有代跑的网路工具呼叫，就把完成事件留给下一轮，
          # 否则客户端会以为整个回合已经结束（旧版是在回合用尽时补一个合成的
          # resp_wrapup，那才是 issue #43 真正的病灶）。
@@ -2952,7 +2951,7 @@
              holder.setdefault("internal_calls", []).extend(
                  {"name": v["name"], "arguments": v["arguments"]}
                  for v in _internal_calls.values()
-@@ -16764,38 +18802,38 @@
+@@ -16764,38 +18801,38 @@
                  yield ev("response.web_search_call.completed", {
                      "output_index": _ws_idx, "item_id": _ws_id,
                  })
@@ -3015,7 +3014,7 @@
                  usage = {
                      "prompt_tokens": prompt_est,
                      "completion_tokens": comp,
-@@ -16804,48 +18842,71 @@
+@@ -16804,48 +18841,71 @@
                      "prompt_tokens_details": {"cached_tokens": 0},
                  }
                  holder["usage"] = usage
@@ -3114,7 +3113,7 @@
          u = chunk.get("usage")
          if u:
              if usage is None or (u.get("total_tokens") or 0) >= (usage.get("total_tokens") or 0):
-@@ -16855,26 +18916,17 @@
+@@ -16855,26 +18915,17 @@
              delta = choice.get("delta") or {}
              piece = delta.get("reasoning_content")
              if piece:
@@ -3146,7 +3145,7 @@
                  # web_search / web_fetch 由反代执行，不转发给客户端
                  if idx in _internal_calls or (
                          _own_web_tools and fn_name
-@@ -16943,31 +18995,8 @@
+@@ -16943,31 +18994,8 @@
                              })
              piece = delta.get("content")
              if piece:
@@ -3180,7 +3179,7 @@
                  # DSML tool call buffering: do not stream raw DSML tags to client
                  text_buffer += piece
                  while text_buffer:
-@@ -16976,7 +19005,7 @@
+@@ -16976,7 +19004,7 @@
                          text_parts.append(text_buffer)
                          yield ev("response.output_text.delta", {
                              "item_id": msg_id, "output_index": msg_index,
@@ -3189,7 +3188,7 @@
                          })
                          text_buffer = ""
                          break
-@@ -16987,7 +19016,7 @@
+@@ -16987,7 +19015,7 @@
                              text_parts.append(lead)
                              yield ev("response.output_text.delta", {
                                  "item_id": msg_id, "output_index": msg_index,
@@ -3198,7 +3197,7 @@
                              })
                          calls_found, _ = parse_dsml_tool_calls(m.group(0))
                          if calls_found:
-@@ -17001,7 +19030,7 @@
+@@ -17001,7 +19029,7 @@
                          text_parts.append(lead)
                          yield ev("response.output_text.delta", {
                              "item_id": msg_id, "output_index": msg_index,
@@ -3207,7 +3206,7 @@
                          })
                          text_buffer = text_buffer[idx:]
                          break
-@@ -17013,19 +19042,31 @@
+@@ -17013,19 +19041,31 @@
                              text_parts.append(lead)
                              yield ev("response.output_text.delta", {
                                  "item_id": msg_id, "output_index": msg_index,
@@ -3241,7 +3240,7 @@
      # Truncated streams (max_tokens, dropped connection) can leave tool-call
      # arguments as half-written JSON. Do not close those calls out as
      # completed: drop them before finalize so the client never receives a
-@@ -17597,7 +19638,7 @@
+@@ -17597,7 +19637,7 @@
          configured - both are real, and the usage log keeps them apart from
          rows written before the key field existed.
          """
@@ -3250,7 +3249,7 @@
      def _cross_realm_error(self, model, realm):
          """Explain a model/exit mismatch instead of letting upstream reject it.
          Sending gpt-6-astra to the domestic exit (or deepseek-v4-pro to the
-@@ -17782,6 +19823,23 @@
+@@ -17782,6 +19822,23 @@
              return self._get_console_state()
          if path == "/health":
              return self._get_health()
@@ -3274,7 +3273,7 @@
          if path == "/realm":
              return self._get_realm()
          if path == "/v1/balance-summary":
-@@ -17864,9 +19922,7 @@
+@@ -17864,9 +19921,7 @@
          return self._json(200, info)
  
      def _get_console_state(self):
@@ -3285,7 +3284,7 @@
  
      def _route_console_toggle(self):
          # 按钮请求均携带 `{}` body 但不解析：必须把残留字节读掉，否则同一条
-@@ -17875,6 +19931,7 @@
+@@ -17875,6 +19930,7 @@
          # Expect: 100-continue，否则排空会等待一个永远不会发出的 body。
          self._handle_expect_continue()
          self._discard_body()
@@ -3293,7 +3292,7 @@
          # 兼容旧面板：新面板直接 window.open，不再请求这里。
          return self._json(200, {"ok": True, "mode": "web",
                                  "url": "/dashboard?tab=logs", "visible": False})
-@@ -17884,6 +19941,9 @@
+@@ -17884,6 +19940,9 @@
          # keep-alive 连接上的下一个请求（连点触发 501）。
          self._handle_expect_continue()
          self._discard_body()
@@ -3303,7 +3302,7 @@
          # 回响应、延迟退出：0.4s 让 _json 的 body 先 flush 到 socket；端口
          # 随进程释放，下次启动走原来的启动脚本。
          def _bye():
-@@ -20311,6 +22371,9 @@
+@@ -20311,6 +22370,9 @@
          })
  
      def _handle_responses(self, payload):
@@ -3313,7 +3312,7 @@
          """Serve /v1/responses by translating to chat completions upstream."""
          # The gateway is stateless: it keeps no store of previous responses,
          # so it cannot replay a prior turn. Silently ignoring the field would
-@@ -20364,8 +22427,7 @@
+@@ -20364,8 +22426,7 @@
              key_blocked = self._key_model_error(chat_req.get("model"))
              if key_blocked:
                  return self._error(400, key_blocked, "invalid_request_error")
@@ -3323,7 +3322,7 @@
          except PinnedAccountError as exc:
              record_error(model, exc.status, exc.message[:200],
                           elapsed_ms=int((time.time() - t_start) * 1000),
-@@ -20425,7 +22487,21 @@
+@@ -20425,7 +22486,21 @@
                  base_body=chat_req, session_key=session_key, realm=req_realm,
                  effort=effort)
  
@@ -3345,7 +3344,7 @@
          self.send_response(200)
          self.send_header("Content-Type", "text/event-stream; charset=utf-8")
          self.send_header("Cache-Control", "no-cache")
-@@ -20439,27 +22515,54 @@
+@@ -20439,27 +22514,54 @@
                    "base_body": base_body,
                    "base_messages": (base_body or {}).get("messages"),
                    "session_key": session_key,
@@ -3405,7 +3404,7 @@
                  rounds += 1
                  # 用完就收回工具，让模型自己收尾；这里不合成任何事件。
                  give_up = rounds > wb_webtools.MAX_WEB_ROUNDS
-@@ -20469,45 +22572,52 @@
+@@ -20469,45 +22571,52 @@
                      pass
                  upstream, account, _ = follow_up_with_tool_results(
                      internal, holder, model, session_key, t_start, drop_tools=give_up)
@@ -3487,7 +3486,7 @@
      def _responses_nonstream_response(self, upstream, model, custom_names, request_meta, fp, account, t_start, namespace_map=None, base_body=None, session_key=None, realm=None, effort=None):
          # 跟串流那条一样：客户端宣告 web_search / web_fetch 时由反代代跑。
          # 中间那几轮对客户端不可见，最后才组成一个 Responses 物件回传；不这样
-@@ -20515,49 +22625,61 @@
+@@ -20515,49 +22624,61 @@
          # 一句 unsupported call。
          sources = []
          rounds = 0
@@ -3571,7 +3570,7 @@
          return self._json(200, result)
  
      def _handle_messages_count_tokens(self, payload):
-@@ -20575,6 +22697,9 @@
+@@ -20575,6 +22696,9 @@
          return self._json(200, {"input_tokens": _anthropic_estimate_chat_tokens(chat)})
  
      def _handle_messages(self, payload):
@@ -3581,7 +3580,7 @@
          """Serve an Anthropic Messages request through the chat pipeline."""
          try:
              chat_req = messages_to_chat(payload)
-@@ -20604,8 +22729,8 @@
+@@ -20604,8 +22728,8 @@
              key_blocked = self._key_model_error(chat_req.get("model"))
              if key_blocked:
                  return self._anthropic_error(400, key_blocked, "invalid_request_error")
@@ -3592,7 +3591,7 @@
          except PinnedAccountError as exc:
              record_error(model, exc.status, exc.message[:200],
                           elapsed_ms=int((time.time() - t_start) * 1000),
-@@ -20672,20 +22797,34 @@
+@@ -20672,20 +22796,34 @@
                  base_body=chat_req, session_key=session_key,
                  realm=req_realm, effort=effort)
  
@@ -3631,7 +3630,7 @@
              return self._anthropic_error(502, "upstream stream error: %s" % exc)
          finally:
              try:
-@@ -20693,6 +22832,7 @@
+@@ -20693,6 +22831,7 @@
              except Exception:
                  pass
  
@@ -3639,7 +3638,7 @@
      def _messages_stream_response(self, upstream, model, fp, account, t_start,
                                    base_body=None, session_key=None, realm=None,
                                    session_meta=None, effort=None):
-@@ -20703,17 +22843,26 @@
+@@ -20703,17 +22842,26 @@
          if cors_origin_allowed(self.path):
              self.send_header("Access-Control-Allow-Origin", "*")
          self.end_headers()
@@ -3672,7 +3671,7 @@
                           ttft_ms=first_ms,
                           gen_ms=(wall - first_ms) if first_ms is not None else None,
                           fp=fp, account=account.uid,
-@@ -20721,12 +22870,14 @@
+@@ -20721,12 +22869,14 @@
              return
          except Exception as exc:
              wall = int((time.time() - t_start) * 1000)
@@ -3690,7 +3689,7 @@
                  self.wfile.write(anthropic_sse_frame("error", {
                      "error": {"type": "api_error", "message": str(exc)}}))
                  self.wfile.flush()
-@@ -20734,12 +22885,22 @@
+@@ -20734,12 +22884,22 @@
                  pass
              return
          finally:
@@ -3714,7 +3713,7 @@
                       ttft_ms=first_ms,
                       gen_ms=(wall - first_ms) if first_ms is not None else None,
                       fp=fp, account=account.uid, key=self._key_id(), effort=effort)
-@@ -20880,13 +23041,19 @@
+@@ -20880,13 +23040,19 @@
          payload = self._payload_or_error(allow_list=(path == "/accounts/import"))
          if payload is None:
              return
@@ -3736,7 +3735,7 @@
              message = ("Rate limit reached: API key '%s' reached its concurrency limit (%d in flight); retry shortly"
                         % (key_name, max_key_conc))
              record_error(payload.get("model") or "unknown", 429, message,
-@@ -20920,11 +23087,18 @@
+@@ -20920,11 +23086,18 @@
              finally:
                  _chat_slots.release()
          finally:
@@ -3756,7 +3755,7 @@
          if BLOCK_BACKGROUND_REQUESTS:
              reason = background_request_reason(payload)
              if reason:
-@@ -20969,9 +23143,8 @@
+@@ -20969,9 +23142,8 @@
              key_blocked = self._key_model_error(payload.get("model"))
              if key_blocked:
                  return self._error(400, key_blocked, "invalid_request_error")
@@ -3768,7 +3767,7 @@
          except PinnedAccountError as exc:
              record_error(model, exc.status, exc.message[:200],
                           elapsed_ms=int((time.time() - t_start) * 1000),
-@@ -21030,236 +23203,159 @@
+@@ -21030,236 +23202,159 @@
                      defer_egress_success=True)
              if want_stream:
                  return self._chat_stream_response(
@@ -4133,7 +4132,7 @@
                       elapsed_ms=wall, ttft_ms=first_ms,
                       gen_ms=(wall - first_ms) if first_ms is not None else None,
                       fp=fp, account=account.uid, key=self._key_id(), effort=effort)
-@@ -21647,6 +23743,7 @@
+@@ -21647,6 +23742,7 @@
          print("          %s" % launcher_hint(args.port + 1))
          print()
          raise SystemExit(1)
