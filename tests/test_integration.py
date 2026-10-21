@@ -218,8 +218,11 @@ class IntegrationTests(unittest.TestCase):
 
     def test_response_upstream_reset_is_failure_not_client_abort(self):
         handler = self.response(Stream([chunk({"content": "partial"})], ConnectionResetError("upstream reset")), BODY)
-        final = self.assert_lifecycle(handler, "response.failed")
-        self.assertEqual(final["error"]["code"], "upstream_stream_error")
+        events = responses(handler)
+        errors = [e for e in events if e.get("type") == "error"]
+        self.assertEqual(len(errors), 1)
+        self.assertEqual(errors[0]["code"], "upstream_stream_error")
+        self.assertFalse(any(e.get("type") == "response.completed" for e in events))
         self.assertEqual(self.records[-1][0], "error")
 
     def test_response_truncated_text_fails_without_replay(self):

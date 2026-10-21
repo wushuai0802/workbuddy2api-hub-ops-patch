@@ -3,6 +3,7 @@ import base64
 import http.client
 import json
 import os
+import random
 import ssl
 import socket
 import sys
@@ -15,10 +16,13 @@ import uuid
 from wb_fingerprint import derive_id, generate_request_id, session_id
 import wb_activity
 import wb_atrest
+import wb_catalog
 import wb_identity
 import wb_settings
+import wb_tiers
 import wb_upstream_pool
 import wb_webagent
+import wb_webprompts
 
 # ---------------------------------------------------------------------------
 # 网页版通道（issue #75 / #59 / #90）
@@ -45,10 +49,15 @@ WEB_USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 
                   "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 Edg/140.0.0.0")
 DAILY_CHAT_MODEL = "deepseek-v4.1-flash"
 DAILY_CHAT_WEB_PROMPT = "Hi"
+#: 回退组合在没配置时的候选：账号首选模型之外，再带上各区域的免费模型。
+#: 实际顺序按目录倍率排序（免费 → 低积分 → 高积分），见 _model_credit_rank。
+DAILY_CHAT_WEB_FREE_FALLBACK_INTL = ("hy3", "hy4-preview-f", "hy4-preview",
+                                     "glm-5.3-flash")
+DAILY_CHAT_WEB_FREE_FALLBACK_CN = ("hy3", "hy4-preview-f", "hy4-preview")
 #: 网页通道一轮最多等多久（秒）。实测一次「Hi」十几秒就跑完，留足余量。
 #: 没配 settings 的账号（如单测里手工构造的）用它兜底。
 WEB_TURN_TIMEOUT = int(os.environ.get("WB_WEB_TURN_TIMEOUT") or "120")
-#: 网页通道一共试几次（含第一轮）。第 N 轮的等待是首轮的 2^(N-1) 倍，所以
+#: 网页通道一共试几次（含第一轮）。第 N 轮的等待是首轮的 N 倍，所以
 #: 3 次 = 最多等 base×(1+2+4) 秒。设置页可改（见 wb_settings.daily_chat_web_attempts）。
 WEB_TURN_ATTEMPTS = 3
 
@@ -761,6 +770,31 @@ def degrade_backoff(fails):
     return _exponential_backoff(fails, DEGRADE_COOLDOWN, DEGRADE_COOLDOWN_MAX,
                                 DEGRADE_THRESHOLD)
 
+
+def _model_credit_rank(model, realm):
+    """The catalogue multiplier as a number; unknown models sort last.
+
+    "x0.00" is the free tier, "x0.29" a cheap paid model, "x6.67" an expensive
+    one. The live catalogue is not available here (wb_accounts must not import
+    wb_proxy), so this reads the bundled table: every model the fallback
+    combination can name is in it, and an unknown id still gets a stable slot
+    after the known ones instead of being dropped.
+    """
+    table = (wb_catalog.STATIC_CN_MODELS if realm == "cn"
+             else wb_catalog.STATIC_INTL_MODELS)
+    for item in table:
+        if item.get("id") != model:
+            continue
+        raw = str(item.get("credits") or "").strip().lower()
+        if raw.startswith("x"):
+            try:
+                return float(raw[1:])
+            except ValueError:
+                pass
+        break
+    return float("inf")
+
+
 class Account(object):
     def __init__(self, data, path=None):
         data = data or {}
@@ -806,6 +840,15 @@ class Account(object):
         # Runtime-resolved value; recomputed by AccountPool.apply_proxy_slots().
         self.proxy = self.proxy_legacy
         self.enabled = data.get("enabled", True)
+        # Task participation is independent of API dispatch: an account can be
+        # disabled for traffic but still run check-in / growth / travel / daily
+        # activity (issue #521). Accounts written before this field existed
+        # follow `enabled`, so a disabled account stays fully off until the
+        # operator opts it back in.
+        raw_tasks_enabled = data.get("tasksEnabled")
+        self.tasks_enabled = (bool(raw_tasks_enabled)
+                              if raw_tasks_enabled is not None
+                              else bool(self.enabled))
         # 手动调度权重（面板按账号设置，1 = 不干预）。随凭证档持久化：这是
         # 用户的明确分派意图，不该在重启后悄悄回到默认。非法值一律回落 1，
         # 坏数据不至于让账号加载失败。
@@ -888,6 +931,13 @@ class Account(object):
         # 最近一次软限流（429）的时刻：两条软限流阶梯用同一个时间窗。
         self.last_soft_at = 0.0
         self.credits = data.get("credits") or None
+        # Whether the upstream says this is a paid (PRO) account. Read from the
+        # last credits snapshot the account saved; an account that never
+        # refreshed credits is treated as free, so a PRO-only model is not
+        # handed to it before the tier is known.
+        self.is_paid_user = bool(
+            self.credits.get("is_paid_user")
+            if isinstance(self.credits, dict) else False)
         self.last_checkin = data.get("lastCheckin") or None
         self.last_daily_chat = data.get("lastDailyChat") or None
         # 国内版每天一次的「对话活跃上报」（点亮官方 growth 连登/热力墙）上次
@@ -998,6 +1048,7 @@ class Account(object):
             "proxySlot": self.proxy_slot,
             "proxy": self.proxy_legacy,
             "enabled": self.enabled,
+            "tasksEnabled": bool(self.tasks_enabled),
             "weight": self.weight,
             "note": self.note,
             "disabledModels": list(self.disabled_models),
@@ -1061,6 +1112,7 @@ class Account(object):
             "product": self.product,
             "enterpriseId": self.enterprise_id,
             "enabled": bool(self.enabled),
+            "tasksEnabled": bool(self.tasks_enabled),
             "weight": int(self.weight),
             "note": self.note,
             "disabledModels": list(self.disabled_models),
@@ -1468,6 +1520,9 @@ class Account(object):
         # 「所有账号都禁用了这个模型」时，池子抽干的报错里会逐个号写明原因。
         if self.model_disabled(model):
             return "该模型已被人工禁用"
+        if (model and not getattr(self, "is_paid_user", False)
+                and wb_tiers.requires_pro(model, self.realm)):
+            return "该模型仅限 PRO 账号"
         now = time.time()
         # 四种惩罚的到期时间各走各的，谁把时间推得最远就报谁：只报「冷却」
         # 会让人往 429 的方向查，而实际可能是上游连续断连触发的熔断（30 分钟
@@ -1518,6 +1573,13 @@ class Account(object):
         # 人工黑名单排在最前：它是静态配置（最便宜），而且在语义上优先于所有
         # 「暂时不可用」的判断 —— 被禁用的模型不该因为账号恰好恢复了就漏进来。
         if self.model_disabled(model):
+            return False
+        # A PRO-only model must not be served by a free account: the upstream
+        # answers 11158, which used to be discovered only after spending the
+        # request. An unknown tier map returns False, so this is a no-op until
+        # the catalogue has delivered modelTiers.
+        if (model and not getattr(self, "is_paid_user", False)
+                and wb_tiers.requires_pro(model, self.realm)):
             return False
         if self.throttle_wait(model=model) > 0:
             return False
@@ -1810,6 +1872,13 @@ class Account(object):
             self.save(os.path.dirname(self.path))
         return True
 
+    def task_active(self):
+        """Whether scheduled / manual tasks may touch this account.
+
+        Independent of `enabled`: `enabled` only controls API dispatch.
+        """
+        return bool(self.tasks_enabled)
+
     def can_checkin(self):
         if self.realm != "cn":
             return False
@@ -1879,6 +1948,60 @@ class Account(object):
                     return cand
         return candidates[0]
 
+    def web_fallback_models(self):
+        """The ordered model combination the web leg falls back through.
+
+        The panel's combination wins; when it is empty the account's preferred
+        model plus the realm's free models form the default. Either way the
+        result is sorted by catalogue multiplier, so a free model runs before a
+        cheap paid one and that one before an expensive one. The account's
+        preferred model is first when it shares the cheapest tier, because it
+        is what the operator picked.
+        """
+        configured = []
+        if self.path:
+            configured = wb_settings.daily_chat_web_fallback_models(
+                os.path.dirname(self.path))
+        if configured:
+            candidates = list(configured)
+        else:
+            candidates = [self.daily_chat_model()]
+            if self.realm == "cn":
+                candidates.extend(DAILY_CHAT_WEB_FREE_FALLBACK_CN)
+            else:
+                candidates.extend(DAILY_CHAT_WEB_FREE_FALLBACK_INTL)
+        preferred = self.daily_chat_model()
+        seen = set()
+        ordered = []
+        for model in candidates:
+            if not model or model in seen:
+                continue
+            seen.add(model)
+            ordered.append(model)
+        ordered.sort(key=lambda model: (_model_credit_rank(model, self.realm),
+                                        0 if model == preferred else 1))
+        return ordered
+
+    def daily_chat_web_prompt(self):
+        """The prompt this turn sends on the web channel.
+
+        With the random-prompt setting off (the default) it is the same "Hi"
+        the activity has always sent. With it on, one line is drawn from the
+        built-in 300-line pool plus whatever the operator added, so the daily
+        activity does not look like the same canned request every day.
+        """
+        if not self.path:
+            return DAILY_CHAT_WEB_PROMPT
+        directory = os.path.dirname(self.path)
+        if not wb_settings.daily_chat_web_random_prompt(directory):
+            return DAILY_CHAT_WEB_PROMPT
+        # The stored list is the full pool the operator picked (builtin lines
+        # and custom lines together). Empty means "never configured", which
+        # keeps the original behaviour of drawing from all 300 builtin lines.
+        pool = wb_settings.daily_chat_web_prompts(directory)
+        if not pool:
+            pool = wb_webprompts.builtin_prompts()
+        return random.choice(pool) if pool else DAILY_CHAT_WEB_PROMPT
     def daily_chat_web(self, prompt=None, trigger="unknown"):
         """网页通道的每日活跃会话（issue #75 / #59 / #90）。
 
@@ -1895,6 +2018,11 @@ class Account(object):
         """
         if self.realm != "intl":
             return {"ok": False, "error": "web daily chat is only for international accounts"}
+        # 当日已经成功过一次就不再开新会话：多个定时点、手动触发与并发调度
+        # 可能在同一账号上重叠，重复跑只会多消耗一次网页活跃额度。
+        if not self.can_daily_chat():
+            return {"ok": True, "skipped": True,
+                    "msg": "今日活跃已完成，跳过网页活跃"}
         res = self._daily_chat_web_upstream(prompt)
         wb_activity.record_attempt(self, wb_activity.TASK_DAILY_CHAT, trigger, res)
         return res
@@ -1903,17 +2031,41 @@ class Account(object):
         """网页通道的实际流程；返回形状见 daily_chat_web。
 
         失败会再试（见 daily_chat_web_policy）：一共最多 attempts 次（含第一轮），
-        第 N 轮的等待是首轮的 2^(N-1) 倍 —— 默认 3 次、首轮 120 秒，也就是
-        120 / 240 / 480。最典型的失败是「会话还没跑完」（状态=working），它往往
+        第 N 轮的等待是首轮的 N 倍 —— 默认 3 次、首轮 120 秒，也就是
+        120 / 240 / 360。最典型的失败是「会话还没跑完」（状态=working），它往往
         只是慢，多等一轮就好，所以这里把等待时间当成重试的代价，不再额外 sleep。
         业务拒绝（建会话返回非 0 code）不再试：同一个被拒的请求再发一次也一样被拒。
 
         返回里带 attempts（实际跑了几轮），其余字段与 _daily_chat_web_once 一致。
         """
         base, total = self.daily_chat_web_policy()
+        directory = os.path.dirname(self.path) if self.path else ""
+        if directory and wb_settings.daily_chat_web_fallback(directory):
+            models = self.web_fallback_models()
+            if models:
+                # At least one try per candidate, so a combination the operator
+                # picked is actually walked; the configured attempt count still
+                # applies when it is larger (a second pass over the list).
+                attempts = max(total, len(models))
+                tried = []
+                last = None
+                for attempt in range(attempts):
+                    model = models[attempt % len(models)]
+                    res = self._daily_chat_web_once(
+                        prompt, wait_seconds=base * (2 ** attempt), model=model)
+                    res["attempts"] = attempt + 1
+                    res["models_tried"] = tried + [model]
+                    res["model"] = model
+                    if res.get("ok"):
+                        return res
+                    last = res
+                    if not res.get("retryable"):
+                        return res
+                    tried.append(model)
+                return last
         attempt = 0
         while True:
-            res = self._daily_chat_web_once(prompt, wait_seconds=base * (2 ** attempt))
+            res = self._daily_chat_web_once(prompt, wait_seconds=base * (attempt + 1))
             res["attempts"] = attempt + 1
             if res.get("ok") or attempt + 1 >= total or not res.get("retryable"):
                 return res
@@ -1937,17 +2089,19 @@ class Account(object):
         return (wb_settings.daily_chat_web_timeout(directory, default=WEB_TURN_TIMEOUT),
                 total)
 
-    def _daily_chat_web_once(self, prompt=None, wait_seconds=None):
+    def _daily_chat_web_once(self, prompt=None, wait_seconds=None, model=None):
         """网页通道的一轮尝试；返回形状见 daily_chat_web。
 
         结果里的 retryable 说明这一轮的失败值不值得再试一次（重试策略见
-        _daily_chat_web_upstream）。
+        _daily_chat_web_upstream）。model 为空时按账号首选模型；回退模式显式
+        传入当前候选，保证建会话与 session/set_model 用的是同一个模型。
         """
         if wait_seconds is None:
             wait_seconds = WEB_TURN_TIMEOUT
-        model = self.daily_chat_model()
+        model = model or self.daily_chat_model()
+        chosen_prompt = prompt or self.daily_chat_web_prompt()
         body = {
-            "prompt": prompt or DAILY_CHAT_WEB_PROMPT,
+            "prompt": chosen_prompt,
             "model": model,
             # 网页端建会话时固定带上这两项（抓包所得），保持请求形态一致。
             "conversationOrigin": "workbuddy-app",
@@ -1992,15 +2146,16 @@ class Account(object):
                     "error": "沙箱未就绪（没有 link/token）", "retryable": True}
 
         result = wb_webagent.run_turn(
-            link, token, session_id, cwd, prompt or DAILY_CHAT_WEB_PROMPT,
+            link, token, session_id, cwd, chosen_prompt,
             WEB_USER_AGENT,
             poll_status=lambda: self._web_conversation_status(conversation),
             wait_seconds=wait_seconds, proxy=self.proxy,
             model=model)
         result["conversation"] = conversation
+        result["model"] = model
         if result.get("ok"):
-            result["msg"] = "网页通道会话跑完：%d 段输出，%d ms" % (
-                result.get("chunks") or 0, result.get("elapsed_ms") or 0)
+            result["msg"] = "网页通道会话跑完（%s）：%d 段输出，%d ms" % (
+                model, result.get("chunks") or 0, result.get("elapsed_ms") or 0)
         else:
             result["retryable"] = True
         return result
@@ -2034,6 +2189,11 @@ class Account(object):
         """
         if self.realm != "intl":
             return {"ok": False, "error": "daily chat is only for international accounts"}
+        # 当日活跃成功后再触发（下一个定时点、手动补跑、并发重复调度）直接
+        # 跳过，连桌面腿也不发：这一天的 30/50 积分已经拿到了。
+        if not self.can_daily_chat():
+            return {"ok": True, "skipped": True,
+                    "msg": "今日活跃已完成，跳过本轮"}
         res = self._daily_chat_upstream(web)
         wb_activity.record_attempt(self, wb_activity.TASK_DAILY_CHAT, trigger, res)
         return res
@@ -3386,14 +3546,29 @@ class AccountPool(object):
             "invalid": invalid,
         }
 
-    def set_enabled(self, uid, enabled):
+    def set_enabled(self, uid, enabled, tasks_enabled=None):
         account = self.get(uid)
         if account is None: return None
         account.enabled = bool(enabled)
+        # Disabling stops tasks too unless the caller names the task flag
+        # explicitly; the panel sends both when it wants API-only or
+        # tasks-only behaviour.
+        account.tasks_enabled = (bool(tasks_enabled)
+                                 if tasks_enabled is not None
+                                 else bool(enabled))
         if enabled:
             account.clear_error()
         account.save(self.dir)
         self.apply_proxy_slots()
+        return account.public()
+
+    def set_tasks_enabled(self, uid, tasks_enabled):
+        """Toggle task participation without changing API dispatch."""
+        account = self.get(uid)
+        if account is None:
+            return None
+        account.tasks_enabled = bool(tasks_enabled)
+        account.save(self.dir)
         return account.public()
 
     def set_weight(self, uid, weight):
@@ -3654,18 +3829,32 @@ class AccountPool(object):
             for account in self.accounts:
                 if realm and account.realm != realm: continue
                 account.enabled = bool(enabled)
+                account.tasks_enabled = bool(enabled)
                 if enabled:
                     account.clear_error()
                 account.save(self.dir)
         self.apply_proxy_slots()
 
-    def count_ready(self, realm=None, model=None):
+    def task_accounts(self, realm=None):
+        """Accounts that participate in scheduled / manual tasks.
+
+        Kept separate from the API pool: `enabled` controls dispatch, while
+        `task_active()` controls check-in, growth, travel and daily activity
+        (issue #521).
+        """
+        with self._lock:
+            return [a for a in self.accounts
+                    if (not realm or a.realm == realm) and a.task_active()]
+
+    def count_ready(self, realm=None, model=None, allowed=None):
         with self._lock:
             snapshot = [a for a in self.accounts if not realm or a.realm == realm]
-        return sum(1 for a in snapshot if a.enabled and a.access_token and a.ready(model=model))
+        return sum(1 for a in snapshot
+                   if a.enabled and a.access_token and a.ready(model=model)
+                   and (allowed is None or a.uid in allowed))
 
     def pick_for_session(self, realm=None, session_key=None, exclude=None, model=None,
-                         page=None):
+                         page=None, allowed=None):
         """Pick the account for one turn of a conversation.
 
         Three shapes, in order of preference:
@@ -3687,15 +3876,22 @@ class AccountPool(object):
             for uid in self.affinity.recent(session_key):
                 if uid in exclude:
                     continue
+                # A bound conversation must not route around the key's account
+                # restriction: the binding was made by a request that was
+                # allowed to use it, but this one may not be.
+                if allowed is not None and uid not in allowed:
+                    continue
                 account = self.get(uid)
                 if account and account.realm == realm and account.ready(model=model):
                     self.affinity.bind(session_key, uid)
                     return account
-        account = self.pick(realm=realm, exclude=exclude, model=model, page=page)
+        account = self.pick(realm=realm, exclude=exclude, model=model, page=page,
+                            allowed=allowed)
         if account is None and page is not None:
             # The page has nobody usable right now. Serving the conversation
             # from outside it beats not serving it at all.
-            account = self.pick(realm=realm, exclude=exclude, model=model)
+            account = self.pick(realm=realm, exclude=exclude, model=model,
+                                allowed=allowed)
         # A page conversation is not bound on purpose: its rotation is what keeps
         # every account of the page warm, and a binding would pin it back to one
         # (the state it was released from). The page cursor carries its rotation.
@@ -3703,10 +3899,12 @@ class AccountPool(object):
             self.affinity.bind(session_key, account.uid)
         return account
 
-    def pick(self, realm=None, exclude=None, model=None, page=None):
+    def pick(self, realm=None, exclude=None, model=None, page=None, allowed=None):
         exclude = exclude or set()
         with self._lock:
             snapshot = [a for a in self.accounts if not realm or a.realm == realm]
+        if allowed is not None:
+            snapshot = [a for a in snapshot if a.uid in allowed]
         if page is not None:
             snapshot = self._page_slice(snapshot, page)
         if not snapshot:
@@ -4372,6 +4570,7 @@ def _coerce_account_rows(blob):
         # and must be reported rather than silently treated as one account.
         looks_like_account = (
             blob.get("accessToken")
+            or blob.get("access_token")
             or isinstance(blob.get("auth"), dict)
             or isinstance(blob.get("account"), dict)
         )
@@ -4453,6 +4652,7 @@ def normalise_import_row(row, realm=None):
     if not uid:
         raise ValueError("cannot determine uid (no uid field and no sub claim)")
 
+    tasks_enabled = pick("tasksEnabled")
     return {
         "uid": uid,
         "nickname": str(pick("nickname") or ""),
@@ -4465,6 +4665,10 @@ def normalise_import_row(row, realm=None):
         "expiresAt": normalize_epoch(pick("expiresAt")) or jwt_exp(token),
         "source": str(pick("source") or "import"),
         "enabled": True,
+        # Imported accounts start with tasks on (they are new to this pool);
+        # an export that carries the flag keeps the operator's choice.
+        "tasksEnabled": (bool(tasks_enabled)
+                         if tasks_enabled is not None else True),
         # Volatile state is intentionally reset - see VOLATILE_FIELDS.
         "lastError": "",
         "cooldownUntil": 0.0,

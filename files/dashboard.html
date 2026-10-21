@@ -1701,6 +1701,7 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     '已为': 'Set to',
     '已保存': 'Saved',
     '已停用': 'Disabled',
+    '已停用 · 任务中': 'Disabled · tasks on',
     '已全部停用所有账号': 'All accounts disabled',
     '已把全部账号的出站身份切换为 ': 'Switched the outbound identity of ALL accounts to ',
     '已全部启用所有账号': 'All accounts enabled',
@@ -1727,9 +1728,9 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     ' 次 · ': ' attempts · ',
     '只跑一轮': 'Single attempt',
     '每轮等待': 'Wait per attempt',
-    '网页通道一轮没跑完（会话还在 working）就再来一轮：最多尝试几次（含第一轮，可改），每轮等待时间是上一轮的两倍——默认 3 次、首轮 120 秒，也就是 120 / 240 / 480 秒。默认开启；会话只是慢的时候多等一轮通常就过了。': 'When a web-channel attempt does not finish (the session is still working), try again: up to N tries in total (the first one included, configurable), with each wait twice the previous one - 3 tries and a 120-second first wait by default, i.e. 120 / 240 / 480. On by default; a session that is merely slow usually finishes on the next attempt.',
-    '注意：等待时间逐轮翻倍，「次数」与「首轮等待」调大都是平方级的代价——一个始终跑不完的账号最坏能占住巡检 base×(2^次数−1) 秒（默认 120×7 = 840 秒 ≈ 14 分钟）。建议不超过客户端愿意空等的时长。': 'Note: the wait doubles each round, so raising either the try count or the first wait costs you on a quadratic scale - an account that never finishes can hold the sweep for base×(2^tries−1) seconds (120×7 = 840 seconds, about 14 minutes, by default). Keep it within how long a client is willing to wait.',
-    '已启用：网页通道失败后会再试（等待时间翻倍）': 'On: the web channel tries again after a failure (wait doubles each time)',
+    '网页通道一轮没跑完（会话还在 working）就再来一轮：最多尝试几次（含第一轮，可改），每轮等待时间在上一轮基础上增加一个首轮时长——默认 3 次、首轮 120 秒，也就是 120 / 240 / 360 秒。默认开启；会话只是慢的时候多等一轮通常就过了。': 'When a web-channel attempt does not finish (the session is still working), try again: up to N tries in total (the first one included, configurable), with each wait one more first-wait step than the previous one - 3 tries and a 120-second first wait by default, i.e. 120 / 240 / 360. On by default; a session that is merely slow usually finishes on the next attempt.',
+    '注意：等待时间逐轮递增，「次数」与「首轮等待」调大都是线性累加的代价——一个始终跑不完的账号最坏能占住巡检 base×(1+2+…+次数) 秒（默认 120×(1+2+3) = 720 秒 = 12 分钟）。建议不超过客户端愿意空等的时长。': 'Note: the wait grows by one first-wait step each round, so raising either the try count or the first wait costs you on a linear scale - an account that never finishes can hold the sweep for base×(1+2+…+tries) seconds (120×(1+2+3) = 720 seconds, 12 minutes, by default). Keep it within how long a client is willing to wait.',
+    '已启用：网页通道失败后会再试（等待时间递增）': 'On: the web channel tries again after a failure (wait doubles each time)',
     '已关闭：网页通道只跑一轮': 'Off: the web channel runs a single attempt',
     '已保存：最多尝试 ': 'Saved: up to ',
     ' 次，首轮等待 ': ' tries, first wait ',
@@ -2391,6 +2392,10 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     '账号存储目录': 'Account directory',
     '账号已停用': 'Account disabled',
     '账号已成功启用': 'Account enabled',
+    '该账号已参与任务': 'Tasks enabled for this account',
+    '该账号已停止任务': 'Tasks disabled for this account',
+    '任务开': 'Tasks on',
+    '任务关': 'Tasks off',
     '账号当日消耗的 token 达到该值后暂停接单，请求自动切到其他账号；本地时间 0 点后自动恢复。填 0 表示不限（不限额）；与「保留积分」各自独立，任一命中都会暂停接单。': 'Once the token use of an account for the day reaches this, it stops taking orders and requests switch to other accounts; it recovers after local midnight. 0 means no limit; it is independent of Reserved credits, and either one pauses order taking.',
     '账号当日消费的积分达到该值后，只允许请求免费模型（目录中标记为 x0.00 的模型），需要花费积分的模型自动切到其他账号；本地时间 0 点后自动恢复。填 0 表示关闭（默认）。': 'Once the credit spend of an account for the day reaches this, only free models are allowed (those marked x0.00 in the catalog) and models that cost credits switch to other accounts; it recovers after local midnight. 0 turns it off (default).',
     '账号，之后相关请求都会走该账号': 'account; requests will then go through it',
@@ -2548,6 +2553,7 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     '价格刷新未运行': 'Price refresh is not running',
     '未找到可用的国内版账号': 'No usable China account found',
     '未找到已启用的国内版账号': 'No enabled China account found',
+    '未找到参与任务的国内版账号': 'No task-enabled China account found',
     '未找到指定的国内版账号': 'No matching China account found',
     '已从桌面客户端进程回收密钥（只留在内存里）': 'Key recovered from the desktop client process (kept in memory only)',
     '查询失败': 'lookup failed',
@@ -2800,9 +2806,9 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     " 次 · ": " 次 · ",
     "只跑一轮": "只跑一輪",
     "每轮等待": "每輪等待",
-    "网页通道一轮没跑完（会话还在 working）就再来一轮：最多尝试几次（含第一轮，可改），每轮等待时间是上一轮的两倍——默认 3 次、首轮 120 秒，也就是 120 / 240 / 480 秒。默认开启；会话只是慢的时候多等一轮通常就过了。": "網頁通道一輪沒跑完（會話還在 working）就再來一輪：最多嘗試幾次（含第一輪，可改），每輪等待時間是上一輪的兩倍——預設 3 次、首輪 120 秒，也就是 120 / 240 / 480 秒。預設開啟；會話只是慢的時候多等一輪通常就過了。",
-    "注意：等待时间逐轮翻倍，「次数」与「首轮等待」调大都是平方级的代价——一个始终跑不完的账号最坏能占住巡检 base×(2^次数−1) 秒（默认 120×7 = 840 秒 ≈ 14 分钟）。建议不超过客户端愿意空等的时长。": "注意：等待時間逐輪翻倍，「次數」與「首輪等待」調大都是平方級的代價——一個始終跑不完的帳號最壞能佔住巡檢 base×(2^次數−1) 秒（預設 120×7 = 840 秒 ≈ 14 分鐘）。建議不超過客戶端願意空等的時長。",
-    "已启用：网页通道失败后会再试（等待时间翻倍）": "已啟用：網頁通道失敗後會再試（等待時間翻倍）",
+    "网页通道一轮没跑完（会话还在 working）就再来一轮：最多尝试几次（含第一轮，可改），每轮等待时间在上一轮基础上增加一个首轮时长——默认 3 次、首轮 120 秒，也就是 120 / 240 / 360 秒。默认开启；会话只是慢的时候多等一轮通常就过了。": "網頁通道一輪沒跑完（會話還在 working）就再來一輪：最多嘗試幾次（含第一輪，可改），每輪等待時間在上一輪基礎上增加一個首輪時長——預設 3 次、首輪 120 秒，也就是 120 / 240 / 360 秒。預設開啟；會話只是慢的時候多等一輪通常就過了。",
+    "注意：等待时间逐轮递增，「次数」与「首轮等待」调大都是线性累加的代价——一个始终跑不完的账号最坏能占住巡检 base×(1+2+…+次数) 秒（默认 120×(1+2+3) = 720 秒 = 12 分钟）。建议不超过客户端愿意空等的时长。": "注意：等待時間逐輪遞增，「次數」與「首輪等待」調大都是線性累加的代價——一個始終跑不完的帳號最壞能佔住巡檢 base×(1+2+…+次數) 秒（預設 120×(1+2+3) = 720 秒 = 12 分鐘）。建議不超過客戶端願意空等的時長。",
+    "已启用：网页通道失败后会再试（等待时间递增）": "已啟用：網頁通道失敗後會再試（等待時間遞增）",
     "已关闭：网页通道只跑一轮": "已關閉：網頁通道只跑一輪",
     "已保存：最多尝试 ": "已保存：最多嘗試 ",
     " 次，首轮等待 ": " 次，首輪等待 ",
@@ -4695,6 +4701,24 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
       <section>
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
           <div>
+            <h2 style="margin:0">思考等级挡位映射 <em id="setReasoningEffortMapState"></em></h2>
+            <div style="font-size:12px;color:var(--dim);margin-top:4px">
+              客户端传入的思考等级不在模型支持列表时，自动改写为该模型的默认档位，避免上游直接拒绝整个请求。档位来自上游模型目录；模型不允许关闭思考时，「关闭思考」也会改为默认档位。默认开启。
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+            <label style="display:flex;align-items:center;gap:6px;font-size:13px;min-height:40px">
+              <input id="setReasoningEffortMap" type="checkbox" style="width:16px;height:16px">
+              启用映射
+            </label>
+            <button onclick="saveReasoningEffortMap(this)">保存</button>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+          <div>
             <h2 style="margin:0">按 API Key 过滤模型列表 <em id="setFilterModelsByKeyState"></em></h2>
             <div style="font-size:12px;color:var(--dim);margin-top:4px">
               开启后，<code style="font-family:var(--mono,monospace)">/v1/models</code> 只返回当前 Key 允许的模型，避免自动获取模型列表的客户端选到会被本地拒绝的模型。Key 未配置模型限制时仍返回全部。默认关闭。
@@ -4706,6 +4730,24 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
               启用过滤
             </label>
             <button onclick="saveFilterModelsByKey(this)">保存</button>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+          <div>
+            <h2 style="margin:0">只列出可用模型 <em id="setModelsOnlyAvailableState"></em></h2>
+            <div style="font-size:12px;color:var(--dim);margin-top:4px">
+              开启后，<code style="font-family:var(--mono,monospace)">/v1/models</code> 只返回当前账号池里至少有一个账号能服务的模型。国际版的 PRO ONLY 模型只有在池里存在付费账号时才列出；免费账号不会被派到这类模型上（上游会回 11158）。默认关闭，保持全量目录。
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+            <label style="display:flex;align-items:center;gap:6px;font-size:13px;min-height:40px">
+              <input id="setModelsOnlyAvailable" type="checkbox" style="width:16px;height:16px">
+              只列可用
+            </label>
+            <button onclick="saveModelsOnlyAvailable(this)">保存</button>
           </div>
         </div>
       </section>
@@ -4789,6 +4831,59 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
       <section>
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
           <div>
+            <h2 style="margin:0">出站身份版本号 <em id="setIdentityVersionsState"></em></h2>
+            <div style="font-size:12px;color:var(--dim);margin-top:4px">
+              三套身份当前发出去的版本号。默认值来自抓包与官方包解包核对，只有默认值有对应的头族与请求体配套。
+            </div>
+            <div style="font-size:12px;color:var(--warn);margin-top:4px">
+              修改版本号只改字符串，不会同步头族/请求体/ID 形态；与默认值不一致时可能触发上游校验，存在封号风险。修改需要输入面板密码。
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+            <button class="sec mini" onclick="toggleIdentityVersionEditor()">修改版本号</button>
+          </div>
+        </div>
+        <div id="identityVersionSummary" style="font-size:12px;color:var(--dim);line-height:1.9"></div>
+        <div id="identityVersionEditor" style="display:none;margin-top:10px;border:1px solid var(--line);border-radius:8px;padding:10px">
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:8px">
+            <label style="font-size:12px;color:var(--dim)">WorkBuddy 国际版
+              <input id="setIdentityVerDesktopIntl" type="text" style="width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:6px 9px;font:inherit;color:var(--fg)">
+            </label>
+            <label style="font-size:12px;color:var(--dim)">WorkBuddy 国内版
+              <input id="setIdentityVerDesktopCn" type="text" style="width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:6px 9px;font:inherit;color:var(--fg)">
+            </label>
+            <label style="font-size:12px;color:var(--dim)">桌面端内置 CLI
+              <input id="setIdentityVerDesktopCli" type="text" style="width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:6px 9px;font:inherit;color:var(--fg)">
+            </label>
+            <label style="font-size:12px;color:var(--dim)">VSCode 扩展
+              <input id="setIdentityVerVscodeProduct" type="text" style="width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:6px 9px;font:inherit;color:var(--fg)">
+            </label>
+            <label style="font-size:12px;color:var(--dim)">宿主 VSCode
+              <input id="setIdentityVerVscodeIde" type="text" style="width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:6px 9px;font:inherit;color:var(--fg)">
+            </label>
+            <label style="font-size:12px;color:var(--dim)">CodeBuddy CLI
+              <input id="setIdentityVerCli" type="text" style="width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:6px 9px;font:inherit;color:var(--fg)">
+            </label>
+            <label style="font-size:12px;color:var(--dim)">OpenAI Node SDK
+              <input id="setIdentityVerSdk" type="text" style="width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:6px 9px;font:inherit;color:var(--fg)">
+            </label>
+            <label style="font-size:12px;color:var(--dim)">Node 版本
+              <input id="setIdentityVerNode" type="text" style="width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:6px 9px;font:inherit;color:var(--fg)">
+            </label>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:10px">
+            <label style="font-size:13px;color:var(--dim)">面板密码
+              <input id="setIdentityVersionPassword" type="password" autocomplete="current-password" style="background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:6px 9px;font:inherit;color:var(--fg)">
+            </label>
+            <button onclick="saveIdentityVersions(this)">保存版本号</button>
+            <span style="font-size:12px;color:var(--warn)">保存后立即生效；输入框留空表示恢复默认</span>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+          <div>
             <h2 style="margin:0">国际版每日活跃打卡 <em id="setDailyChatWebState"></em></h2>
             <div style="font-size:12px;color:var(--dim);margin-top:4px">
               国际版账号每日打卡时，除桌面端身分的轻量对话外，再走一次网页通道的会话。默认开启。
@@ -4812,6 +4907,17 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
           清单是国际版目录里的全部模型，标价 0.00x 的标成免费并排在前面。每日活跃只是一次「Hi」的会话，默认用内置的免费模型；换一个是为了把活跃挪出真实流量正在用的那个模型的窗口额度。选到付费模型的话，活跃就会按那个模型花积分。
         </div>
         <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px">
+          <label style="font-size:13px;color:var(--dim)">每日活跃定时</label>
+          <span id="setDailyChatTimesState" style="font-size:12px;color:var(--dim)"></span>
+          <input id="setDailyChatTimeInput" type="time" style="background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:7px 10px;font:inherit;color:var(--fg)">
+          <button class="sec mini" onclick="addDailyChatTime()">添加时间</button>
+          <button onclick="saveDailyChatTimes(this)">保存</button>
+        </div>
+        <div id="setDailyChatTimesList" style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px"></div>
+        <div style="font-size:12px;color:var(--dim);margin-top:6px">
+          可填多个 HH:MM（逗号分隔，最多 24 个）。留空时跟随「签到」整点（默认 09:00/21:00）；填写后每日活跃只在这些时刻触发，不再跟签到走。改完无需重启，调度器每 30 秒重读一次。
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px">
           <label class="switch">
             <input id="setDailyChatWebRetry" type="checkbox" onchange="saveDailyChatWebRetry()">
             <span class="switch-track"></span>
@@ -4826,14 +4932,108 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
             <input id="setDailyChatWebTimeout" type="number" min="1" step="1" style="width:90px">
             秒
           </label>
+          <label style="display:flex;align-items:center;gap:6px;font-size:13px;min-height:40px">
+            并发数
+            <input id="setDailyChatWebConcurrency" type="number" min="1" step="1" style="width:70px">
+            个账号
+          </label>
           <button onclick="saveDailyChatWebTuning(this)">保存</button>
           <span id="setDailyChatWebRetryState" style="font-size:12px;color:var(--dim)"></span>
         </div>
         <div style="font-size:12px;color:var(--dim);margin-top:6px">
-          网页通道一轮没跑完（会话还在 working）就再来一轮：最多尝试几次（含第一轮，可改），每轮等待时间是上一轮的两倍——默认 3 次、首轮 120 秒，也就是 120 / 240 / 480 秒。默认开启；会话只是慢的时候多等一轮通常就过了。
+          网页通道一轮没跑完（会话还在 working）就再来一轮：最多尝试几次（含第一轮，可改），每轮等待时间在上一轮基础上增加一个首轮时长——默认 3 次、首轮 120 秒，也就是 120 / 240 / 360 秒。默认开启；会话只是慢的时候多等一轮通常就过了。
         </div>
         <div style="font-size:12px;color:var(--warn);margin-top:4px">
-          注意：等待时间逐轮翻倍，「次数」与「首轮等待」调大都是平方级的代价——一个始终跑不完的账号最坏能占住巡检 base×(2^次数−1) 秒（默认 120×7 = 840 秒 ≈ 14 分钟）。建议不超过客户端愿意空等的时长。
+          注意：等待时间逐轮递增，「次数」与「首轮等待」调大都是线性累加的代价——一个始终跑不完的账号最坏能占住巡检 base×(1+2+…+次数) 秒（默认 120×(1+2+3) = 720 秒 = 12 分钟）。建议不超过客户端愿意空等的时长。
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px">
+          <label class="switch">
+            <input id="setDailyChatWebFallback" type="checkbox" onchange="saveDailyChatWebFallback()">
+            <span class="switch-track"></span>
+            <span>失败后按模型组合回退</span>
+          </label>
+          <span id="setDailyChatWebFallbackState" style="font-size:12px;color:var(--dim)"></span>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:8px">
+          <label style="font-size:13px;color:var(--dim)">回退模型组合</label>
+          <span id="setDailyChatWebFallbackModelsState" style="font-size:12px;color:var(--dim)"></span>
+          <button class="sec mini" onclick="toggleDailyChatFallbackPicker()">选择模型</button>
+          <button onclick="saveDailyChatWebFallbackModels(this)">保存</button>
+        </div>
+        <div id="setDailyChatWebFallbackPicker" style="display:none;border:1px solid var(--line);border-radius:8px;padding:8px;margin-top:6px">
+          <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px">
+            <input id="setDailyChatWebFallbackSearch" placeholder="搜索模型" oninput="filterDailyChatFallbackPicker()" style="flex:1;min-width:160px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:6px 9px;font:inherit;color:var(--fg)">
+            <button class="sec mini" onclick="setDailyChatFallbackAll(true)">全选</button>
+            <button class="sec mini" onclick="setDailyChatFallbackAll(false)">全不选</button>
+          </div>
+          <div id="setDailyChatWebFallbackList" style="max-height:220px;overflow:auto;display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:2px 8px"></div>
+        </div>
+        <div style="font-size:12px;color:var(--dim);margin-top:6px">
+          回退开启后，网页通道每失败一次就换下一个模型；组合按目录倍率自动排序（免费 → 低积分 → 高积分），先试免费的，再试便宜的，最后才是贵的。候选至少各试一次，配置的「最多尝试次数」更大时再从头跑第二轮。默认关闭。
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px">
+          <label class="switch">
+            <input id="setDailyChatRandomPrompt" type="checkbox" onchange="saveDailyChatRandomPrompt()">
+            <span class="switch-track"></span>
+            <span>随机提示词</span>
+          </label>
+          <span id="setDailyChatRandomPromptState" style="font-size:12px;color:var(--dim)"></span>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:8px">
+          <label style="font-size:13px;color:var(--dim)">随机池</label>
+          <span id="setDailyChatPromptsState" style="font-size:12px;color:var(--dim)"></span>
+          <button class="sec mini" onclick="openPromptPicker()">选择提示词</button>
+        </div>
+        <div style="font-size:12px;color:var(--dim);margin-top:6px">
+          开启后每次网页活跃从勾选的提示词里随机抽一条；一条都不勾时使用全部内置 300 条。关闭时仍旧只发 Hi。
+        </div>
+        <div id="promptPickerMask" class="modal-mask" style="display:none">
+          <div class="modal" role="dialog" aria-modal="true" style="width:min(760px,100%)">
+            <div class="modal-hd"><h2>选择网页活跃提示词</h2><button class="modal-x" aria-label="关闭" onclick="closePromptPicker()">×</button></div>
+            <div class="modal-bd">
+              <div style="font-size:12px;color:var(--dim);line-height:1.7;margin-bottom:10px">
+                勾选的提示词参与随机抽取；一条都不勾 = 使用全部内置 300 条。内置池只含不需要联网、不容易引出长答案的小问题。
+              </div>
+              <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
+                <input id="promptPickerSearch" placeholder="搜索提示词" oninput="filterPromptPicker()" style="flex:1;min-width:160px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:6px 9px;font:inherit;color:var(--fg)">
+                <button class="sec mini" onclick="setPromptPickerAll(true)">全选</button>
+                <button class="sec mini" onclick="setPromptPickerAll(false)">全不选</button>
+              </div>
+              <div id="promptPickerList" style="max-height:46vh;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:4px 10px"></div>
+              <div style="margin-top:10px">
+                <div style="font-size:12px;color:var(--dim);margin-bottom:4px">添加自定义提示词（一行一条）</div>
+                <textarea id="promptPickerCustom" rows="3" placeholder="每行一条提示词" style="width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:7px 10px;font:inherit;color:var(--fg);resize:vertical"></textarea>
+                <div style="display:flex;justify-content:flex-end;margin-top:6px"><button class="sec mini" onclick="addPromptPickerCustom()">加入列表</button></div>
+              </div>
+            </div>
+            <div class="modal-ft">
+              <button class="sec" onclick="closePromptPicker()">取消</button>
+              <button onclick="savePromptPicker(this)">保存</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+          <div>
+            <h2 style="margin:0">全局提示词 <em id="setGlobalPromptState"></em></h2>
+            <div style="font-size:12px;color:var(--dim);margin-top:4px">
+              给所有 <code style="font-family:var(--mono,monospace)">/v1</code> 对话注入一段网关自己的系统提示词。「追加」保留客户端提示词并插在开头，「替换」删掉客户端 system/developer 后只留这一条。留空时「追加/替换」使用内置默认提示词。默认「透传」，不改写任何客户端内容。
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+            <select id="setGlobalPromptMode" style="min-width:150px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 12px;color:var(--fg);font:inherit">
+              <option value="passthrough">透传（不改写）</option>
+              <option value="append">追加到 system</option>
+              <option value="custom">替换 system</option>
+            </select>
+            <button onclick="saveGlobalPrompt(this)">保存</button>
+          </div>
+        </div>
+        <textarea id="setGlobalPromptText" rows="6" placeholder="留空使用内置默认提示词；写入后即时生效，不需要重启" style="width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:9px 12px;font:inherit;color:var(--fg);resize:vertical"></textarea>
+        <div style="font-size:12px;color:var(--dim);margin-top:6px">
+          只作用于对外对话；网页活跃、保活与签到等网关内部请求不注入。内容上限 64 KiB。
         </div>
       </section>
 
@@ -6197,13 +6397,19 @@ async function switchGrowthAccount(uid){
   await loadGrowthTasks();
 }
 
+/* Task participation: `tasksEnabled` is authoritative; older gateways do
+ * not send it, so fall back to `enabled`. */
+function taskActive(a){
+  return !!a && (a.tasksEnabled !== undefined ? !!a.tasksEnabled : !!a.enabled);
+}
+
 async function loadIntlTasks(){
   try{
     const [r, g] = await Promise.all([
       getJSON('/accounts?realm=all'),
       getJSON('/accounts/credits/grants').catch(() => ({}))
     ]);
-    const accts = (r.accounts || []).filter(a => a.realm === 'intl' && a.enabled);
+    const accts = (r.accounts || []).filter(a => a.realm === 'intl' && taskActive(a));
     const countEl = document.getElementById("intlAcctCount");
     if(countEl) countEl.textContent = accts.length + ' 个';
     const bonusEl = document.getElementById("intlBonusCredits");
@@ -6557,7 +6763,7 @@ async function doDailyChat(btn){
  * （都用 activityStatusOf()），所以卡片上悬停看到的未打卡名单，就是下面按钮要打的那批。 */
 function pendingDailyChatAccounts(){
   const all = window.ACCOUNTS || [];
-  return all.filter(a => a.realm === 'intl' && a.enabled).filter(a => {
+  return all.filter(a => a.realm === 'intl' && taskActive(a)).filter(a => {
     const s = activityStatusOf(a);
     return !(s.kind === 'ok' || s.kind === 'done');
   });
@@ -7603,7 +7809,7 @@ function updateTaskPageCheckinCards(){
       stateEl.title = tip;
       if(intlCard) intlCard.title = tip;
     };
-    const intlAccts = allList.filter(a => a.realm === 'intl' && a.enabled);
+    const intlAccts = allList.filter(a => a.realm === 'intl' && taskActive(a));
     if(!intlAccts.length){
       stateEl.textContent = '无国际账号';
       setCardTip('');
@@ -7628,7 +7834,7 @@ function updateTaskPageCheckinCards(){
 
   const chkStateEl = document.getElementById("cnTodayCheckinState");
   if(chkStateEl){
-    let targetAccts = allList.filter(a => a.realm === 'cn' && a.enabled);
+    let targetAccts = allList.filter(a => a.realm === 'cn' && taskActive(a));
     if(typeof CURRENT_GROWTH_UID !== 'undefined' && CURRENT_GROWTH_UID && CURRENT_GROWTH_UID !== 'all'){
       targetAccts = targetAccts.filter(a => a.uid === CURRENT_GROWTH_UID);
     }
@@ -7776,7 +7982,10 @@ function accountRow(a){
   const nameAttr = esc(String(a.nickname || '').replace(/["'\\<>]/g, ''));
   const usage = USAGE_BY_ACCOUNT[a.uid] || {};
   const isTokenBad = !!(a.tokenExpired || a.expiresIn === 'expired');
-  const state = !a.enabled ? '<span class="badge off">已停用</span>'
+  const state = !a.enabled
+              ? (a.tasksEnabled
+                 ? '<span class="badge off" title="不接 API 流量，但仍参与签到 / 任务">已停用 · 任务中</span>'
+                 : '<span class="badge off">已停用</span>')
               : isTokenBad ? '<span class="badge bad" title="登录凭证已失效（上游返回 401 或已过期），请重新登录">凭证失效</span>'
               : a.reserveBlocked ? '<span class="badge warn">保留积分</span>'
               : a.dailyLimitBlocked ? '<span class="badge warn" title="今日已用 ' + fmt(a.dailyTokensToday || 0) + ' / ' + fmt(a.dailyTokenLimit || 0) + ' token，暂停接单（本地 0 点恢复）">日限额</span>'
@@ -7862,6 +8071,7 @@ function accountRow(a){
     +     (a.note
           ? '<span class="note-chip has" title="点击编辑备注" onclick="editAccountNote(&quot;' + uidAttr + '&quot;)">' + esc(a.note) + '</span>'
           : '<span class="note-chip" title="点击添加备注，比如「批量」/「自用」" onclick="editAccountNote(&quot;' + uidAttr + '&quot;)">+ 备注</span>')
+    +     '<span class="badge mini ' + (a.tasksEnabled ? 'ok' : 'off') + '" style="cursor:pointer;margin-left:6px" title="参与签到 / 成长任务 / 连登管家 / 猫猫旅行 / 国际版活跃；与 API 取号无关，点一下切换" onclick="toggleAccountTasks(&quot;' + uidAttr + '&quot;,' + (!a.tasksEnabled) + ')">任务' + (a.tasksEnabled ? '开' : '关') + '</span>'
     // 移动端专用：版本 + 状态徽章靠右同行（桌面隐藏，用表格自己的两列）。
     +     '<span class="acct-mobile-badges">' + realmBadgeMobile + state + '</span>'
     +   '</div>'
@@ -8330,6 +8540,16 @@ async function toggleAccount(uid, enable, btn){
     if(btn) btn.disabled = false;
   }
 }
+async function toggleAccountTasks(uid, enable){
+  try{
+    await postJSON('/accounts/set', {uid: uid, tasksEnabled: enable});
+    await loadAccounts();
+    toast(enable ? '该账号已参与任务' : '该账号已停止任务', 'ok');
+  }catch(e){
+    toast('操作失败: ' + e.message, 'bad');
+  }
+}
+
 async function setAccountWeight(uid, weight, sel){
   if(sel) sel.disabled = true;
   try{
@@ -10778,12 +10998,28 @@ async function loadSettings(showToast){
       const creditFallback = data.free_model_credit_fallback === true;
       const anthropicMsg = data.enable_anthropic_messages === true;
       const filterModelsByKey = data.filter_models_by_key === true;
+      const reasoningEffortMap = data.reasoning_effort_map !== false;
+      const reasoningEffortMapInput = document.getElementById('setReasoningEffortMap');
+      if(reasoningEffortMapInput) reasoningEffortMapInput.checked = reasoningEffortMap;
+      const reasoningEffortMapState = document.getElementById('setReasoningEffortMapState');
+      if(reasoningEffortMapState){
+        reasoningEffortMapState.textContent = reasoningEffortMap ? '(已启用)' : '(未启用)';
+        reasoningEffortMapState.style.color = reasoningEffortMap ? 'var(--accent2)' : 'var(--dim)';
+      }
       const filterModelsByKeyInput = document.getElementById('setFilterModelsByKey');
       if(filterModelsByKeyInput) filterModelsByKeyInput.checked = filterModelsByKey;
       const filterModelsByKeyState = document.getElementById('setFilterModelsByKeyState');
       if(filterModelsByKeyState){
         filterModelsByKeyState.textContent = filterModelsByKey ? '(已启用)' : '(未启用)';
         filterModelsByKeyState.style.color = filterModelsByKey ? 'var(--accent2)' : 'var(--dim)';
+      }
+      const modelsOnlyAvailable = data.models_only_available === true;
+      const modelsOnlyAvailableInput = document.getElementById('setModelsOnlyAvailable');
+      if(modelsOnlyAvailableInput) modelsOnlyAvailableInput.checked = modelsOnlyAvailable;
+      const modelsOnlyAvailableState = document.getElementById('setModelsOnlyAvailableState');
+      if(modelsOnlyAvailableState){
+        modelsOnlyAvailableState.textContent = modelsOnlyAvailable ? '(已启用)' : '(未启用)';
+        modelsOnlyAvailableState.style.color = modelsOnlyAvailable ? 'var(--accent2)' : 'var(--dim)';
       }
       const anthropicMsgInput = document.getElementById('setAnthropicMessages');
       if(anthropicMsgInput) anthropicMsgInput.checked = anthropicMsg;
@@ -10813,6 +11049,11 @@ async function loadSettings(showToast){
         const input = document.getElementById(pair[0]);
         if(input) input.checked = autoSwitchProducts.indexOf(pair[1]) >= 0;
       });
+      IDENTITY_VERSION_DEFAULTS = (data.identity_version_defaults && typeof data.identity_version_defaults === 'object')
+        ? data.identity_version_defaults : {};
+      IDENTITY_VERSION_CURRENT = (data.identity && data.identity.versions && typeof data.identity.versions === 'object')
+        ? data.identity.versions : {};
+      renderIdentityVersions();
       const privateData = (data.identity && data.identity.private_data) || 'auto';
       const privateDataInput = document.getElementById('setPrivateData');
       if(privateDataInput) privateDataInput.value = privateData;
@@ -10832,6 +11073,9 @@ async function loadSettings(showToast){
         dailyWebState.style.color = dailyWeb ? 'var(--accent2)' : 'var(--dim)';
       }
       renderDailyChatModel(data.daily_chat_model || '', data.daily_chat_model_default || '');
+      const scheduleCfg = (data.schedule && typeof data.schedule === 'object') ? data.schedule : {};
+      const dailyChatTimes = Array.isArray(scheduleCfg.daily_chat) ? scheduleCfg.daily_chat : [];
+      renderDailyChatTimes(dailyChatTimes);
       // 网页通道重试：没配过时后端给的是「开」，只有显式 false 才当关闭。
       const dailyWebRetry = data.daily_chat_web_retry !== false;
       const dailyWebRetryInput = document.getElementById('setDailyChatWebRetry');
@@ -10840,6 +11084,9 @@ async function loadSettings(showToast){
       const dailyWebTimeout = Number(data.daily_chat_web_timeout || dailyWebTimeoutDefault);
       const dailyWebAttemptsDefault = Number(data.daily_chat_web_attempts_default || 3);
       const dailyWebAttempts = Number(data.daily_chat_web_attempts || dailyWebAttemptsDefault);
+      const dailyWebConcurrency = Number(data.daily_chat_web_concurrency || 1);
+      const dailyWebConcurrencyInput = document.getElementById('setDailyChatWebConcurrency');
+      if(dailyWebConcurrencyInput) dailyWebConcurrencyInput.value = String(dailyWebConcurrency);
       const dailyWebAttemptsInput = document.getElementById('setDailyChatWebAttempts');
       if(dailyWebAttemptsInput){
         dailyWebAttemptsInput.value = String(dailyWebAttempts);
@@ -10858,6 +11105,53 @@ async function loadSettings(showToast){
           ? ('最多尝试 ' + dailyWebAttempts + ' 次 · ' + waits.join(' / ') + ' 秒')
           : ('只跑一轮 · ' + dailyWebTimeout + ' 秒');
         dailyWebRetryState.style.color = dailyWebRetry ? 'var(--accent2)' : 'var(--dim)';
+      }
+      const dailyWebFallback = data.daily_chat_web_fallback === true;
+      const dailyWebFallbackInput = document.getElementById('setDailyChatWebFallback');
+      if(dailyWebFallbackInput) dailyWebFallbackInput.checked = dailyWebFallback;
+      const dailyWebFallbackModels = Array.isArray(data.daily_chat_web_fallback_models)
+        ? data.daily_chat_web_fallback_models : [];
+      renderDailyChatFallbackPicker(dailyWebFallbackModels);
+      const dailyWebFallbackState = document.getElementById('setDailyChatWebFallbackState');
+      if(dailyWebFallbackState){
+        dailyWebFallbackState.textContent = dailyWebFallback
+          ? ('已启用 · ' + (dailyWebFallbackModels.length
+              ? dailyWebFallbackModels.length + ' 个候选'
+              : '默认免费组合'))
+          : '(未启用)';
+        dailyWebFallbackState.style.color = dailyWebFallback ? 'var(--accent2)' : 'var(--dim)';
+      }
+      const dailyWebRandomPrompt = data.daily_chat_web_random_prompt === true;
+      const dailyWebRandomPromptInput = document.getElementById('setDailyChatRandomPrompt');
+      if(dailyWebRandomPromptInput) dailyWebRandomPromptInput.checked = dailyWebRandomPrompt;
+      PROMPT_PICKER_BUILTIN = Array.isArray(data.daily_chat_web_builtin_prompts)
+        ? data.daily_chat_web_builtin_prompts.slice() : [];
+      window.DAILY_CHAT_PROMPTS_STORED = Array.isArray(data.daily_chat_web_prompts)
+        ? data.daily_chat_web_prompts.slice() : [];
+      updatePromptPickerState();
+      const dailyWebRandomPromptState = document.getElementById('setDailyChatRandomPromptState');
+      if(dailyWebRandomPromptState){
+        dailyWebRandomPromptState.textContent = dailyWebRandomPrompt
+          ? ('已启用 · ' + (window.DAILY_CHAT_PROMPTS_STORED.length
+              ? window.DAILY_CHAT_PROMPTS_STORED.length + ' 条候选'
+              : '默认全部内置 300 条'))
+          : '(未启用 · 固定发 Hi)';
+        dailyWebRandomPromptState.style.color = dailyWebRandomPrompt
+          ? 'var(--accent2)' : 'var(--dim)';
+      }
+      const promptCfg = (data.prompt && typeof data.prompt === 'object') ? data.prompt : {};
+      const promptMode = ['passthrough', 'append', 'custom'].indexOf(promptCfg.mode) >= 0
+        ? promptCfg.mode : 'passthrough';
+      const promptModeInput = document.getElementById('setGlobalPromptMode');
+      if(promptModeInput) promptModeInput.value = promptMode;
+      const promptTextInput = document.getElementById('setGlobalPromptText');
+      if(promptTextInput) promptTextInput.value = promptCfg.text || '';
+      const promptState = document.getElementById('setGlobalPromptState');
+      if(promptState){
+        promptState.textContent = promptMode === 'passthrough' ? '(透传)'
+          : (promptMode === 'append' ? '(追加)' : '(替换)');
+        promptState.style.color = promptMode === 'passthrough'
+          ? 'var(--dim)' : 'var(--accent2)';
       }
       const localWeb = data.local_web_tools === true;
       const localWebInput = document.getElementById('setLocalWebTools');
@@ -10932,6 +11226,7 @@ async function loadSettings(showToast){
       masked: k.masked || '',
       realm: k.realm || '',
       models: Array.isArray(k.models) ? k.models.slice() : [],
+      accounts: Array.isArray(k.accounts) ? k.accounts.slice() : [],
       concurrency_limit: parseInt(k.concurrency_limit || 0, 10) || 0,
       enabled: k.enabled !== false,
       created_at: k.created_at || '',
@@ -11429,6 +11724,36 @@ async function saveAnthropicMessages(btn){
   }
 }
 
+async function saveReasoningEffortMap(btn){
+  const el = document.getElementById('setReasoningEffortMap');
+  const value = !!(el && el.checked);
+  if(btn) btn.disabled = true;
+  try {
+    await postJSON('/settings/save', {reasoning_effort_map: value});
+    toast(value ? '已启用：思考等级挡位映射' : '已关闭：思考等级原样透传', 'ok');
+    loadSettings();
+  } catch(e) {
+    toast('保存失败: ' + e.message, 'bad');
+  } finally {
+    if(btn) btn.disabled = false;
+  }
+}
+
+async function saveModelsOnlyAvailable(btn){
+  const el = document.getElementById('setModelsOnlyAvailable');
+  const value = !!(el && el.checked);
+  if(btn) btn.disabled = true;
+  try {
+    await postJSON('/settings/save', {models_only_available: value});
+    toast(value ? '已启用：/v1/models 只列出可用模型' : '已关闭：/v1/models 返回全量目录', 'ok');
+    loadSettings();
+  } catch(e) {
+    toast('保存失败: ' + e.message, 'bad');
+  } finally {
+    if(btn) btn.disabled = false;
+  }
+}
+
 async function saveFilterModelsByKey(btn){
   const el = document.getElementById('setFilterModelsByKey');
   const value = !!(el && el.checked);
@@ -11485,6 +11810,69 @@ async function saveAutoSwitchProduct(btn){
   }
 }
 
+let IDENTITY_VERSION_DEFAULTS = {};
+let IDENTITY_VERSION_CURRENT = {};
+const IDENTITY_VERSION_FIELDS = [
+  ['desktop_intl', 'WorkBuddy 国际版', 'setIdentityVerDesktopIntl'],
+  ['desktop_cn', 'WorkBuddy 国内版', 'setIdentityVerDesktopCn'],
+  ['desktop_cli', '桌面端内置 CLI', 'setIdentityVerDesktopCli'],
+  ['vscode_product', 'VSCode 扩展', 'setIdentityVerVscodeProduct'],
+  ['vscode_ide', '宿主 VSCode', 'setIdentityVerVscodeIde'],
+  ['cli', 'CodeBuddy CLI', 'setIdentityVerCli'],
+  ['sdk', 'OpenAI Node SDK', 'setIdentityVerSdk'],
+  ['node', 'Node 版本', 'setIdentityVerNode'],
+];
+function renderIdentityVersions(){
+  const summary = document.getElementById('identityVersionSummary');
+  if(summary){
+    summary.innerHTML = IDENTITY_VERSION_FIELDS.map(function(item){
+      const key = item[0], label = item[1];
+      const fallback = IDENTITY_VERSION_DEFAULTS[key] || '-';
+      const current = IDENTITY_VERSION_CURRENT[key] || fallback;
+      const changed = IDENTITY_VERSION_CURRENT[key]
+        && IDENTITY_VERSION_CURRENT[key] !== IDENTITY_VERSION_DEFAULTS[key];
+      return '<div>' + esc(label) + '：<span class="mono" style="color:var(--fg)">'
+        + esc(current) + '</span> '
+        + (changed
+            ? '<span class="badge warn" style="font-size:10px">已修改（默认 ' + esc(fallback) + '）</span>'
+            : '<span style="color:var(--dim-light)">默认</span>')
+        + '</div>';
+    }).join('');
+  }
+  IDENTITY_VERSION_FIELDS.forEach(function(item){
+    const el = document.getElementById(item[2]);
+    if(el) el.value = IDENTITY_VERSION_CURRENT[item[0]] || '';
+  });
+}
+function toggleIdentityVersionEditor(){
+  const el = document.getElementById('identityVersionEditor');
+  if(el) el.style.display = el.style.display === 'none' ? 'block' : 'none';
+}
+async function saveIdentityVersions(btn){
+  const passwordEl = document.getElementById('setIdentityVersionPassword');
+  const password = String((passwordEl && passwordEl.value) || '');
+  if(!password){ toast('请输入面板密码', 'warn'); return; }
+  const versions = {};
+  IDENTITY_VERSION_FIELDS.forEach(function(item){
+    const el = document.getElementById(item[2]);
+    const value = String((el && el.value) || '').trim();
+    if(value) versions[item[0]] = value;
+  });
+  if(btn) btn.disabled = true;
+  try {
+    await postJSON('/settings/save', {identity_versions: versions, panel_password: password});
+    toast('出站身份版本号已保存', 'ok');
+    if(passwordEl) passwordEl.value = '';
+    const editor = document.getElementById('identityVersionEditor');
+    if(editor) editor.style.display = 'none';
+    loadSettings();
+  } catch(e) {
+    toast('保存失败: ' + e.message, 'bad');
+  } finally {
+    if(btn) btn.disabled = false;
+  }
+}
+
 async function savePrivateData(btn){
   const el = document.getElementById('setPrivateData');
   const value = el ? el.value : 'auto';
@@ -11518,6 +11906,120 @@ async function saveDailyChatWeb(btn){
 
 /* 网页通道失败重试。后端只接受严格布尔，所以这里直接发勾选状态；存失败时
    把开关拨回去，免得界面显示一个其实没落盘的状态。 */
+async function saveDailyChatRandomPrompt(){
+  const el = document.getElementById('setDailyChatRandomPrompt');
+  const value = !!(el && el.checked);
+  try {
+    await postJSON('/settings/save', {daily_chat_web_random_prompt: value});
+    toast(value ? '已启用：网页活跃随机提示词'
+                : '已关闭：网页活跃固定发 Hi', 'ok');
+    loadSettings();
+  } catch(e) {
+    toast('保存失败: ' + e.message, 'bad');
+    if(el) el.checked = !value;
+  }
+}
+
+let PROMPT_PICKER_BUILTIN = [];
+let PROMPT_PICKER_SELECTED = new Set();
+let PROMPT_PICKER_CUSTOM = new Set();
+
+function promptPickerItems(){
+  const out = [];
+  const seen = new Set();
+  PROMPT_PICKER_BUILTIN.concat(Array.from(PROMPT_PICKER_CUSTOM)).forEach(function(p){
+    if(p && !seen.has(p)){ seen.add(p); out.push(p); }
+  });
+  return out;
+}
+function updatePromptPickerState(){
+  const el = document.getElementById('setDailyChatPromptsState');
+  if(!el) return;
+  el.textContent = PROMPT_PICKER_SELECTED.size
+    ? ('已选 ' + PROMPT_PICKER_SELECTED.size + ' 条')
+    : '默认全部内置 300 条';
+}
+function renderPromptPicker(){
+  const list = document.getElementById('promptPickerList');
+  if(!list) return;
+  const items = promptPickerItems();
+  list.innerHTML = items.map(function(p){
+    const checked = PROMPT_PICKER_SELECTED.has(p) ? ' checked' : '';
+    return '<label class="prompt-pick-row" data-search="' + esc(p.toLowerCase()) + '" style="display:flex;align-items:flex-start;gap:8px;padding:4px 2px;font-size:13px;cursor:pointer"><input type="checkbox" value="' + esc(p) + '"' + checked + ' onchange="togglePromptPicker(this)"><span>' + esc(p) + '</span></label>';
+  }).join('') || '<div style="font-size:12px;color:var(--dim);padding:4px">没有提示词</div>';
+  updatePromptPickerState();
+}
+function openPromptPicker(){
+  const stored = Array.isArray(window.DAILY_CHAT_PROMPTS_STORED)
+    ? window.DAILY_CHAT_PROMPTS_STORED : [];
+  PROMPT_PICKER_CUSTOM = new Set(stored.filter(function(p){
+    return PROMPT_PICKER_BUILTIN.indexOf(p) < 0;
+  }));
+  PROMPT_PICKER_SELECTED = new Set(stored.length ? stored : PROMPT_PICKER_BUILTIN);
+  renderPromptPicker();
+  const mask = document.getElementById('promptPickerMask');
+  if(mask) mask.style.display = 'flex';
+  const search = document.getElementById('promptPickerSearch');
+  if(search) search.value = '';
+}
+function closePromptPicker(){
+  const mask = document.getElementById('promptPickerMask');
+  if(mask) mask.style.display = 'none';
+}
+function togglePromptPicker(el){
+  if(el.checked) PROMPT_PICKER_SELECTED.add(el.value);
+  else PROMPT_PICKER_SELECTED.delete(el.value);
+  updatePromptPickerState();
+}
+function setPromptPickerAll(on){
+  const list = document.getElementById('promptPickerList');
+  if(!list) return;
+  list.querySelectorAll('input[type=checkbox]').forEach(function(el){
+    el.checked = on;
+    if(on) PROMPT_PICKER_SELECTED.add(el.value);
+    else PROMPT_PICKER_SELECTED.delete(el.value);
+  });
+  updatePromptPickerState();
+}
+function filterPromptPicker(){
+  const input = document.getElementById('promptPickerSearch');
+  const list = document.getElementById('promptPickerList');
+  if(!list) return;
+  const q = String((input && input.value) || '').trim().toLowerCase();
+  list.querySelectorAll('.prompt-pick-row').forEach(function(el){
+    el.style.display = !q || (el.getAttribute('data-search') || '').indexOf(q) >= 0 ? 'flex' : 'none';
+  });
+}
+function addPromptPickerCustom(){
+  const ta = document.getElementById('promptPickerCustom');
+  const lines = String((ta && ta.value) || '').split('\n')
+    .map(function(s){ return s.trim(); }).filter(function(s){ return s.length > 0; });
+  lines.forEach(function(p){
+    PROMPT_PICKER_CUSTOM.add(p);
+    PROMPT_PICKER_SELECTED.add(p);
+  });
+  if(ta) ta.value = '';
+  renderPromptPicker();
+}
+async function savePromptPicker(btn){
+  const prompts = Array.from(PROMPT_PICKER_SELECTED);
+  if(btn) btn.disabled = true;
+  try {
+    const res = await postJSON('/settings/save', {daily_chat_web_prompts: prompts});
+    const stored = Array.isArray(res && res.daily_chat_web_prompts)
+      ? res.daily_chat_web_prompts : prompts;
+    window.DAILY_CHAT_PROMPTS_STORED = stored;
+    toast(stored.length ? ('已保存 ' + stored.length + ' 条候选提示词')
+                        : '已清空：使用全部内置 300 条', 'ok');
+    closePromptPicker();
+    loadSettings();
+  } catch(e) {
+    toast('保存失败: ' + e.message, 'bad');
+  } finally {
+    if(btn) btn.disabled = false;
+  }
+}
+
 async function saveDailyChatWebRetry(){
   const el = document.getElementById('setDailyChatWebRetry');
   const value = !!(el && el.checked);
@@ -11532,13 +12034,95 @@ async function saveDailyChatWebRetry(){
   }
 }
 
+async function saveDailyChatWebFallback(){
+  const el = document.getElementById('setDailyChatWebFallback');
+  const value = !!(el && el.checked);
+  try {
+    await postJSON('/settings/save', {daily_chat_web_fallback: value});
+    toast(value ? '已启用：网页通道失败后按模型组合回退'
+                : '已关闭：网页通道只用当前模型', 'ok');
+    loadSettings();
+  } catch(e) {
+    toast('保存失败: ' + e.message, 'bad');
+    if(el) el.checked = !value;
+  }
+}
+
+let DAILY_CHAT_FALLBACK_SELECTED = [];
+function updateDailyChatFallbackState(){
+  const el = document.getElementById('setDailyChatWebFallbackModelsState');
+  if(el){
+    el.textContent = DAILY_CHAT_FALLBACK_SELECTED.length
+      ? ('已选 ' + DAILY_CHAT_FALLBACK_SELECTED.length + ' 个候选')
+      : '未选择（默认免费组合）';
+  }
+}
+function renderDailyChatFallbackPicker(selected){
+  DAILY_CHAT_FALLBACK_SELECTED = Array.isArray(selected) ? selected.slice() : [];
+  const list = document.getElementById('setDailyChatWebFallbackList');
+  if(!list) return;
+  loadDailyChatModels().then(function(models){
+    list.innerHTML = (models || []).map(function(m){
+      const checked = DAILY_CHAT_FALLBACK_SELECTED.indexOf(m.id) >= 0 ? ' checked' : '';
+      const tag = m.free ? '免费' : (m.credits || '付费');
+      return '<label class="fallback-pick-row" data-search="' + esc(m.id.toLowerCase()) + '" style="display:flex;align-items:center;gap:6px;font-size:12px;padding:3px 4px"><input type="checkbox" value="' + esc(m.id) + '"' + checked + ' onchange="toggleDailyChatFallbackModel(this)">' + esc(m.id) + ' <span style="color:var(--dim-light)">' + esc(tag) + '</span></label>';
+    }).join('') || '<div style="font-size:12px;color:var(--dim);padding:4px">模型清单为空</div>';
+    updateDailyChatFallbackState();
+  });
+}
+function toggleDailyChatFallbackPicker(){
+  const el = document.getElementById('setDailyChatWebFallbackPicker');
+  if(el) el.style.display = el.style.display === 'none' ? 'block' : 'none';
+}
+function toggleDailyChatFallbackModel(el){
+  const id = el.value;
+  const index = DAILY_CHAT_FALLBACK_SELECTED.indexOf(id);
+  if(el.checked && index < 0) DAILY_CHAT_FALLBACK_SELECTED.push(id);
+  if(!el.checked && index >= 0) DAILY_CHAT_FALLBACK_SELECTED.splice(index, 1);
+  updateDailyChatFallbackState();
+}
+function setDailyChatFallbackAll(on){
+  const list = document.getElementById('setDailyChatWebFallbackList');
+  if(!list) return;
+  list.querySelectorAll('input[type=checkbox]').forEach(function(el){ el.checked = on; });
+  DAILY_CHAT_FALLBACK_SELECTED = on
+    ? Array.from(list.querySelectorAll('input[type=checkbox]')).map(function(el){ return el.value; })
+    : [];
+  updateDailyChatFallbackState();
+}
+function filterDailyChatFallbackPicker(){
+  const input = document.getElementById('setDailyChatWebFallbackSearch');
+  const list = document.getElementById('setDailyChatWebFallbackList');
+  if(!list) return;
+  const q = String((input && input.value) || '').trim().toLowerCase();
+  list.querySelectorAll('.fallback-pick-row').forEach(function(el){
+    el.style.display = !q || (el.getAttribute('data-search') || '').indexOf(q) >= 0 ? 'flex' : 'none';
+  });
+}
+async function saveDailyChatWebFallbackModels(btn){
+  const models = DAILY_CHAT_FALLBACK_SELECTED.slice();
+  if(btn) btn.disabled = true;
+  try {
+    await postJSON('/settings/save', {daily_chat_web_fallback_models: models});
+    toast(models.length ? ('已保存回退组合：' + models.length + ' 个模型')
+                        : '已清空回退组合，使用默认免费组合', 'ok');
+    loadSettings();
+  } catch(e) {
+    toast('保存失败: ' + e.message, 'bad');
+  } finally {
+    if(btn) btn.disabled = false;
+  }
+}
+
 /* 每轮等待时间（秒）与最多尝试次数。与「上游响应头超时」同一套收口：空值、
    小数、非数字就地拦下，不发上去换一个 400 回来。上限由后端把关。 */
 async function saveDailyChatWebTuning(btn){
   const attemptsEl = document.getElementById('setDailyChatWebAttempts');
   const timeoutEl = document.getElementById('setDailyChatWebTimeout');
+  const concurrencyEl = document.getElementById('setDailyChatWebConcurrency');
   const attempts = Math.floor(Number(attemptsEl && attemptsEl.value));
   const timeout = Math.floor(Number(timeoutEl && timeoutEl.value));
+  const concurrency = Math.floor(Number(concurrencyEl && concurrencyEl.value));
   if(!isFinite(attempts) || attempts < 1){
     toast('请输入不小于 1 的整数次数', 'bad');
     return;
@@ -11547,11 +12131,16 @@ async function saveDailyChatWebTuning(btn){
     toast('请输入不小于 1 的整数秒', 'bad');
     return;
   }
+  if(!isFinite(concurrency) || concurrency < 1){
+    toast('请输入不小于 1 的整数并发数', 'bad');
+    return;
+  }
   if(btn) btn.disabled = true;
   try {
     await postJSON('/settings/save', {daily_chat_web_attempts: attempts,
-                                      daily_chat_web_timeout: timeout});
-    toast('已保存：最多尝试 ' + attempts + ' 次，首轮等待 ' + timeout + ' 秒', 'ok');
+                                      daily_chat_web_timeout: timeout,
+                                      daily_chat_web_concurrency: concurrency});
+    toast('已保存：最多尝试 ' + attempts + ' 次，首轮等待 ' + timeout + ' 秒，并发 ' + concurrency + ' 个账号', 'ok');
     loadSettings();
   } catch(e) {
     toast('保存失败: ' + e.message, 'bad');
@@ -11619,6 +12208,73 @@ async function saveDailyChatModel(btn){
   try {
     await postJSON('/settings/save', {daily_chat_model: value});
     toast(value ? ('每日活跃改用 ' + value) : '每日活跃恢复内置默认模型', 'ok');
+    loadSettings();
+  } catch(e) {
+    toast('保存失败: ' + e.message, 'bad');
+  } finally {
+    if(btn) btn.disabled = false;
+  }
+}
+
+async function saveGlobalPrompt(btn){
+  const modeEl = document.getElementById('setGlobalPromptMode');
+  const textEl = document.getElementById('setGlobalPromptText');
+  const mode = (modeEl && modeEl.value) || 'passthrough';
+  const text = (textEl && textEl.value) || '';
+  if(btn) btn.disabled = true;
+  try {
+    await postJSON('/settings/save', {prompt: {mode: mode, text: text}});
+    toast(mode === 'passthrough' ? '已保存：全局提示词透传'
+        : ('已保存：全局提示词' + (mode === 'append' ? '追加到 system' : '替换 system')), 'ok');
+    loadSettings();
+  } catch(e) {
+    toast('保存失败: ' + e.message, 'bad');
+  } finally {
+    if(btn) btn.disabled = false;
+  }
+}
+
+let DAILY_CHAT_TIMES_SELECTED = [];
+function renderDailyChatTimes(times){
+  DAILY_CHAT_TIMES_SELECTED = Array.isArray(times) ? times.slice().sort() : [];
+  const list = document.getElementById('setDailyChatTimesList');
+  if(list){
+    list.innerHTML = DAILY_CHAT_TIMES_SELECTED.map(function(t){
+      return '<span class="badge s" style="font-size:12px;padding:4px 8px;display:inline-flex;align-items:center;gap:6px">' + esc(t) + '<button class="key-action-btn" style="padding:0 4px" data-time="' + esc(t) + '" onclick="removeDailyChatTime(this)">×</button></span>';
+    }).join('') || '<span style="font-size:12px;color:var(--dim)">未设置，跟随签到整点</span>';
+  }
+  const state = document.getElementById('setDailyChatTimesState');
+  if(state){
+    state.textContent = DAILY_CHAT_TIMES_SELECTED.length
+      ? ('独立时段 · ' + DAILY_CHAT_TIMES_SELECTED.join(' / '))
+      : '跟随签到整点';
+    state.style.color = DAILY_CHAT_TIMES_SELECTED.length
+      ? 'var(--accent2)' : 'var(--dim)';
+  }
+}
+function addDailyChatTime(){
+  const input = document.getElementById('setDailyChatTimeInput');
+  const value = String((input && input.value) || '').trim();
+  if(!value){ toast('请先选择时间', 'warn'); return; }
+  if(DAILY_CHAT_TIMES_SELECTED.indexOf(value) < 0){
+    DAILY_CHAT_TIMES_SELECTED.push(value);
+    DAILY_CHAT_TIMES_SELECTED.sort();
+  }
+  renderDailyChatTimes(DAILY_CHAT_TIMES_SELECTED);
+  if(input) input.value = '';
+}
+function removeDailyChatTime(el){
+  const value = (el && el.getAttribute) ? el.getAttribute('data-time') : '';
+  DAILY_CHAT_TIMES_SELECTED = DAILY_CHAT_TIMES_SELECTED.filter(function(t){ return t !== value; });
+  renderDailyChatTimes(DAILY_CHAT_TIMES_SELECTED);
+}
+async function saveDailyChatTimes(btn){
+  const times = DAILY_CHAT_TIMES_SELECTED.slice();
+  if(btn) btn.disabled = true;
+  try {
+    await postJSON('/settings/save', {schedule: {daily_chat: times}});
+    toast(times.length ? ('已保存每日活跃时段：' + times.join(' / '))
+                       : '已清空：每日活跃跟随签到整点', 'ok');
     loadSettings();
   } catch(e) {
     toast('保存失败: ' + e.message, 'bad');
@@ -12130,6 +12786,19 @@ function modelPatternsText(patterns){
   return Array.isArray(patterns) ? patterns.join(', ') : '';
 }
 
+/* 允许账号按精确 uid 匹配（不做通配），所以这里只做去空白与去重。 */
+function parseAccountRefs(text){
+  const out = [];
+  String(text || '').split(/[,;\n]/).forEach(part => {
+    const ref = part.trim();
+    if(ref && out.indexOf(ref) === -1) out.push(ref);
+  });
+  return out;
+}
+function accountRefsText(refs){
+  return Array.isArray(refs) ? refs.join(', ') : '';
+}
+
 /* 已删除的 Key 是只读历史：密钥已被抹掉，所以这里不提供复制，也不提供恢复。 */
 function renderDeletedKeyRows(){
   const box = document.getElementById('deletedKeySection');
@@ -12191,9 +12860,33 @@ function renderKeyRows(){
         +       'style="width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:7px 10px;font:inherit;color:var(--fg)">'
         +   '</div>'
         +   '<div style="grid-column:1 / -1">'
-        +     '<div style="font-size:12px;color:var(--dim);margin-bottom:4px;font-weight:500">模型限制 <span style="color:var(--dim-light)">(选填，留空 = 不限制)</span></div>'
-          +     '<input type="text" id="editKeyModels_' + i + '" value="' + esc(modelPatternsText(row.models)) + '" placeholder="如 deepseek* 或 gpt-6-astra；多个用逗号分隔，支持 * 通配" '
-        +       'style="width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:7px 10px;font:inherit;color:var(--fg)">'
+        +     '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:4px">'
+        +       '<div style="font-size:12px;color:var(--dim);font-weight:500">模型准入 <span id="editKeyModelsSummary_' + i + '" style="color:var(--dim-light)"></span></div>'
+        +       '<button class="sec mini" style="border-radius:8px;padding:4px 12px" onclick="toggleKeyPicker(\'model\',' + i + ')">选择模型</button>'
+        +     '</div>'
+        +     '<div id="editKeyModelPicker_' + i + '" style="display:none;border:1px solid var(--line);border-radius:8px;padding:8px;margin-top:4px">'
+        +       '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px">'
+        +         '<input id="editKeyModelSearch_' + i + '" placeholder="搜索模型" oninput="filterKeyModelPicker(' + i + ')" style="flex:1;min-width:160px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:6px 9px;font:inherit;color:var(--fg)">'
+        +         '<button class="sec mini" onclick="setKeyModelsAll(' + i + ',true)">全选</button>'
+        +         '<button class="sec mini" onclick="setKeyModelsAll(' + i + ',false)">全不选</button>'
+        +       '</div>'
+        +       '<div id="editKeyModelList_' + i + '" style="max-height:220px;overflow:auto;display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:2px 8px"></div>'
+        +     '</div>'
+        +     '<div id="editKeyModelWildcards_' + i + '" style="font-size:11px;color:var(--warn);margin-top:4px"></div>'
+        +   '</div>'
+        +   '<div style="grid-column:1 / -1">'
+        +     '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:4px">'
+        +       '<div style="font-size:12px;color:var(--dim);font-weight:500">允许账号 <span id="editKeyAccountsSummary_' + i + '" style="color:var(--dim-light)"></span></div>'
+        +       '<button class="sec mini" style="border-radius:8px;padding:4px 12px" onclick="toggleKeyPicker(\'account\',' + i + ')">选择账号</button>'
+        +     '</div>'
+        +     '<div id="editKeyAccountPicker_' + i + '" style="display:none;border:1px solid var(--line);border-radius:8px;padding:8px;margin-top:4px">'
+        +       '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px">'
+        +         '<input id="editKeyAccountSearch_' + i + '" placeholder="搜索昵称或 UID" oninput="filterKeyAccountPicker(' + i + ')" style="flex:1;min-width:160px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:6px 9px;font:inherit;color:var(--fg)">'
+        +         '<button class="sec mini" onclick="setKeyAccountsAll(' + i + ',true)">全选</button>'
+        +         '<button class="sec mini" onclick="setKeyAccountsAll(' + i + ',false)">全不选</button>'
+        +       '</div>'
+        +       '<div id="editKeyAccountList_' + i + '" style="max-height:220px;overflow:auto;display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:2px 8px"></div>'
+        +     '</div>'
         +   '</div>'
         +   '<div style="grid-column:1 / -1">'
         +     '<div style="font-size:12px;color:var(--dim);margin-bottom:4px;font-weight:500">API Key 内容 ' + (row.masked ? '<span style="color:var(--dim-light)">(已保存: ' + esc(row.masked) + '，留空表示不改)</span>' : '') + '</div>'
@@ -12227,6 +12920,9 @@ function renderKeyRows(){
     const modelBadge = (Array.isArray(row.models) && row.models.length)
       ? '<span class="badge s" style="font-size:11px">限 ' + esc(modelPatternsText(row.models)) + '</span>'
       : '';
+    const accountBadge = (Array.isArray(row.accounts) && row.accounts.length)
+      ? '<span class="badge s" style="font-size:11px">限 ' + row.accounts.length + ' 个账号</span>'
+      : '';
 
     const displayKey = row.masked || (row.key ? (row.key.slice(0, 4) + '******' + row.key.slice(-4)) : '未设置');
     const createdStr = row.created_at ? ('创建时间 ' + esc(row.created_at)) : '';
@@ -12239,6 +12935,7 @@ function renderKeyRows(){
       +       statusBadge
       +       realmBadge
       +       modelBadge
+        +       accountBadge
         +       concBadge
       +     '</div>'
       +     '<div style="font-size:12px;color:var(--dim);display:flex;align-items:center;gap:16px;flex-wrap:wrap">'
@@ -12255,6 +12952,161 @@ function renderKeyRows(){
       + '</div>'
       + '</div>';
   }).join('');
+  API_KEY_ROWS.forEach((row, i) => { if(row._editing) renderKeyPickers(i); });
+}
+
+function keyModelWildcards(row){
+  return (row.models || []).filter(p => String(p).indexOf('*') >= 0);
+}
+function keyModelExact(row){
+  return (row.models || []).filter(p => String(p).indexOf('*') < 0);
+}
+function updateKeyModelSummary(i){
+  const row = API_KEY_ROWS[i];
+  if(!row) return;
+  const exact = keyModelExact(row).length;
+  const wild = keyModelWildcards(row).length;
+  const el = document.getElementById('editKeyModelsSummary_' + i);
+  if(el){
+    el.textContent = (exact || wild)
+      ? ('（已选 ' + exact + ' 个' + (wild ? ' + ' + wild + ' 个通配符' : '') + '）')
+      : '（不限制）';
+  }
+  const wildEl = document.getElementById('editKeyModelWildcards_' + i);
+  if(wildEl) wildEl.textContent = wild.length ? ('保留通配符：' + wild.join(', ')) : '';
+}
+function updateKeyAccountSummary(i){
+  const row = API_KEY_ROWS[i];
+  if(!row) return;
+  const n = (row.accounts || []).length;
+  const el = document.getElementById('editKeyAccountsSummary_' + i);
+  if(el) el.textContent = n ? ('（已选 ' + n + ' 个账号）') : '（不限制）';
+}
+function toggleKeyPicker(kind, i){
+  const id = kind === 'model' ? 'editKeyModelPicker_' + i : 'editKeyAccountPicker_' + i;
+  const el = document.getElementById(id);
+  if(el) el.style.display = el.style.display === 'none' ? 'block' : 'none';
+}
+async function loadKeyModelCatalog(){
+  if(Array.isArray(window.KEY_MODEL_CATALOG) && window.KEY_MODEL_CATALOG.length){
+    return window.KEY_MODEL_CATALOG;
+  }
+  const out = [];
+  const seen = new Set();
+  const add = function(list){
+    for(const m of (list || [])){
+      const id = String((m && m.id) || '');
+      if(id && !seen.has(id)){ seen.add(id); out.push(m); }
+    }
+  };
+  // The unscoped listing is the widest catalogue the gateway advertises; the
+  // per-realm calls fill in anything it omits.
+  try { const r = await getJSON('/v1/models'); add(r.data); } catch(e) { /* keep going */ }
+  for(const realm of ['intl', 'cn']){
+    try {
+      const r = await getJSON('/v1/models?realm=' + realm);
+      add(r.data);
+    } catch(e) { /* one realm failing must not blank the picker */ }
+  }
+  if(!out.length && Array.isArray(window.MODELS_DATA)) out.push(...window.MODELS_DATA);
+  window.KEY_MODEL_CATALOG = out;
+  return out;
+}
+async function renderKeyPickers(i){
+  const row = API_KEY_ROWS[i];
+  if(!row) return;
+  const modelList = document.getElementById('editKeyModelList_' + i);
+  if(modelList){
+    modelList.innerHTML = '<div style="font-size:12px;color:var(--dim);padding:4px">正在加载模型清单…</div>';
+    let models = [];
+    try { models = await loadKeyModelCatalog(); } catch(e) { models = []; }
+    // The all-realm listing is the primary source; fall back to the models tab
+    // cache so the picker is never blank just because that one call failed.
+    if(!(models || []).length && Array.isArray(window.MODELS_DATA)){
+      models = window.MODELS_DATA;
+    }
+    if(!(models || []).length){
+      modelList.innerHTML = '<div style="font-size:12px;color:var(--warn);padding:4px">模型清单为空或加载失败，<a href="javascript:void(0)" onclick="renderKeyPickers(' + i + ')">重试</a></div>';
+    } else {
+      modelList.innerHTML = models.map(m => {
+        const id = String((m && m.id) || '');
+        if(!id) return '';
+        const checked = keyModelExact(row).indexOf(id) >= 0 ? ' checked' : '';
+        return '<label class="key-pick-row" data-search="' + esc(id.toLowerCase()) + '" style="display:flex;align-items:center;gap:6px;font-size:12px;padding:3px 4px"><input type="checkbox" value="' + esc(id) + '"' + checked + ' onchange="toggleKeyModel(' + i + ',this)">' + esc(id) + '</label>';
+      }).join('');
+    }
+    updateKeyModelSummary(i);
+  }
+  const accountList = document.getElementById('editKeyAccountList_' + i);
+  if(accountList){
+    if(!(window.ACCOUNTS || []).length){
+      try { await loadAccounts(); } catch(e) { /* keep the empty hint */ }
+    }
+    const accts = window.ACCOUNTS || [];
+    accountList.innerHTML = accts.map(a => {
+      const uid = String((a && a.uid) || '');
+      if(!uid) return '';
+      const label = (a.nickname || uid.slice(0, 8)) + ' · ' + uid.slice(0, 8) + (a.realm ? ' · ' + a.realm : '');
+      const checked = (row.accounts || []).indexOf(uid) >= 0 ? ' checked' : '';
+      return '<label class="key-pick-row" data-search="' + esc((label + ' ' + uid).toLowerCase()) + '" style="display:flex;align-items:center;gap:6px;font-size:12px;padding:3px 4px"><input type="checkbox" value="' + esc(uid) + '"' + checked + ' onchange="toggleKeyAccount(' + i + ',this)">' + esc(label) + '</label>';
+    }).join('') || '<div style="font-size:12px;color:var(--warn);padding:4px">账号列表为空或加载失败，<a href="javascript:void(0)" onclick="renderKeyPickers(' + i + ')">重试</a></div>';
+    updateKeyAccountSummary(i);
+  }
+}
+function toggleKeyModel(i, el){
+  const row = API_KEY_ROWS[i];
+  if(!row) return;
+  const exact = new Set(keyModelExact(row));
+  if(el.checked) exact.add(el.value); else exact.delete(el.value);
+  row.models = keyModelWildcards(row).concat(Array.from(exact).sort());
+  updateKeyModelSummary(i);
+}
+function toggleKeyAccount(i, el){
+  const row = API_KEY_ROWS[i];
+  if(!row) return;
+  const set = new Set(row.accounts || []);
+  if(el.checked) set.add(el.value); else set.delete(el.value);
+  row.accounts = Array.from(set).sort();
+  updateKeyAccountSummary(i);
+}
+function setKeyModelsAll(i, on){
+  const list = document.getElementById('editKeyModelList_' + i);
+  const row = API_KEY_ROWS[i];
+  if(!list || !row) return;
+  list.querySelectorAll('input[type=checkbox]').forEach(el => { el.checked = on; });
+  const exact = on
+    ? Array.from(list.querySelectorAll('input[type=checkbox]')).map(el => el.value).sort()
+    : [];
+  row.models = keyModelWildcards(row).concat(exact);
+  updateKeyModelSummary(i);
+}
+function setKeyAccountsAll(i, on){
+  const list = document.getElementById('editKeyAccountList_' + i);
+  const row = API_KEY_ROWS[i];
+  if(!list || !row) return;
+  list.querySelectorAll('input[type=checkbox]').forEach(el => { el.checked = on; });
+  row.accounts = on
+    ? Array.from(list.querySelectorAll('input[type=checkbox]')).map(el => el.value).sort()
+    : [];
+  updateKeyAccountSummary(i);
+}
+function filterKeyModelPicker(i){
+  const input = document.getElementById('editKeyModelSearch_' + i);
+  const list = document.getElementById('editKeyModelList_' + i);
+  if(!list) return;
+  const q = String((input && input.value) || '').trim().toLowerCase();
+  list.querySelectorAll('.key-pick-row').forEach(el => {
+    el.style.display = !q || (el.getAttribute('data-search') || '').indexOf(q) >= 0 ? 'flex' : 'none';
+  });
+}
+function filterKeyAccountPicker(i){
+  const input = document.getElementById('editKeyAccountSearch_' + i);
+  const list = document.getElementById('editKeyAccountList_' + i);
+  if(!list) return;
+  const q = String((input && input.value) || '').trim().toLowerCase();
+  list.querySelectorAll('.key-pick-row').forEach(el => {
+    el.style.display = !q || (el.getAttribute('data-search') || '').indexOf(q) >= 0 ? 'flex' : 'none';
+  });
 }
 
 function openEditKey(index){
@@ -12286,7 +13138,6 @@ async function saveSingleKey(index, btn){
   const nameInput = document.getElementById('editKeyName_' + index);
   const realmSelect = document.getElementById('editKeyRealm_' + index);
   const keyInput = document.getElementById('editKeyValue_' + index);
-  const modelsInput = document.getElementById('editKeyModels_' + index);
     const concInput = document.getElementById('editKeyConc_' + index);
 
   const name = nameInput ? nameInput.value.trim() : (row.name || '');
@@ -12300,7 +13151,8 @@ async function saveSingleKey(index, btn){
 
   row.name = name || '未命名';
   row.realm = realm;
-  row.models = parseModelPatterns(modelsInput ? modelsInput.value : modelPatternsText(row.models));
+  row.models = Array.isArray(row.models) ? row.models.slice() : [];
+  row.accounts = Array.isArray(row.accounts) ? row.accounts.slice() : [];
     row.concurrency_limit = Math.max(0, parseInt((concInput ? concInput.value : row.concurrency_limit) || 0, 10) || 0);
   if(keyVal) row.key = keyVal;
   row._editing = false;
@@ -12466,6 +13318,7 @@ async function saveApiKeys(btn){
       name: row.name || '',
       realm: row.realm || '',
       models: row.models || [],
+      accounts: row.accounts || [],
         concurrency_limit: parseInt(row.concurrency_limit || 0, 10) || 0,
       enabled: row.enabled !== false,
       // Blank means "keep the stored key", which the server honours per row.
@@ -14916,17 +15769,38 @@ async function loadRange(polled){
 
 async function loadStatic(){
   try{ state.perf = await api('/usage/perf'); } catch(e){ console.error(e); }
-  try{
-    const now = Math.floor(Date.now()/1000);
-    state.heat = await api(`/usage/timeseries?realm=all&range=custom&since=${now-366*86400}&until=${now}&bucket_seconds=86400`);
-  } catch(e){ console.error('heat failed', e); }
-  buildHeatGrid(state.heat);
+  await loadHeat();
   renderPerfFold();
   // 剩余用量 / 积分扣减 / 积分获取历史：原版区块的数据管道原来挂在旧 loadAnalytics 上，
   // 页面换成新版后这里补回调用（展开对应折叠区时还会再刷一次）。
   try{ loadRemainingUsage(); }catch(e){}
   try{ loadCreditHistory(); }catch(e){}
   try{ loadCreditGrants(); }catch(e){}
+}
+
+/* 热力图按「本地日」取数：since/until 都钉在本地午夜，缓存键一整天不变；
+ * until 取到明天 0 点，今天新产生的用量也能落进今天的格子。只在进页面、
+ * 跨天或距上次取数满 60 秒时重取——以前只在进页面取一次，跨过午夜后页面
+ * 还停在旧的一天（issue #541）。 */
+let heatFetchedAt = 0, heatFetchedDay = '', heatLoading = false;
+async function loadHeat(){
+  if (heatLoading) return;
+  heatLoading = true;
+  const nowMs = Date.now();
+  const midnight = new Date(nowMs); midnight.setHours(0,0,0,0);
+  const since = Math.floor(midnight.getTime()/1000) - 366*86400;
+  const until = Math.floor(midnight.getTime()/1000) + 86400;
+  heatFetchedAt = nowMs/1000;
+  heatFetchedDay = fmtDate(nowMs/1000);
+  try{
+    state.heat = await api(`/usage/timeseries?realm=all&range=custom&since=${since}&until=${until}&bucket_seconds=86400`);
+  } catch(e){ console.error('heat failed', e); }
+  heatLoading = false;
+  buildHeatGrid(state.heat);
+}
+function maybeLoadHeat(){
+  const now = Date.now()/1000;
+  if (fmtDate(now) !== heatFetchedDay || now - heatFetchedAt >= 60) loadHeat();
 }
 
 /* ---------------- KPI ---------------- */
@@ -15606,6 +16480,7 @@ function syncOldRange(){
 let wbaStarted = false;
 function wbaTick(){
   if (!wbaStarted){ wbaStarted = true; loadStatic(); }
+  maybeLoadHeat();
   loadRange(true);   // 轮询：窗口上界按 15 秒桶量化，连续两轮同桶才有可能吃 304
 }
 window.loadAnalytics = wbaTick;            /* 面板 5s 轮询 / 切页 / 回前台统一入口 */
