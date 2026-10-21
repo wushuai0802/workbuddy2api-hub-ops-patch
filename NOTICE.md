@@ -2,7 +2,7 @@
 
 This unofficial bundle derives from [WorkBuddy2API-Hub](https://github.com/ardeyouxipianyi/workbuddy2api-hub), distributed under MIT. Original notice is preserved in [LICENSE](LICENSE).
 
-Supported upstream: v1.7.17, commit `af706fc31e4a22cb2dea7442361b2b15185c3cee`.
+Supported upstream: v1.7.18, commit `c1943745640c78e9d6036ec8d2c3e3396af2d5a3`.
 
 The reviewed v1.7.10 reference (SHA256 `8b82cc3c0faed4a46ea541692dceec2b4cc3a34e041847c0fb80095728fc6a74`) informed the r2 read-interface boundary and fragmentation/real-ledger regression coverage. Its installer and payload were not applied wholesale.
 

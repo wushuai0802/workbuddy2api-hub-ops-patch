@@ -29,6 +29,7 @@ import re
 import itertools
 import json
 import os
+import random
 # 单请求体上限。默认值从 50MB 收紧到 16MB，是「内存护栏」：body 先整体读成 bytes、
 # 再 decode 成 str、再 json.loads 成对象，实测 50MB body 的 decode+parse 峰值约
 # 109MB、单请求峰值约 160MB；而读 body 发生在 chat 信号量 acquire 之前、线程数又
@@ -10184,7 +10185,7 @@ def runtime_settings_view():
         "accounts_dir": ACCOUNTS_DIR,
         "usage_dir": USAGE_DIR,
         "settings_file": wb_settings.settings_path(ACCOUNTS_DIR),
-        "version": "1.7.17",
+        "version": "1.7.18",
     }
 def current_account():
     """Account used for display purposes (health / usage summaries)."""
@@ -11468,7 +11469,7 @@ def _patch_payload_fingerprint():
     return hashlib.sha256(''.join(records).encode('ascii')).hexdigest()
 
 _OPS_PATCH_FINGERPRINT = _patch_payload_fingerprint()
-_OPS_PATCH_ID = "v1.7.17-ops.20261020.1"
+_OPS_PATCH_ID = "v1.7.18-ops.20261021.1"
 _OBSERVATION_STORE = None
 _OBSERVATION_STORE_LOCK = threading.Lock()
 
@@ -12743,6 +12744,21 @@ SANITIZE_KV_RE = re.compile(r"(?i)\bcc_[a-z0-9_]+=[^;\r\n]*;?\s*")
 SANITIZE_OMO_JUNIOR_RE = re.compile(
     r"Sisyphus-Junior - Focused executor from OhMyOpenCode", re.IGNORECASE
 )
+# 上游 WAF 把「客户端自我介绍句式 + 品牌」当成非官方渠道（#533 / #537 / #539）：
+#   You are an AI agent powered by DeepSeek Harness.
+#   You are a coding agent powered by the deepseek-v4.1-flash model.
+#   You are an AI assistant built on DeepSeek.
+# 大小写不敏感、连续子串匹配；单独品牌词或改词后放行。这里整句换成中性句，
+# 不依赖具体品牌，也不保留 "powered by / built on" 结构。
+#
+# 只作用于 system / developer 角色（见 sanitize_messages）：user / tool 里的品牌词
+# 是用户数据，改写会让模型看到与磁盘不一致的内容（#537）。
+SANITIZE_IDENTITY_RE = re.compile(
+    r"You are an?(?:\s+AI)?(?:\s+coding)?\s+"
+    r"(?:agent\s+powered by|assistant\s+built on)[^\n]*?"
+    r"(?:\.(?=\s|$)|(?=\n|$))",
+    re.IGNORECASE)
+SANITIZE_IDENTITY_REPLACEMENT = "You are a helpful AI assistant."
 # 指纹判定的字面量快路径（见 has_fingerprint）：原先对每段文本跑两个 (?i) 正则，
 # 4KB 输入实测 319µs，其中正则 137+188µs、几个 `in` 只占 9µs；64KB 文本要
 # 6.2ms，而 sanitize_messages 会给每个文本段都过一遍——build_upstream_body
@@ -12763,7 +12779,8 @@ SANITIZE_BARE_HDR_LOWER = SANITIZE_BARE_HDR_RE.pattern
 if SANITIZE_BARE_HDR_LOWER.startswith("(?i)"):
     SANITIZE_BARE_HDR_LOWER = SANITIZE_BARE_HDR_LOWER[4:]
 SANITIZE_OMO_JUNIOR_LOWER = SANITIZE_OMO_JUNIOR_RE.pattern.lower()
-def has_fingerprint(text):
+SANITIZE_IDENTITY_LOWER = ("agent powered by", "assistant built on")
+def has_fingerprint(text, identity=True):
     if not isinstance(text, str) or not text:
         return False
     for f in SANITIZE_FEATURES:
@@ -12775,17 +12792,23 @@ def has_fingerprint(text):
         low = text.translate(SANITIZE_REI_FOLD).lower()
     else:
         low = text.lower()
-    return SANITIZE_BARE_HDR_LOWER in low or SANITIZE_OMO_JUNIOR_LOWER in low
-def sanitize_text(text):
+    if (SANITIZE_BARE_HDR_LOWER in low
+            or SANITIZE_OMO_JUNIOR_LOWER in low):
+        return True
+    return bool(identity) and any(needle in low
+                                  for needle in SANITIZE_IDENTITY_LOWER)
+def sanitize_text(text, identity=True):
     if not isinstance(text, str) or not text:
         return text
-    if not has_fingerprint(text):
+    if not has_fingerprint(text, identity=identity):
         return text
     # Keep the rewrite deliberately narrow: do not globally remove
     # "OhMyOpenCode" or "Sisyphus-Junior", because either token alone is
     # accepted by the upstream. Only the confirmed contiguous fingerprint is
     # neutralized.
     text = SANITIZE_OMO_JUNIOR_RE.sub("Sisyphus-Junior - Focused executor", text)
+    if identity:
+        text = SANITIZE_IDENTITY_RE.sub(SANITIZE_IDENTITY_REPLACEMENT, text)
     for old, new in SANITIZE_REWRITES:
         text = text.replace(old, new)
     text = SANITIZE_HDR_RE.sub("", text)
@@ -12796,15 +12819,15 @@ def sanitize_text(text):
             text = SANITIZE_KV_RE.sub("", text)
     text = SANITIZE_BARE_HDR_RE.sub("x-anthropic-billing-hdr", text)
     return text.strip()
-def sanitize_content(content):
+def sanitize_content(content, identity=True):
     if isinstance(content, str):
-        return sanitize_text(content)
+        return sanitize_text(content, identity=identity)
     if isinstance(content, list):
         out = []
         for part in content:
             if isinstance(part, dict) and part.get("type") == "text" and "text" in part:
                 p = dict(part)
-                p["text"] = sanitize_text(p["text"])
+                p["text"] = sanitize_text(p["text"], identity=identity)
                 out.append(p)
             else:
                 out.append(part)
@@ -12835,7 +12858,8 @@ def sanitize_tool_calls(tool_calls):
                 fn = dict(fn)
                 raw_args = fn.get("arguments")
                 if isinstance(raw_args, str):
-                    fn["arguments"] = raw_args if preserve else sanitize_text(raw_args)
+                    fn["arguments"] = (raw_args if preserve
+                                       else sanitize_text(raw_args, identity=False))
                 elif raw_args is None:
                     fn["arguments"] = "{}"
                 else:
@@ -12981,13 +13005,16 @@ def sanitize_messages(messages):
             item = dict(m)
             preserve_tool_result = (preserve_request_contract_enabled()
                                     and item.get("role") in ("tool", "function"))
+            identity = item.get("role") in ("system", "developer")
             if "content" in item and not preserve_tool_result:
-                item["content"] = sanitize_content(item["content"])
+                item["content"] = sanitize_content(item["content"],
+                                                   identity=identity)
             if isinstance(item.get("reasoning_content"), str):
                 item["reasoning_content"] = strip_dsml_from_text(
-                    sanitize_text(item["reasoning_content"]))
+                    sanitize_text(item["reasoning_content"], identity=False))
             if isinstance(item.get("reasoning"), str):
-                item["reasoning"] = strip_dsml_from_text(sanitize_text(item["reasoning"]))
+                item["reasoning"] = strip_dsml_from_text(
+                    sanitize_text(item["reasoning"], identity=False))
             if "tool_calls" in item:
                 item["tool_calls"] = sanitize_tool_calls(item["tool_calls"])
             out.append(item)
@@ -19250,7 +19277,7 @@ class Handler(BaseHTTPRequestHandler):
             super().finish()
         except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
             pass
-    server_version = "wb-proxy/1.7.17"
+    server_version = "wb-proxy/1.7.18"
     def log_message(self, fmt, *args):
         # 静默过滤前端看板高频定时心跳的正常 200 GET 请求（/logs、/usage、/accounts 轮询等）
         # 避免自增死循环刷屏与日志污染。遇 4xx/5xx 异常或所有非 GET 业务操作依然如实记录。

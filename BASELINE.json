@@ -1,5 +1,5 @@
 {
-  "base_tag": "v1.7.17",
+  "base_tag": "v1.7.18",
   "compatibility": {
     "wb_activity.py": "da70fdd4b791198b9147d7624f734bcff396b5086a1736a75722c3e4b5ad69a9",
     "wb_agents.py": "904a4019ff9f5059388d4c51c28292255ea08ec17cbef5aed601b2b13feaa658",
@@ -18,7 +18,7 @@
     "wb_quota_scan.py": "aeaab6ddecb565424238dfe0913ca2b00e33ec3ecdf5ac082efe74801e43c8fd",
     "wb_scheduler.py": "aa5d38454019bb918a22842ad514f4620f549b394b69482e065d6e012e8bd62b",
     "wb_settings.py": "931e305f7c0e8061adaac99a045d39751bd1685340ba1588c2432b02c5b79059",
-    "wb_tasks.py": "d7e5edf82af5242ea7b1b33a1705978a6f5705a0148c5eeef9d116dabdf5aa95",
+    "wb_tasks.py": "7439265d30f32a758d9ab04363036d5d415eb957d53ffd26ca79d9fb7d1b75aa",
     "wb_update_request.py": "5d2e5e90e7036dd104d4e5ac7aad930f581e163eb7681e3f7ff2d32ccc916008",
     "wb_updates.py": "a39703a90a47a3d07c63e0577b584f9ab0288ee04c8b857bddbaf776a95a7ec3",
     "wb_webagent.py": "1258023afb2df58131947970ad3aa00e59c9e71899fd5e7e6557ee9dcc560828",
@@ -26,8 +26,8 @@
   },
   "files": {
     "dashboard.html": {
-      "base_sha256": "67a623ea75c6287a626d62a24f621af6e5eb846abc03d03cf04deb7838324f4d",
-      "patched_sha256": "4b455d08799a940cc4bba9ef79f39d8c3e7cbad5beb62b71d56793dcf42f7592"
+      "base_sha256": "e4b0181a9629d5a0775f077fe75fdfab7fd2666cdc749c7ec09c630268a34b85",
+      "patched_sha256": "ec9a7a7306de1000a559e8a35af46505ab6c3e42be7938e2fbf17b2cd3068c8a"
     },
     "wb_accounts.py": {
       "base_sha256": "97840d0116b8e19d94efb61d139f090ee3a3b70437ed92671da6a225fe3eb4c1",
@@ -42,8 +42,8 @@
       "patched_sha256": "fe26ca2f939b33dae0b847e81731ef8b7ca21b156fb71df7fde3ed42538af20f"
     },
     "wb_proxy.py": {
-      "base_sha256": "14eaa7cc468d6d8bbeced29f7b0d1cb1ec7d1c49326617f5f9aa21d821661889",
-      "patched_sha256": "cc3b5cfe3b6ba4b8549aaf494a87febd0ce606bcdf4022a8f9d02fd4544bf203"
+      "base_sha256": "aa37ba17ce4801a97ed912a34e18bc0e8af89ace50666dbeec722e39555fa0ac",
+      "patched_sha256": "c9362892e62b3c3c25a1ff5c3085f06fde20ebf41b2b9ddc912b23d5bca4bee3"
     },
     "wb_stall.py": {
       "base_sha256": null,
@@ -58,11 +58,11 @@
       "patched_sha256": "f3a09e170e9393592179638378781b72be075fb6c9596e847db01e4e11b154da"
     }
   },
-  "patch_id": "v1.7.17-ops.20261020.1",
+  "patch_id": "v1.7.18-ops.20261021.1",
   "patch_source": "wushuai0802/workbuddy2api-hub-ops-patch",
-  "payload_fingerprint": "271119579d0537c19ad3899dde03ec155615712b741f98e39d74a73c352b055f",
+  "payload_fingerprint": "9adb97a9e402a52796c8af5789c792fe6c3159696372a1b3c914a7449ce15942",
   "python_requires": ">=3.11",
   "repository": "https://github.com/ardeyouxipianyi/workbuddy2api-hub",
   "schema_version": 1,
-  "upstream_commit": "af706fc31e4a22cb2dea7442361b2b15185c3cee"
+  "upstream_commit": "c1943745640c78e9d6036ec8d2c3e3396af2d5a3"
 }

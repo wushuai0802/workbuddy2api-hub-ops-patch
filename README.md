@@ -4,19 +4,19 @@
 
 为 WorkBuddy 网关提供 DeepSeek 复读保护、受限认证续期、推理历史与工具图片兼容，以及流式协议边界修复。基于[官方项目](https://github.com/ardeyouxipianyi/workbuddy2api-hub)，可检查、可回退，遵循 MIT。
 
-当前版本：**v1.7.17-ops.20261020.1**。
+当前版本：**v1.7.18-ops.20261021.1**。
 
-本次重基官方v1.7.17，吸收流式断流首字节前同号重开一次、出口按读完记账、模型级5xx不熔断整池、关闭日限额立即生效、Codex内联bearer配置、X-Private-Data设置、积分到期显示、OpenRouter模型校准、成长任务手动领取、免费账号不可用标记、部署模式、按任务小时排程、completion tokens吞吐、仅reasoning回复失败及面板移动端/脱敏修复。保留原有防复读、一次安全恢复、401期限、用量结算、连接池与工具兼容保护。
+本次重基官方v1.7.18，吸收11-128身份句指纹、积分批量刷新崩溃、成长任务专家登记、数据用途声明文案、模型清单倍率列和聚合缓存测试修复。保留原有防复读、一次安全恢复、401期限、用量结算、连接池与工具兼容保护。
 
 纳入v1.7.13～1.7.15的出站身份/账号连接隔离、工具Schema与图片/配对修复、积分护栏、可配置排程及冷却展示。保留防复读与期限保护，完善401同号重试、定址账号恢复隔离，以及管理型部署的停止保护。
 
-- [下载 ZIP 与 SHA256SUMS.txt](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.7.17-ops.20261020.1)
-- 文件名：`workbuddy2api-hub-v1.7.17-wushuai0802-ops-20261020-r1.zip`
-- 仅支持官方 **v1.7.17**，提交 `af706fc31e4a22cb2dea7442361b2b15185c3cee`。
+- [下载 ZIP 与 SHA256SUMS.txt](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.7.18-ops.20261021.1)
+- 文件名：`workbuddy2api-hub-v1.7.18-wushuai0802-ops-20261021-r1.zip`
+- 仅支持官方 **v1.7.18**，提交 `c1943745640c78e9d6036ec8d2c3e3396af2d5a3`。
 - Python 3.11+。Docker 用户从打过完整补丁的准确源码重新构建镜像。
 - 安装器替换四个上游Python模块（proxy、accounts、webtools、upstream_pool）及看板，新增 ops、stall、observe 三个模块；不操作账号、Key、配置、历史或部署。
 
-本版把已有补丁迁移到官方 v1.7.17，保留混合复读、推理别名预算、工具图片、拒答、用量结算和连接所有权保护。来源与许可见 [NOTICE.md](NOTICE.md) 和 [THIRD-PARTY-zh.md](THIRD-PARTY-zh.md)。
+本版把已有补丁迁移到官方 v1.7.18，保留混合复读、推理别名预算、工具图片、拒答、用量结算和连接所有权保护。来源与许可见 [NOTICE.md](NOTICE.md) 和 [THIRD-PARTY-zh.md](THIRD-PARTY-zh.md)。
 
 本次修复响应头预算被固定45秒覆盖的问题：响应头尊重面板设置，返回后才开始45秒首帧预算；初始连接、恢复和网页工具后续生成共享原300秒总期限。纯推理循环的唯一一次安全恢复默认加入简短接续提示，可用 `WB_OPS_LOOP_RECOVERY_HINT=0` 关闭提示。连续已知失败前缀最多清理16段/65536字符，保留未知后缀和客户端原历史。持久观察新增匿名规则、窗口计数和恢复停止原因；检测阈值保持。
 
@@ -33,6 +33,12 @@
 | 分块流与租约 | 保留v1.7.3的分块读取/写出和共享TLS；缓冲帧验证后释放连接，失败时丢弃，保留已接收用量。 |
 
 上游 v1.7.4/1.7.5 增加默认关闭的SQLite日志及保留限制、checkpoint修复、凭据手动导入、新主题/统计面板、每日及手动模型目录刷新、来源标记和原始目录归档。模型目录/倍率现在优先使用实际API结果，显示可能变化；这些原生功能不代替防复读。SQLite日志是否启用沿用用户设置，公开包不自动开启。
+
+## v1.7.18 升级与修复
+
+官方把「客户端自我介绍句式 + 品牌」的 11-128 指纹从单句扩展到通用句式，本补丁重基后直接继承；system/developer 角色整句改写为中性句，user/assistant/tool 内容不动。官方同时修复全量刷新积分默认间隔下的 `NameError`、成长任务「无畏契约拼豆专家」登记、`X-Private-Data` 文案反置、模型清单消费倍率列截断和聚合缓存测试的 exFAT mtime 假设。
+
+本补丁继续保留：DeepSeek混合/引用复读检测与一次安全恢复、推理别名预算、工具图片兼容、六路径失败终态与原始用量快照、401有界刷新与绝对期限、连接池租约、首帧包装、SSE分块和安装/回滚保护。官方已发布的功能由v1.7.18基线提供，不在补丁里重复实现。
 
 ## v1.7.17 升级与修复
 
@@ -79,11 +85,11 @@ Chat流式响应在客户端尚未收到任何字节时，对同一账号、同�
 先保存旧镜像、源码、配置和数据，在新目录获取两个准确版本：
 
 ~~~sh
-git clone --depth 1 --branch v1.7.17-ops.20261020.1 https://github.com/wushuai0802/workbuddy2api-hub-ops-patch.git ops-patch-v1717
-git clone --depth 1 --branch v1.7.17 https://github.com/ardeyouxipianyi/workbuddy2api-hub.git workbuddy2api-hub-v1.7.17
-git -C workbuddy2api-hub-v1.7.17 rev-parse HEAD
-python3 -B ops-patch-v1717/apply.py --verify-package
-python3 -B ops-patch-v1717/apply.py --target ./workbuddy2api-hub-v1.7.17 --dry-run
+git clone --depth 1 --branch v1.7.18-ops.20261021.1 https://github.com/wushuai0802/workbuddy2api-hub-ops-patch.git ops-patch-v1718
+git clone --depth 1 --branch v1.7.18 https://github.com/ardeyouxipianyi/workbuddy2api-hub.git workbuddy2api-hub-v1.7.18
+git -C workbuddy2api-hub-v1.7.18 rev-parse HEAD
+python3 -B ops-patch-v1718/apply.py --verify-package
+python3 -B ops-patch-v1718/apply.py --target ./workbuddy2api-hub-v1.7.18 --dry-run
 ~~~
 
 提交必须匹配上面的完整SHA。预检通过后，按[安装指南](docs/INSTALL.md)暂停唯一目标服务、应用完整补丁、构建并定向切换。已有旧补丁（包括v1.7.3）不能直接叠加；不要删除状态/备份绕过检查。旧Release/tag继续保留。
@@ -92,7 +98,7 @@ python3 -B ops-patch-v1717/apply.py --target ./workbuddy2api-hub-v1.7.17 --dry-r
 
 ## 验证与边界
 
-离线runner包含175组Python回归（36组补丁及全部139组官方Python），另有49组官方Node及2组补丁Node；新增阶段期限、连续前缀、默认恢复提示、匿名证据持久化及可选日志库测试；面板使用官方Node合成DOM测试。CI检查Linux3.11/3.12与Windows3.11，实际结果见[验证记录](docs/VERIFICATION.md)。
+离线runner包含175组Python回归（36组补丁及全部139组官方Python），另有50组官方Node及2组补丁Node；新增阶段期限、连续前缀、默认恢复提示、匿名证据持久化及可选日志库测试；面板使用官方Node合成DOM测试。CI检查Linux3.11/3.12与Windows3.11，实际结果见[验证记录](docs/VERIFICATION.md)。
 
 测试使用合成账号、空数据和本机HTTP，不含真实会话。检测仍以单次生成为范围，尚无通用跨工具回合业务进展熔断。健康、模块指纹或离线测试不等于真实长会话输出质量验收。
 

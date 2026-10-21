@@ -1,24 +1,24 @@
 # 安装、升级与回滚
 
-本包 `v1.7.17-ops.20261020.1` 只支持官方v1.7.17 / `af706fc31e4a22cb2dea7442361b2b15185c3cee`。以下路径、Compose参数和服务名需要按自己的部署填写。Python3.11+，Linux/macOS示例；Windows使用同一安装器参数及完整路径。
+本包 `v1.7.18-ops.20261021.1` 只支持官方v1.7.18 / `c1943745640c78e9d6036ec8d2c3e3396af2d5a3`。以下路径、Compose参数和服务名需要按自己的部署填写。Python3.11+，Linux/macOS示例；Windows使用同一安装器参数及完整路径。
 
 ## 核对输入
 
-[Release下载](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.7.17-ops.20261020.1)含ZIP和SHA256SUMS.txt；ZIP顶层目录为`workbuddy2api-hub-ops-patch/`。
+[Release下载](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.7.18-ops.20261021.1)含ZIP和SHA256SUMS.txt；ZIP顶层目录为`workbuddy2api-hub-ops-patch/`。
 
 ~~~sh
 sha256sum -c SHA256SUMS.txt
-git clone --depth 1 --branch v1.7.17 https://github.com/ardeyouxipianyi/workbuddy2api-hub.git workbuddy2api-hub-v1.7.17
-git -C workbuddy2api-hub-v1.7.17 rev-parse HEAD
+git clone --depth 1 --branch v1.7.18 https://github.com/ardeyouxipianyi/workbuddy2api-hub.git workbuddy2api-hub-v1.7.18
+git -C workbuddy2api-hub-v1.7.18 rev-parse HEAD
 PATCH_DIR='/absolute/path/to/workbuddy2api-hub-ops-patch'
-TARGET_DIR='/absolute/path/to/workbuddy2api-hub-v1.7.17'
+TARGET_DIR='/absolute/path/to/workbuddy2api-hub-v1.7.18'
 python3 -B "$PATCH_DIR/apply.py" --verify-package
 python3 -B "$PATCH_DIR/apply.py" --target "$TARGET_DIR" --dry-run
 ~~~
 
 SHA必须匹配上述完整提交；预检通过只代表可以应用，尚未部署。已有旧补丁或未知改动时，另建准确干净源码，保留旧部署。不删除状态/备份或重写校验绕过拒绝。回滚旧源码补丁使用其原版本安装器；当前安装器不能卸载旧包。
 
-这也适用于旧补丁→v1.7.17：在新基线整体安装，不直接覆盖旧已安装树。运行时独立`usage/ops-observations.jsonl`不属于安装器修改范围；它有界轮换且可用`WB_OPS_OBSERVE=0`关闭，不改写原usage历史。
+这也适用于旧补丁→v1.7.18：在新基线整体安装，不直接覆盖旧已安装树。运行时独立`usage/ops-observations.jsonl`不属于安装器修改范围；它有界轮换且可用`WB_OPS_OBSERVE=0`关闭，不改写原usage历史。
 
 ## 保存部署与数据
 
@@ -27,9 +27,9 @@ SHA必须匹配上述完整提交；预检通过只代表可以应用，尚未�
 ~~~sh
 COMPOSE_FILE='/absolute/path/to/your/compose.yaml'
 SERVICE='your-hub-service'
-BACKUP_DIR='/absolute/path/to/private-backups/pre-ops-20261020'
-PATCHED_IMAGE='your-local/workbuddy2api-hub:1.7.17-ops.20261020.1'
-ROLLBACK_IMAGE='your-local/workbuddy2api-hub:rollback-before-ops-20261020'
+BACKUP_DIR='/absolute/path/to/private-backups/pre-ops-20261021'
+PATCHED_IMAGE='your-local/workbuddy2api-hub:1.7.18-ops.20261021.1'
+ROLLBACK_IMAGE='your-local/workbuddy2api-hub:rollback-before-ops-20261021'
 docker compose -f "$COMPOSE_FILE" config --services
 CONTAINER_ID=$(docker compose -f "$COMPOSE_FILE" ps -q "$SERVICE")
 docker inspect --format '{{json .Mounts}}' "$CONTAINER_ID"
@@ -89,7 +89,7 @@ python3 -B "$PATCH_DIR/apply.py" --target "$TARGET_DIR" --rollback --dry-run
 python3 -B "$PATCH_DIR/apply.py" --target "$TARGET_DIR" --rollback
 ~~~
 
-恢复安装前的官方v1.7.17字节，不恢复更旧版本或业务数据；代码被再次修改时拒绝覆盖，需先检查。
+恢复安装前的官方v1.7.18字节，不恢复更旧版本或业务数据；代码被再次修改时拒绝覆盖，需先检查。
 
 Docker用户暂停请求，将image改回旧ROLLBACK_IMAGE，沿原参数定向启动。镜像缺失时从私有rollback-image.tar加载；当前账号/usage继续沿用，不自动用旧数据覆盖。恢复数据会丢失备份点之后新增内容，须另行保留当前数据并核对。
 
