@@ -1699,65 +1699,169 @@
          return True
      if len(low) > 96 or ">" in low:
          return False
-@@ -12559,6 +13933,29 @@
-     return None
+@@ -12532,22 +13906,13 @@
+     """Split `text` after the first complete call-closing tag.
+ 
+     Returns (prefix, rest), or (None, text) while no call has closed yet.
+-    Consecutive closing tags belong to the same block and are swallowed
+-    with it, so a trailing </calls> cannot later leak out as prose.
++    Only the parsed call itself is consumed here; an enclosing wrapper may
++    arrive later, so the filter tracks that ownership across chunks.
+     """
+     for match in LEAK_CLOSE_RE.finditer(text):
+         if match.group("name").lower() not in CALL_CLOSE_TAGS:
+             continue
+-        end = match.end()
+-        while True:
+-            nxt = end
+-            while nxt < len(text) and text[nxt] in " \t\r\n":
+-                nxt += 1
+-            closing = LEAK_CLOSE_RE.match(text, nxt)
+-            if not closing:
+-                break
+-            end = closing.end()
+-        return text[:end], text[end:]
++        return text[:match.end()], text[match.end():]
+     return None, text
  
  
-+def _strip_orphan_closes(text):
-+    """Drop leading call-closing tags that belong to an already-released call.
-+
-+    A call's closing tags can arrive in a later delta than the one that
-+    completed it (`</invoke>` then `</calls>`). Those leftovers are markup, not
-+    prose; releasing them would put a literal `DSML` fragment on the wire.
-+    """
-+    if not text:
-+        return text
-+    pos = 0
-+    while pos < len(text):
-+        match = LEAK_CLOSE_RE.match(text, pos)
-+        if not match:
-+            break
-+        name = match.group("name").lower()
-+        if name not in CALL_CLOSE_TAGS and "dsml" not in match.group(0).lower():
-+            break
-+        pos = match.end()
-+        while pos < len(text) and text[pos] in " \t\r\n":
-+            pos += 1
-+    return text[pos:] if pos else text
-+
-+
- class LeakedToolCallStreamFilter:
-     """Hold back assistant text that may be a printed tool call.
+@@ -12574,51 +13939,106 @@
  
-@@ -12582,7 +13979,7 @@
+     def __init__(self):
+         self.buf = ""
++        self._owned_closers = []
+ 
+     def _release_all(self):
+         out, self.buf = self.buf, ""
++        self._owned_closers = []
+         return [("text", out)] if out else []
++
++    def _consume_owned_closers(self):
++        """Remove only an enclosing tag proven to belong to a parsed call.
++
++        The upstream model sometimes closes the parsed leaf first and sends
++        the surrounding `invoke`/`calls` terminators in a later delta. Those
++        tags are markup, but an isolated `</calls>` in ordinary prose is not.
++        Ownership is therefore recorded per parsed call instead of matching
++        every leading closing tag.
++        """
++        while self._owned_closers:
++            start = len(self.buf) - len(self.buf.lstrip())
++            tail = self.buf[start:]
++            if not tail:
++                return False
++            match = re.compile(
++                r"<\s*/\s*(?:[|\uff5c]+\s*DSML\s*[|\uff5c]+\s*)?"
++                r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*>", re.I).match(self.buf, start)
++            if match and match.group("name").lower() == self._owned_closers[-1]:
++                # Preserve surrounding whitespace; delete the owned tag only.
++                self.buf = self.buf[:start] + self.buf[match.end():]
++                self._owned_closers.pop()
++                continue
++            if tail.startswith("<") and ">" not in tail and len(tail) < 256:
++                return False
++            if re.match(r"<\s*(?:[|\uff5c]+\s*DSML\s*[|\uff5c]+\s*)?"
++                        r"(?:invoke|run_code|run_shell)\b", tail, re.I):
++                return True
++            self._owned_closers = []
++        return True
++
++    def _remember_wrapper(self, prefix):
++        normalized = _normalize_dsml_bars(prefix)
++        stack = []
++        for tag in LEAK_TAG_RE.finditer(normalized):
++            name = tag.group("name").lower()
++            if name not in CALL_CLOSE_TAGS | LEAK_PARAM_TAGS:
++                continue
++            if re.match(r"<\s*/", tag.group()):
++                if stack and stack[-1] == name:
++                    stack.pop()
++            else:
++                stack.append(name)
++        self._owned_closers.extend(stack)
++        # Known hybrid encoding: a plain run_code/run_shell leaf uses DSML
++        # parameter terminators and emits the surrounding invoke/parameter/
++        # invoke/calls terminators afterwards. Arm only for that parsed shape;
++        # an isolated end tag, or a normal XML call, gains no cleanup budget.
++        if (not stack and re.match(r"<\s*(?:run_code|run_shell)\b", normalized, re.I)
++                and re.search(r"<\s*/\s*\|DSML\|\s*parameter\s*>", normalized, re.I)):
++            self._owned_closers.extend(("calls", "invoke", "parameter", "invoke"))
+ 
      def feed(self, text):
          if not text:
              return []
--        self.buf += text
-+        self.buf = _strip_orphan_closes(self.buf + text)
-         idx = _first_call_candidate(self.buf)
-         if idx is None:
-             return self._release_all()
-@@ -12607,6 +14004,7 @@
-             out.append(("text", clean))
-         # Prose after the call can go out at once; only text that may still
-         # grow into another call stays buffered.
-+        self.buf = _strip_orphan_closes(self.buf)
-         idx = _first_call_candidate(self.buf)
-         if idx is None:
-             out.extend(self._release_all())
-@@ -12618,7 +14016,9 @@
+         self.buf += text
+-        idx = _first_call_candidate(self.buf)
+-        if idx is None:
+-            return self._release_all()
+         out = []
+-        if idx:
+-            out.append(("text", self.buf[:idx]))
+-            self.buf = self.buf[idx:]
+-        if len(self.buf) > self.MAX_HOLD:
+-            out.extend(self._release_all())
+-            return out
+-        prefix, rest = _split_at_call_close(self.buf)
+-        if prefix is None:
+-            return out
+-        calls, clean = parse_leaked_tool_calls(prefix)
+-        if not calls:
+-            calls, clean = parse_dsml_tool_calls(prefix)
+-        if not calls:
+-            return out
+-        self.buf = rest
+-        out.append(("calls", calls))
+-        if clean:
+-            out.append(("text", clean))
+-        # Prose after the call can go out at once; only text that may still
+-        # grow into another call stays buffered.
+-        idx = _first_call_candidate(self.buf)
+-        if idx is None:
+-            out.extend(self._release_all())
+-        elif idx:
+-            out.append(("text", self.buf[:idx]))
+-            self.buf = self.buf[idx:]
++        while self.buf:
++            if len(self.buf) > self.MAX_HOLD:
++                out.extend(self._release_all())
++                return out
++            if not self._consume_owned_closers():
++                return out
++            idx = _first_call_candidate(self.buf)
++            if idx is None:
++                out.extend(self._release_all())
++                return out
++            if idx:
++                out.append(("text", self.buf[:idx]))
++                self.buf = self.buf[idx:]
++            prefix, rest = _split_at_call_close(self.buf)
++            if prefix is None:
++                return out
++            calls, clean = parse_leaked_tool_calls(prefix)
++            if not calls:
++                calls, clean = parse_dsml_tool_calls(prefix)
++            if not calls:
++                return out
++            self._remember_wrapper(prefix)
++            self.buf = rest
++            out.append(("calls", calls))
++            if clean:
++                out.append(("text", clean))
+         return out
+ 
      def flush(self):
++        self._consume_owned_closers()
          if not self.buf:
++            self._owned_closers = []
              return []
--        buf, self.buf = self.buf, ""
-+        buf, self.buf = _strip_orphan_closes(self.buf), ""
+         buf, self.buf = self.buf, ""
++        self._owned_closers = []
 +        if not buf:
 +            return []
          calls, clean = parse_leaked_tool_calls(buf)
          if not calls:
              calls, clean = parse_dsml_tool_calls(buf)
-@@ -12962,6 +14362,14 @@
+@@ -12962,6 +14382,14 @@
      return {"allowed_accounts": allowed} if allowed is not None else {}
  
  
@@ -1772,7 +1876,7 @@
  def key_model_message(entry, model):
      """Explain a per-key model restriction the same way the global ban does."""
      name = (entry or {}).get("name") or "未命名"
-@@ -12990,6 +14398,11 @@
+@@ -12990,6 +14418,11 @@
      return cfg
  
  
@@ -1784,7 +1888,7 @@
  def apply_prompt_mode(messages):
      """Apply the configured prompt mode to one request's messages.
  
-@@ -13000,7 +14413,7 @@
+@@ -13000,7 +14433,7 @@
      """
      cfg = prompt_mode_config()
      mode = cfg.get("mode") or "passthrough"
@@ -1793,7 +1897,7 @@
      if mode in ("custom", "append"):
          try:
              text = wb_prompt.load_prompt(mode, cfg.get("file"), cfg.get("text"))
-@@ -13038,9 +14451,12 @@
+@@ -13038,9 +14471,12 @@
      # one the upstream sees, with the client's fingerprint-y system text gone.
      messages = apply_prompt_mode(messages)
      messages = sanitize_messages(messages)
@@ -1806,7 +1910,7 @@
      if not messages or (messages[0].get("role") != "system"):
          messages = [{"role": "system", "content": SYSTEM_PROMPT}] + messages
      body = dict(payload)
-@@ -14054,11 +15470,7 @@
+@@ -14054,11 +15490,7 @@
          return False
      if seconds <= 0:
          return False
@@ -1819,7 +1923,7 @@
      if sock is None:
          return False
      try:
-@@ -14101,10 +15513,14 @@
+@@ -14101,10 +15533,14 @@
          "1", "true", "yes", "on")
  
  
@@ -1835,7 +1939,7 @@
      # Refresh the daily guards before picking. The scan underneath is
      # incremental and TTL-cached, so this is a stat() plus a cached dict on
      # the hot path, and an account parked by any of the guards is skipped
-@@ -14121,12 +15537,14 @@
+@@ -14121,12 +15557,14 @@
              remaining_schedule_weights() if remaining_priority_enabled() else None)
      realm = target_realm or detect_model_realm(payload.get("model")) or CURRENT_REALM
      model = str(payload.get("model") or "")
@@ -1853,7 +1957,7 @@
          if pinned.realm != realm:
              raise PinnedAccountError(
                  409, "pinned account '%s' belongs to realm %s, request targets %s"
-@@ -14163,18 +15581,14 @@
+@@ -14163,18 +15601,14 @@
      # 每请求新生成（见 wb_identity.new_turn_request_id）。生成在重试循环外，
      # 循环里只把它传给身份构造；桌面端 / VSCode 分支不消费它，行为不变。
      turn_request_id = wb_identity.new_turn_request_id()
@@ -1874,7 +1978,7 @@
      # 这一轮请求已经记过账的账号：重试轮（transient_hits 后 tried.clear() 整池
      # 重轮）会把同一个账号再挑一遍，若每次都记，一次请求就能给同一个账号记上
      # 好几笔 fails/degrade——池子越空、重轮越频繁，越容易把一个刚抖了一下的
-@@ -14183,7 +15597,6 @@
+@@ -14183,7 +15617,6 @@
      # A 401 may simply mean the access token expired before its JWT clock did.
      # Refresh at most once per account per request, then retry that same
      # account instead of silently rotating away from a recoverable credential.
@@ -1882,7 +1986,7 @@
      refresh_uid = None
  
      def pool_account(uid):
-@@ -14216,6 +15629,7 @@
+@@ -14216,6 +15649,7 @@
      last_403_detail = ""
      transient_hits = 0
      degraded_retried = False
@@ -1890,7 +1994,7 @@
      # 一次请求里因为 11140 换过的号数：默认 0，即第一个号被限制就停手。
      restricted_rotations = 0
      # 本机断网的次数：这一轮里只要出现过，最终报错就按「网络不可用」报，不按
-@@ -14238,13 +15652,19 @@
+@@ -14238,13 +15672,19 @@
      # 记过的那一段沿用同一段退避，不重复记。
      egress_wait = {}
  
@@ -1911,7 +2015,7 @@
                      max(2, total) + 1 + (MAX_PRODUCT_SWITCHES if auto_switch else 0))
      # 官方 VSCode 扩展的 X-Conversation-ID 是 32hex、会话稳定；网关没有会话
      # 映射，至少保证同一次 open_upstream（含换号重试）里是同一个 id。桌面端 /
-@@ -14254,11 +15674,21 @@
+@@ -14254,11 +15694,21 @@
      # 忘掉整段对话：重选时优先回到还留着这段前缀的暖号（见 SessionAffinity），
      # 一次大 prompt 的冷启动比重选一次账号贵得多。
      for _attempt in range(max_attempts):
@@ -1935,7 +2039,7 @@
          else:
              pick_kwargs = dict(realm=realm, session_key=session_key,
                                 exclude=tried, model=model, page=affinity_page)
-@@ -14278,6 +15708,10 @@
+@@ -14278,6 +15728,10 @@
                  pick_kwargs["allowed"] = allowed_accounts
              account = POOL.pick_for_session(**pick_kwargs) if POOL else None
          if account is None:
@@ -1946,7 +2050,7 @@
              break
          if account.realm != realm:
              if session_key and POOL: POOL.affinity.demote(session_key, account.uid)
-@@ -14331,9 +15765,13 @@
+@@ -14331,9 +15785,13 @@
          req = urllib.request.Request(chat_url, data=attempt_data, method="POST",
                                       headers=req_headers)
          req.wb_exact_headers = list(req_headers.items())
@@ -1962,7 +2066,7 @@
              _apply_stream_idle_timeout(resp, idle_timeout)
              account.note_success(model=model)
              wb_entitlements.clear(ACCOUNTS_DIR, account.realm, model)
-@@ -14345,6 +15783,9 @@
+@@ -14345,6 +15803,9 @@
                  wb_egress.note_success(
                      wb_upstream_pool.egress_key(chat_url, account.proxy))
              reset_switch_counter(account, model)
@@ -1972,7 +2076,7 @@
              # The third element is the reasoning effort this request ran at: the
              # body is rebuilt per attempt, but the effort is a property of the
              # model and the request, and the callers record it on the usage row.
-@@ -14459,7 +15900,7 @@
+@@ -14459,7 +15920,7 @@
                  # mode is usually a system-prompt fingerprint false positive.
                  # Switch to the minimal neutral prompt until next 00:00 CST
                  # and retry this turn once; custom mode opted out.
@@ -1981,7 +2085,7 @@
                          and prompt_mode_config().get("mode") in ("passthrough", "append")):
                      PROMPT_DEGRADE.trigger()
                      degraded_retried = True
-@@ -14486,27 +15927,38 @@
+@@ -14486,27 +15947,38 @@
                  last_error = exc
                  continue
              if exc.code == 401:
@@ -2033,7 +2137,7 @@
                  last_error = exc
                  continue
              if exc.code == 400:
-@@ -14552,7 +16004,7 @@
+@@ -14552,7 +16024,7 @@
                      if session_key and POOL:
                          POOL.affinity.demote(session_key, account.uid)
                      last_error = exc
@@ -2042,7 +2146,7 @@
                      continue
                  charge_account(account, "HTTP %d" % exc.code, unknown=False)
                  log("upstream %s for '%s' (code %s), retrying (fails=%d)"
-@@ -14580,7 +16032,7 @@
+@@ -14580,7 +16052,7 @@
                      log("local network looks down (%s); not charging any account"
                          % exc_detail(exc))
                  last_error = exc
@@ -2051,7 +2155,7 @@
                  continue
              if is_transient(exc):
                  transient_hits += 1
-@@ -14594,7 +16046,7 @@
+@@ -14594,7 +16066,7 @@
                          "backing off the egress %.1fs"
                          % (account.uid[:8], model, exc_detail(exc), wait))
                      last_error = exc
@@ -2060,7 +2164,7 @@
                      continue
                  charge_account(account, "connection: %s" % exc_detail(exc, 120),
                                 unknown=True)
-@@ -14605,7 +16057,7 @@
+@@ -14605,7 +16077,7 @@
                      "retrying (degrade=%d)"
                      % (account.uid[:8], model, exc_detail(exc), account.degrade_count))
                  last_error = exc
@@ -2069,7 +2173,7 @@
                  continue
              charge_account(account, str(exc)[:120], unknown=True)
              account.note_error(str(exc)[:120], cooldown=60, single_account=(total <= 1))
-@@ -14622,10 +16074,15 @@
+@@ -14622,10 +16094,15 @@
      # this realm has a persisted upstream 6004 cap for this free model. The
      # switch is opt-in because the retry can incur real charges.
      paid_model = _FREE_MODEL_CREDIT_FALLBACKS.get((realm, model))
@@ -2087,7 +2191,7 @@
      if (allow_credit_fallback and paid_model and _free_model_credit_fallback_enabled()
              and eligible and all(a.cap_until(model) > time.time() for a in eligible)):
          paid_payload = dict(payload)
-@@ -14634,9 +16091,9 @@
+@@ -14634,9 +16111,9 @@
              % (model, len(eligible), realm, paid_model))
          response, account, effort = open_upstream(
              paid_payload, session_key=session_key, target_realm=realm,
@@ -2099,7 +2203,7 @@
          try:
              response._wb_billed_model = paid_model
          except Exception:
-@@ -14916,7 +16373,65 @@
+@@ -14916,7 +16393,65 @@
  # 摊成「一块一次」，同时不会让首字节延迟变差（见 iter_sse_lines）。
  SSE_READ_BLOCK = 64 * 1024
  
@@ -2166,7 +2270,7 @@
      """按块读取流式响应并逐行产出，把逐行 read 的 syscall 开销摊掉。
  
      直接 `for line in resp` 迭代 http.client.HTTPResponse 时，每一行都要走
-@@ -14937,14 +16452,28 @@
+@@ -14937,14 +16472,28 @@
      攒下的写出掉：一个读取块里的事件因此合成一次 write，而下一个字节一到就
      立刻产出——延迟与逐块写完全一样，只是不再一个 chunk 一次 sendall。
      """
@@ -2198,7 +2302,7 @@
      while True:
          if before_read is not None:
              before_read()
-@@ -14958,24 +16487,59 @@
+@@ -14958,24 +16507,59 @@
              if remaining > 0:
                  raise http.client.IncompleteRead(b"", remaining)
              break
@@ -2267,7 +2371,7 @@
      for line in iter_sse_lines(raw_iter):
          data = strip_data_prefix(line.decode("utf-8", "replace"))
          if not data or data == "[DONE]":
-@@ -14986,6 +16550,12 @@
+@@ -14986,6 +16570,12 @@
              chunk = json.loads(data)
          except Exception:
              continue
@@ -2280,7 +2384,7 @@
          if first_chunk_at is None:
              first_chunk_at = time.time()
          if chunk.get("id"):
-@@ -15000,8 +16570,12 @@
+@@ -15000,8 +16590,12 @@
              delta = choice.get("delta") or {}
              if delta.get("content"):
                  content.append(delta["content"])
@@ -2294,7 +2398,7 @@
              for tc in delta.get("tool_calls") or []:
                  idx = tc.get("index")
                  if idx is None:
-@@ -15032,7 +16606,8 @@
+@@ -15032,7 +16626,8 @@
              # 占位。原判断对空 dict 成立，会凭空生成 tool_call 并伪造 id，
              # 导致 finish_reason 被改成 "tool_calls"（参数全空）→ 严格客户端死等。
              # 故：只要 name 为空即视为无效占位直接跳过。
@@ -2304,7 +2408,7 @@
              if fc and isinstance(fc, dict) and not fc_is_empty:
                  idx = 0
                  if idx not in tool_calls_map:
-@@ -15052,13 +16627,35 @@
+@@ -15052,13 +16647,35 @@
                          entry["function"]["arguments"] += fc["arguments"]
              if choice.get("finish_reason"):
                  finish = choice["finish_reason"]
@@ -2342,7 +2446,7 @@
          finish = "tool_calls"
      # PATCH2-BY-OPS: 二次防御——剔除「无函数名且无参数」的空 tool_call。
      # 即使上游以 tool_calls 数组形式发空占位，也不会泄漏给客户端。
-@@ -15076,6 +16673,8 @@
+@@ -15076,6 +16693,8 @@
              k: v for k, v in tool_calls_map.items()
              if not is_truncated_arguments((v.get("function") or {}).get("arguments"))
          }
@@ -2351,7 +2455,7 @@
      if tool_calls_map:
          ordered_tcs = [tool_calls_map[k] for k in sorted(tool_calls_map.keys())]
          message["tool_calls"] = ordered_tcs
-@@ -15112,6 +16711,8 @@
+@@ -15112,6 +16731,8 @@
      if usage:
          normalize_usage_cache_aliases(usage)
          out["usage"] = usage
@@ -2360,7 +2464,7 @@
      out["elapsed_ms"] = int((time.time() - started) * 1000)
      out["first_chunk_at"] = first_chunk_at
      return out
-@@ -15649,10 +17250,16 @@
+@@ -15649,10 +17270,16 @@
          })
      body["messages"] = convo
      body["stream"] = True
@@ -2379,7 +2483,7 @@
  
  
  def internal_calls_from_chat(chat_obj, web_tools=False):
-@@ -15899,7 +17506,7 @@
+@@ -15899,7 +17526,7 @@
              else:
                  log("responses: WARNING unhandled input item type=%r keys=%s"
                      % (itype, sorted(item.keys())[:8]))
@@ -2388,7 +2492,7 @@
  
  
  def responses_to_chat(payload):
-@@ -16470,6 +18077,9 @@
+@@ -16470,6 +18097,9 @@
      text = _anthropic_text(text)
      if text:
          content.append({"type": "text", "text": text})
@@ -2398,7 +2502,7 @@
      tool_calls = message.get("tool_calls")
      if isinstance(tool_calls, list):
          for call in tool_calls:
-@@ -16624,14 +18234,16 @@
+@@ -16624,14 +18254,16 @@
                  "index": state["thinking_idx"],
                  "delta": {"type": "thinking_delta", "thinking": reason},
              })
@@ -2423,7 +2527,7 @@
          for call in delta.get("tool_calls") or []:
              if not isinstance(call, dict):
                  continue
-@@ -16678,7 +18290,7 @@
+@@ -16678,7 +18310,7 @@
                  })
          finish = choice.get("finish_reason")
          if finish:
@@ -2432,7 +2536,7 @@
      if state["failed"]:
          return
      if not state["started"]:
-@@ -16712,12 +18324,10 @@
+@@ -16712,12 +18344,10 @@
      if not u:
          return None
      det = u.get("completion_tokens_details") or {}
@@ -2446,7 +2550,7 @@
          },
          "output_tokens": u.get("completion_tokens") or 0,
          "output_tokens_details": {"reasoning_tokens": det.get("reasoning_tokens") or 0},
-@@ -16739,7 +18349,8 @@
+@@ -16739,7 +18369,8 @@
      choice = (chat_obj.get("choices") or [{}])[0]
      msg = choice.get("message") or {}
      text = msg.get("content") or ""
@@ -2456,7 +2560,7 @@
      output = []
      if reasoning:
          output.append({
-@@ -16784,21 +18395,26 @@
+@@ -16784,21 +18415,26 @@
                      "arguments": dc.get("arguments") or "{}",
                  })
              text = clean_t
@@ -2487,7 +2591,7 @@
          "model": model,
          "output": output,
          "output_text": text,
-@@ -16816,7 +18432,404 @@
+@@ -16816,7 +18452,438 @@
          obj["usage"] = u
      if finish == "length":
          obj["incomplete_details"] = {"reason": "max_output_tokens"}
@@ -2613,8 +2717,10 @@
 +            holder["usage_recorded"] = False
 +            scrubber = ReasoningScrubber()
 +            leak_filter = LeakedToolCallStreamFilter()
-+            all_printed_calls = []
 +            native_tools = False
++            pending_printed_calls = []
++            printed_tail_text = []
++            content_prefix_len = 0
 +            held_finish, finish, saw_finish = None, "stop", False
 +            for raw in current:
 +                line = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
@@ -2657,14 +2763,21 @@
 +                    if delta.get("content"):
 +                        text.append(delta["content"])
 +                        actions = leak_filter.feed(delta["content"])
-+                        delta["content"] = "".join(value for kind, value in actions if kind == "text")
++                        visible = []
 +                        for kind, value in actions:
 +                            if kind == "calls":
 +                                # Hold the recovered call until the turn ends
 +                                # normally: a stream that dies before its
 +                                # terminal must not run a side effect the model
 +                                # never finished delivering.
-+                                all_printed_calls.extend(value)
++                                pending_printed_calls.extend(value)
++                            elif pending_printed_calls:
++                                # Text after a withheld call keeps its original
++                                # order and is only released with that call.
++                                printed_tail_text.append((kind, value))
++                            else:
++                                visible.append(value)
++                        delta["content"] = "".join(visible)
 +                        if str(delta["content"]).strip():
 +                            holder["client_content_seen"] = True
 +                    calls = delta.get("tool_calls") or []
@@ -2687,6 +2800,9 @@
 +                    held_finish = finish
 +                cleaned = clean_chunk(json.dumps(frame, ensure_ascii=False))
 +                if cleaned:
++                    content_prefix_len += sum(
++                        len((c.get("delta") or {}).get("content") or "")
++                        for c in frame.get("choices") or [])
 +                    yield ("data: " + cleaned + "\n\n").encode("utf-8")
 +            tail = scrubber.feed(final=True)
 +            if tail and not holder.get("incomplete_reason"):
@@ -2694,12 +2810,34 @@
 +                yield _chat_frame(holder, {"reasoning_content": tail})
 +            if not saw_finish and not holder.get("incomplete_reason"):
 +                holder["incomplete_reason"] = "upstream_truncated"
++            if holder.get("incomplete_reason"):
++                # A parser may already have consumed a call and its closers.
++                # On failure restore the entire unissued original suffix, in
++                # order, as text. Never turn it into an executable tool call.
++                value = "".join(text)[content_prefix_len:]
++                if value:
++                    holder["client_content_seen"] = True
++                    content_prefix_len += len(value)
++                    yield _chat_frame(holder, {"content": value})
 +            if not holder.get("incomplete_reason"):
 +                # Never synthesize tools after a guard error or truncated
 +                # transport; native calls take precedence over printed copies.
-+                actions = leak_filter._release_all() if native_tools else leak_filter.flush()
-+                if not native_tools and all_printed_calls:
-+                    actions = [("calls", all_printed_calls)] + actions
++                # A filtered/unknown terminal must keep the printed markup as
++                # text: only a normal stop, tool_calls or length may execute it.
++                recoverable = finish in ("stop", "tool_calls", "length")
++                actions = ([("text", "".join(text)[content_prefix_len:])]
++                           if native_tools or not recoverable else
++                           printed_tail_text + leak_filter.flush())
++                if not native_tools and recoverable:
++                    terminal_actions = []
++                    for kind, value in actions:
++                        if kind == "calls":
++                            pending_printed_calls.extend(value)
++                        else:
++                            terminal_actions.append((kind, value))
++                    actions = terminal_actions
++                    if pending_printed_calls:
++                        actions.append(("calls", pending_printed_calls))
 +                for kind, value in actions:
 +                    if kind == "text" and value:
 +                        holder["client_content_seen"] = True
@@ -2892,7 +3030,7 @@
  
  
  def reasoning_only_response(result):
-@@ -16834,20 +18847,34 @@
+@@ -16834,20 +18901,34 @@
  
  
  def stream_responses_events(upstream, model, holder):
@@ -2932,7 +3070,7 @@
      custom_names = set(holder.get("custom_names") or ())
      ns_map = holder.get("namespace_map") or {}
      # 由反代代跑的网路工具呼叫，收集起来不转发给客户端
-@@ -16866,13 +18893,13 @@
+@@ -16866,13 +18947,13 @@
              "status": status,
              "model": model,
              "output": [o for o in outputs if o],
@@ -2948,7 +3086,7 @@
          if u:
              obj["usage"] = u
          if ns_map:
-@@ -16881,6 +18908,13 @@
+@@ -16881,6 +18962,13 @@
      def ev(etype, payload):
          nonlocal seq
          seq += 1
@@ -2962,7 +3100,7 @@
          data = {"type": etype, "sequence_number": seq}
          data.update(payload)
          body = json.dumps(data, ensure_ascii=False)
-@@ -16902,14 +18936,66 @@
+@@ -16902,14 +18990,66 @@
      def msg_item(status):
          item = {"id": msg_id, "type": "message", "status": status,
                  "role": "assistant", "content": []}
@@ -3032,7 +3170,7 @@
          if reason_index is not None and outputs[reason_index] is None:
              full_r = "".join(reason_parts)
              yield ev("response.reasoning_summary_text.done", {
-@@ -16923,7 +19009,8 @@
+@@ -16923,7 +19063,8 @@
              yield ev("response.output_item.done",
                       {"output_index": reason_index, "item": outputs[reason_index]})
          # 1. Emit completed structured tool calls
@@ -3042,7 +3180,7 @@
              entry = tool_calls_map[idx]
              if entry.get("custom"):
                  yield ev("response.custom_tool_call_input.done", {
-@@ -16967,11 +19054,13 @@
+@@ -16967,11 +19108,13 @@
              if calls_rem:
                  dsml_tool_calls.extend(calls_rem)
              if clean_rem:
@@ -3057,7 +3195,7 @@
                      })
              text_buffer = ""
          # 2. DSML fallback: emit buffered/parsed DSML tool calls if no structured tool_calls were emitted
-@@ -16982,7 +19071,9 @@
+@@ -16982,7 +19125,9 @@
              if extra_calls:
                  dsml_calls = extra_calls
                  full_text = clean_text
@@ -3068,7 +3206,7 @@
              for dc in dsml_calls:
                  # DSML 形状的网路工具呼叫一样由反代执行
                  if _own_web_tools and wb_webtools.is_internal_tool(dc.get("name")):
-@@ -17025,7 +19116,9 @@
+@@ -17025,7 +19170,9 @@
          # 这一轮如果有代跑的网路工具呼叫，就把完成事件留给下一轮，
          # 否则客户端会以为整个回合已经结束（旧版是在回合用尽时补一个合成的
          # resp_wrapup，那才是 issue #43 真正的病灶）。
@@ -3079,7 +3217,7 @@
              holder.setdefault("internal_calls", []).extend(
                  {"name": v["name"], "arguments": v["arguments"]}
                  for v in _internal_calls.values()
-@@ -17069,38 +19162,38 @@
+@@ -17069,38 +19216,38 @@
                  yield ev("response.web_search_call.completed", {
                      "output_index": _ws_idx, "item_id": _ws_id,
                  })
@@ -3142,7 +3280,7 @@
                  usage = {
                      "prompt_tokens": prompt_est,
                      "completion_tokens": comp,
-@@ -17109,48 +19202,71 @@
+@@ -17109,48 +19256,71 @@
                      "prompt_tokens_details": {"cached_tokens": 0},
                  }
                  holder["usage"] = usage
@@ -3241,7 +3379,7 @@
          u = chunk.get("usage")
          if u:
              if usage is None or (u.get("total_tokens") or 0) >= (usage.get("total_tokens") or 0):
-@@ -17160,26 +19276,17 @@
+@@ -17160,26 +19330,17 @@
              delta = choice.get("delta") or {}
              piece = delta.get("reasoning_content")
              if piece:
@@ -3273,7 +3411,7 @@
                  # web_search / web_fetch 由反代执行，不转发给客户端
                  if idx in _internal_calls or (
                          _own_web_tools and fn_name
-@@ -17248,31 +19355,8 @@
+@@ -17248,31 +19409,8 @@
                              })
              piece = delta.get("content")
              if piece:
@@ -3307,7 +3445,7 @@
                  # DSML tool call buffering: do not stream raw DSML tags to client
                  text_buffer += piece
                  while text_buffer:
-@@ -17281,7 +19365,7 @@
+@@ -17281,7 +19419,7 @@
                          text_parts.append(text_buffer)
                          yield ev("response.output_text.delta", {
                              "item_id": msg_id, "output_index": msg_index,
@@ -3316,7 +3454,7 @@
                          })
                          text_buffer = ""
                          break
-@@ -17292,7 +19376,7 @@
+@@ -17292,7 +19430,7 @@
                              text_parts.append(lead)
                              yield ev("response.output_text.delta", {
                                  "item_id": msg_id, "output_index": msg_index,
@@ -3325,7 +3463,7 @@
                              })
                          calls_found, _ = parse_dsml_tool_calls(m.group(0))
                          if calls_found:
-@@ -17306,7 +19390,7 @@
+@@ -17306,7 +19444,7 @@
                          text_parts.append(lead)
                          yield ev("response.output_text.delta", {
                              "item_id": msg_id, "output_index": msg_index,
@@ -3334,7 +3472,7 @@
                          })
                          text_buffer = text_buffer[idx:]
                          break
-@@ -17318,19 +19402,31 @@
+@@ -17318,19 +19456,31 @@
                              text_parts.append(lead)
                              yield ev("response.output_text.delta", {
                                  "item_id": msg_id, "output_index": msg_index,
@@ -3368,7 +3506,7 @@
      # Truncated streams (max_tokens, dropped connection) can leave tool-call
      # arguments as half-written JSON. Do not close those calls out as
      # completed: drop them before finalize so the client never receives a
-@@ -17902,7 +19998,7 @@
+@@ -17902,7 +20052,7 @@
          configured - both are real, and the usage log keeps them apart from
          rows written before the key field existed.
          """
@@ -3377,7 +3515,7 @@
      def _cross_realm_error(self, model, realm):
          """Explain a model/exit mismatch instead of letting upstream reject it.
          Sending gpt-6-astra to the domestic exit (or deepseek-v4-pro to the
-@@ -18103,6 +20199,23 @@
+@@ -18103,6 +20253,23 @@
              return self._get_console_state()
          if path == "/health":
              return self._get_health()
@@ -3401,7 +3539,7 @@
          if path == "/realm":
              return self._get_realm()
          if path == "/v1/balance-summary":
-@@ -18185,9 +20298,7 @@
+@@ -18185,9 +20352,7 @@
          return self._json(200, info)
  
      def _get_console_state(self):
@@ -3412,7 +3550,7 @@
  
      def _route_console_toggle(self):
          # 按钮请求均携带 `{}` body 但不解析：必须把残留字节读掉，否则同一条
-@@ -18196,6 +20307,7 @@
+@@ -18196,6 +20361,7 @@
          # Expect: 100-continue，否则排空会等待一个永远不会发出的 body。
          self._handle_expect_continue()
          self._discard_body()
@@ -3420,7 +3558,7 @@
          # 兼容旧面板：新面板直接 window.open，不再请求这里。
          return self._json(200, {"ok": True, "mode": "web",
                                  "url": "/dashboard?tab=logs", "visible": False})
-@@ -18205,6 +20317,9 @@
+@@ -18205,6 +20371,9 @@
          # keep-alive 连接上的下一个请求（连点触发 501）。
          self._handle_expect_continue()
          self._discard_body()
@@ -3430,7 +3568,7 @@
          # 回响应、延迟退出：0.4s 让 _json 的 body 先 flush 到 socket；端口
          # 随进程释放，下次启动走原来的启动脚本。
          def _bye():
-@@ -20734,6 +22849,9 @@
+@@ -20734,6 +22903,9 @@
          })
  
      def _handle_responses(self, payload):
@@ -3440,7 +3578,7 @@
          """Serve /v1/responses by translating to chat completions upstream."""
          # The gateway is stateless: it keeps no store of previous responses,
          # so it cannot replay a prior turn. Silently ignoring the field would
-@@ -20787,9 +22905,9 @@
+@@ -20787,9 +22959,9 @@
              key_blocked = self._key_model_error(chat_req.get("model"))
              if key_blocked:
                  return self._error(400, key_blocked, "invalid_request_error")
@@ -3453,7 +3591,7 @@
          except PinnedAccountError as exc:
              record_error(model, exc.status, exc.message[:200],
                           elapsed_ms=int((time.time() - t_start) * 1000),
-@@ -20849,7 +22967,22 @@
+@@ -20849,7 +23021,22 @@
                  base_body=chat_req, session_key=session_key, realm=req_realm,
                  effort=effort)
  
@@ -3476,7 +3614,7 @@
          self.send_response(200)
          self.send_header("Content-Type", "text/event-stream; charset=utf-8")
          self.send_header("Cache-Control", "no-cache")
-@@ -20863,27 +22996,54 @@
+@@ -20863,27 +23050,54 @@
                    "base_body": base_body,
                    "base_messages": (base_body or {}).get("messages"),
                    "session_key": session_key,
@@ -3536,7 +3674,7 @@
                  rounds += 1
                  # 用完就收回工具，让模型自己收尾；这里不合成任何事件。
                  give_up = rounds > wb_webtools.MAX_WEB_ROUNDS
-@@ -20892,48 +23052,55 @@
+@@ -20892,48 +23106,55 @@
                  except Exception:
                      pass
                  upstream, account, _ = follow_up_with_tool_results(
@@ -3624,7 +3762,7 @@
      def _responses_nonstream_response(self, upstream, model, custom_names, request_meta, fp, account, t_start, namespace_map=None, base_body=None, session_key=None, realm=None, effort=None):
          # 跟串流那条一样：客户端宣告 web_search / web_fetch 时由反代代跑。
          # 中间那几轮对客户端不可见，最后才组成一个 Responses 物件回传；不这样
-@@ -20941,50 +23108,63 @@
+@@ -20941,50 +23162,63 @@
          # 一句 unsupported call。
          sources = []
          rounds = 0
@@ -3712,7 +3850,7 @@
          return self._json(200, result)
  
      def _handle_messages_count_tokens(self, payload):
-@@ -21002,6 +23182,9 @@
+@@ -21002,6 +23236,9 @@
          return self._json(200, {"input_tokens": _anthropic_estimate_chat_tokens(chat)})
  
      def _handle_messages(self, payload):
@@ -3722,7 +3860,7 @@
          """Serve an Anthropic Messages request through the chat pipeline."""
          try:
              chat_req = messages_to_chat(payload)
-@@ -21031,9 +23214,9 @@
+@@ -21031,9 +23268,9 @@
              key_blocked = self._key_model_error(chat_req.get("model"))
              if key_blocked:
                  return self._anthropic_error(400, key_blocked, "invalid_request_error")
@@ -3735,7 +3873,7 @@
          except PinnedAccountError as exc:
              record_error(model, exc.status, exc.message[:200],
                           elapsed_ms=int((time.time() - t_start) * 1000),
-@@ -21100,20 +23283,35 @@
+@@ -21100,20 +23337,35 @@
                  base_body=chat_req, session_key=session_key,
                  realm=req_realm, effort=effort)
  
@@ -3775,7 +3913,7 @@
              return self._anthropic_error(502, "upstream stream error: %s" % exc)
          finally:
              try:
-@@ -21121,6 +23319,7 @@
+@@ -21121,6 +23373,7 @@
              except Exception:
                  pass
  
@@ -3783,7 +3921,7 @@
      def _messages_stream_response(self, upstream, model, fp, account, t_start,
                                    base_body=None, session_key=None, realm=None,
                                    session_meta=None, effort=None):
-@@ -21131,17 +23330,27 @@
+@@ -21131,17 +23384,27 @@
          if cors_origin_allowed(self.path):
              self.send_header("Access-Control-Allow-Origin", "*")
          self.end_headers()
@@ -3817,7 +3955,7 @@
                           ttft_ms=first_ms,
                           gen_ms=(wall - first_ms) if first_ms is not None else None,
                           fp=fp, account=account.uid,
-@@ -21149,12 +23358,14 @@
+@@ -21149,12 +23412,14 @@
              return
          except Exception as exc:
              wall = int((time.time() - t_start) * 1000)
@@ -3835,7 +3973,7 @@
                  self.wfile.write(anthropic_sse_frame("error", {
                      "error": {"type": "api_error", "message": str(exc)}}))
                  self.wfile.flush()
-@@ -21162,12 +23373,22 @@
+@@ -21162,12 +23427,22 @@
                  pass
              return
          finally:
@@ -3859,7 +3997,7 @@
                       ttft_ms=first_ms,
                       gen_ms=(wall - first_ms) if first_ms is not None else None,
                       fp=fp, account=account.uid, key=self._key_id(), effort=effort)
-@@ -21308,13 +23529,19 @@
+@@ -21308,13 +23583,19 @@
          payload = self._payload_or_error(allow_list=(path == "/accounts/import"))
          if payload is None:
              return
@@ -3881,7 +4019,7 @@
              message = ("Rate limit reached: API key '%s' reached its concurrency limit (%d in flight); retry shortly"
                         % (key_name, max_key_conc))
              record_error(payload.get("model") or "unknown", 429, message,
-@@ -21348,11 +23575,18 @@
+@@ -21348,11 +23629,18 @@
              finally:
                  _chat_slots.release()
          finally:
@@ -3901,7 +4039,7 @@
          if BLOCK_BACKGROUND_REQUESTS:
              reason = background_request_reason(payload)
              if reason:
-@@ -21397,10 +23631,10 @@
+@@ -21397,10 +23685,10 @@
              key_blocked = self._key_model_error(payload.get("model"))
              if key_blocked:
                  return self._error(400, key_blocked, "invalid_request_error")
@@ -3916,7 +4054,7 @@
          except PinnedAccountError as exc:
              record_error(model, exc.status, exc.message[:200],
                           elapsed_ms=int((time.time() - t_start) * 1000),
-@@ -21460,238 +23694,161 @@
+@@ -21460,238 +23748,161 @@
                      **key_open_kwargs(getattr(self, "key_entry", None)))
              if want_stream:
                  return self._chat_stream_response(
@@ -4285,7 +4423,7 @@
                       elapsed_ms=wall, ttft_ms=first_ms,
                       gen_ms=(wall - first_ms) if first_ms is not None else None,
                       fp=fp, account=account.uid, key=self._key_id(), effort=effort)
-@@ -22079,6 +24236,7 @@
+@@ -22079,6 +24290,7 @@
          print("          %s" % launcher_hint(args.port + 1))
          print()
          raise SystemExit(1)

@@ -27,7 +27,8 @@ PATCH_SUITES = ('test_installer.py', 'test_wb_stall.py', 'test_mixed_stall_proxy
                 '_test_401_refresh.py', '_test_deepseek_multimodal.py', '_test_deepseek_reasoning_compaction.py',
                 'test_integration.py', 'test_loop_recovery.py', 'test_reasoning_recovery.py',
                 'test_nullable_buffer.py', 'test_metadata_buffer.py', 'test_compact_buffer.py',
-                'test_extra_fields.py', 'test_sse_framing.py', 'test_buffer_records.py', 'test_recovery_hint.py', 'test_v176.py', 'test_v178.py', 'test_v1710.py', 'test_stream_contract.py', 'test_v1712.py', 'test_v1715.py')
+                'test_extra_fields.py', 'test_sse_framing.py', 'test_buffer_records.py', 'test_recovery_hint.py', 'test_v176.py', 'test_v178.py', 'test_v1710.py', 'test_stream_contract.py', 'test_v1712.py', 'test_v1715.py',
+                'test_printed_call_boundaries.py')
 
 
 def main():

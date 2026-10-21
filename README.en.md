@@ -2,9 +2,9 @@
 
 [中文](README.md) · [Install and rollback](docs/INSTALL.md) · [Patch scope](docs/PATCHES.md) · [Verification](docs/VERIFICATION.md)
 
-Release **v1.7.24-ops.20261021.1**, targeting upstream **v1.7.24** at `205d8b622d626f4b09da7b57efb3259f91403f4e`. Python 3.11+ is required.
+Release **v1.7.24-ops.20261021.2**, targeting upstream **v1.7.24** at `205d8b622d626f4b09da7b57efb3259f91403f4e`. Python 3.11+ is required.
 
-[Download ZIP and SHA256SUMS.txt](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.7.24-ops.20261021.1): `workbuddy2api-hub-v1.7.24-wushuai0802-ops-20261021-r1.zip`.
+[Download ZIP and SHA256SUMS.txt](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.7.24-ops.20261021.2): `workbuddy2api-hub-v1.7.24-wushuai0802-ops-20261021-r2.zip`.
 
 This version migrates our retained safeguards onto the exact v1.7.24 source and retains our mixed-stall guard, reasoning-alias budget, tool-image compatibility, refusals, bounded refresh, and pooled connection ownership. It preserves upstream additional-tools/custom namespace support, Anthropic thinking, DSML fallback, block I/O and shared TLS contexts.
 
@@ -19,6 +19,8 @@ The supplied v1.7.5-r2 reference informed quote-span masking and detached valida
 Absorbs official v1.7.19–v1.7.24: account `tasksEnabled` separated from API `enabled`, printed tool calls released as soon as their closing tag arrives (#549), a mid-stream failure now emits a real error frame instead of a fake `[DONE]` (#549), hourly web-activity windows with concurrency/dedupe/linear backoff, per-key account binding, models-only-available filtering, reasoning-effort mapping, global prompt text, site content versions, dashboard heatmap refresh, Windows portable one-click update, and an external update executor. Official features come from the v1.7.24 baseline; this patch only keeps our own safeguards.
 
 Three stream-boundary fixes are carried by this patch, each with regression coverage. A closing tag split across deltas (`</invoke>` then `</calls>`) is swallowed instead of leaking a literal `DSML` fragment as prose. Printed calls are released only after a normal terminal, so a truncated or failed transport never synthesizes a side-effecting tool. The content loop detector now reads a DSML-scrubbed view, so a repeated value inside a tool parameter is not treated as repeated prose.
+
+r2 hardens that work in three further ways. Closing tags are now removed only when they belong to a parsed call, so an unrelated `</calls>` or `</invoke>` in prose or a code block survives verbatim. A turn that fails or disconnects returns the withheld original text, in order, instead of dropping it or executing it. A `content_filter` or other non-normal terminal keeps printed markup as text and never turns it into an executable call. Six regressions cover these boundaries.
 
 ## v1.7.17 changes
 
@@ -53,7 +55,7 @@ Anthropic Messages and count_tokens endpoints now return400 by default, after au
 Prepare separate clean pinned sources, keep the previous deployment and backups, and verify first:
 
 ~~~sh
-git clone --depth 1 --branch v1.7.24-ops.20261021.1 https://github.com/wushuai0802/workbuddy2api-hub-ops-patch.git ops-patch-v1724
+git clone --depth 1 --branch v1.7.24-ops.20261021.2 https://github.com/wushuai0802/workbuddy2api-hub-ops-patch.git ops-patch-v1724
 git clone --depth 1 --branch v1.7.24 https://github.com/ardeyouxipianyi/workbuddy2api-hub.git workbuddy2api-hub-v1.7.24
 git -C workbuddy2api-hub-v1.7.24 rev-parse HEAD
 python3 -B ops-patch-v1724/apply.py --verify-package

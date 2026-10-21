@@ -1,10 +1,10 @@
 # 安装、升级与回滚
 
-本包 `v1.7.24-ops.20261021.1` 只支持官方v1.7.24 / `205d8b622d626f4b09da7b57efb3259f91403f4e`。以下路径、Compose参数和服务名需要按自己的部署填写。Python3.11+，Linux/macOS示例；Windows使用同一安装器参数及完整路径。
+本包 `v1.7.24-ops.20261021.2` 只支持官方v1.7.24 / `205d8b622d626f4b09da7b57efb3259f91403f4e`。以下路径、Compose参数和服务名需要按自己的部署填写。Python3.11+，Linux/macOS示例；Windows使用同一安装器参数及完整路径。
 
 ## 核对输入
 
-[Release下载](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.7.24-ops.20261021.1)含ZIP和SHA256SUMS.txt；ZIP顶层目录为`workbuddy2api-hub-ops-patch/`。
+[Release下载](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.7.24-ops.20261021.2)含ZIP和SHA256SUMS.txt；ZIP顶层目录为`workbuddy2api-hub-ops-patch/`。
 
 ~~~sh
 sha256sum -c SHA256SUMS.txt
@@ -28,7 +28,7 @@ SHA必须匹配上述完整提交；预检通过只代表可以应用，尚未�
 COMPOSE_FILE='/absolute/path/to/your/compose.yaml'
 SERVICE='your-hub-service'
 BACKUP_DIR='/absolute/path/to/private-backups/pre-ops-20261021'
-PATCHED_IMAGE='your-local/workbuddy2api-hub:1.7.24-ops.20261021.1'
+PATCHED_IMAGE='your-local/workbuddy2api-hub:1.7.24-ops.20261021.2'
 ROLLBACK_IMAGE='your-local/workbuddy2api-hub:rollback-before-ops-20261021'
 docker compose -f "$COMPOSE_FILE" config --services
 CONTAINER_ID=$(docker compose -f "$COMPOSE_FILE" ps -q "$SERVICE")

@@ -48,7 +48,7 @@
     },
     "wb_proxy.py": {
       "base_sha256": "3ff89170a483f2aace1093c9e4f67c84e02440c6637bacfc8f60fdd7d497f3eb",
-      "patched_sha256": "2b48549e9a1989fb15ba827f7d23756af7aca50433d03558548d2f41d538623c"
+      "patched_sha256": "ee70637c34829933b2181d88b269b4102eb862310842a8dc289673795693c7b5"
     },
     "wb_stall.py": {
       "base_sha256": null,
@@ -63,9 +63,9 @@
       "patched_sha256": "f3a09e170e9393592179638378781b72be075fb6c9596e847db01e4e11b154da"
     }
   },
-  "patch_id": "v1.7.24-ops.20261021.1",
+  "patch_id": "v1.7.24-ops.20261021.2",
   "patch_source": "wushuai0802/workbuddy2api-hub-ops-patch",
-  "payload_fingerprint": "dad150e413aabdde3768c9b9d7a1b5e6022dbdf039e1f7dc28ed49da30b39156",
+  "payload_fingerprint": "8e4ef8398813aea2a9cbf09324284bfed7ee928127218e3d43100eed3a05ef3d",
   "python_requires": ">=3.11",
   "repository": "https://github.com/ardeyouxipianyi/workbuddy2api-hub",
   "schema_version": 1,

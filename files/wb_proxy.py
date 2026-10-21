@@ -11519,7 +11519,7 @@ def _patch_payload_fingerprint():
     return hashlib.sha256(''.join(records).encode('ascii')).hexdigest()
 
 _OPS_PATCH_FINGERPRINT = _patch_payload_fingerprint()
-_OPS_PATCH_ID = "v1.7.24-ops.20261021.1"
+_OPS_PATCH_ID = "v1.7.24-ops.20261021.2"
 _OBSERVATION_STORE = None
 _OBSERVATION_STORE_LOCK = threading.Lock()
 
@@ -13906,22 +13906,13 @@ def _split_at_call_close(text):
     """Split `text` after the first complete call-closing tag.
 
     Returns (prefix, rest), or (None, text) while no call has closed yet.
-    Consecutive closing tags belong to the same block and are swallowed
-    with it, so a trailing </calls> cannot later leak out as prose.
+    Only the parsed call itself is consumed here; an enclosing wrapper may
+    arrive later, so the filter tracks that ownership across chunks.
     """
     for match in LEAK_CLOSE_RE.finditer(text):
         if match.group("name").lower() not in CALL_CLOSE_TAGS:
             continue
-        end = match.end()
-        while True:
-            nxt = end
-            while nxt < len(text) and text[nxt] in " \t\r\n":
-                nxt += 1
-            closing = LEAK_CLOSE_RE.match(text, nxt)
-            if not closing:
-                break
-            end = closing.end()
-        return text[:end], text[end:]
+        return text[:match.end()], text[match.end():]
     return None, text
 
 
@@ -13931,29 +13922,6 @@ def _first_call_candidate(text):
         if ch == "<" and could_be_leaked_call(text[idx:]):
             return idx
     return None
-
-
-def _strip_orphan_closes(text):
-    """Drop leading call-closing tags that belong to an already-released call.
-
-    A call's closing tags can arrive in a later delta than the one that
-    completed it (`</invoke>` then `</calls>`). Those leftovers are markup, not
-    prose; releasing them would put a literal `DSML` fragment on the wire.
-    """
-    if not text:
-        return text
-    pos = 0
-    while pos < len(text):
-        match = LEAK_CLOSE_RE.match(text, pos)
-        if not match:
-            break
-        name = match.group("name").lower()
-        if name not in CALL_CLOSE_TAGS and "dsml" not in match.group(0).lower():
-            break
-        pos = match.end()
-        while pos < len(text) and text[pos] in " \t\r\n":
-            pos += 1
-    return text[pos:] if pos else text
 
 
 class LeakedToolCallStreamFilter:
@@ -13971,52 +13939,104 @@ class LeakedToolCallStreamFilter:
 
     def __init__(self):
         self.buf = ""
+        self._owned_closers = []
 
     def _release_all(self):
         out, self.buf = self.buf, ""
+        self._owned_closers = []
         return [("text", out)] if out else []
+
+    def _consume_owned_closers(self):
+        """Remove only an enclosing tag proven to belong to a parsed call.
+
+        The upstream model sometimes closes the parsed leaf first and sends
+        the surrounding `invoke`/`calls` terminators in a later delta. Those
+        tags are markup, but an isolated `</calls>` in ordinary prose is not.
+        Ownership is therefore recorded per parsed call instead of matching
+        every leading closing tag.
+        """
+        while self._owned_closers:
+            start = len(self.buf) - len(self.buf.lstrip())
+            tail = self.buf[start:]
+            if not tail:
+                return False
+            match = re.compile(
+                r"<\s*/\s*(?:[|\uff5c]+\s*DSML\s*[|\uff5c]+\s*)?"
+                r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*>", re.I).match(self.buf, start)
+            if match and match.group("name").lower() == self._owned_closers[-1]:
+                # Preserve surrounding whitespace; delete the owned tag only.
+                self.buf = self.buf[:start] + self.buf[match.end():]
+                self._owned_closers.pop()
+                continue
+            if tail.startswith("<") and ">" not in tail and len(tail) < 256:
+                return False
+            if re.match(r"<\s*(?:[|\uff5c]+\s*DSML\s*[|\uff5c]+\s*)?"
+                        r"(?:invoke|run_code|run_shell)\b", tail, re.I):
+                return True
+            self._owned_closers = []
+        return True
+
+    def _remember_wrapper(self, prefix):
+        normalized = _normalize_dsml_bars(prefix)
+        stack = []
+        for tag in LEAK_TAG_RE.finditer(normalized):
+            name = tag.group("name").lower()
+            if name not in CALL_CLOSE_TAGS | LEAK_PARAM_TAGS:
+                continue
+            if re.match(r"<\s*/", tag.group()):
+                if stack and stack[-1] == name:
+                    stack.pop()
+            else:
+                stack.append(name)
+        self._owned_closers.extend(stack)
+        # Known hybrid encoding: a plain run_code/run_shell leaf uses DSML
+        # parameter terminators and emits the surrounding invoke/parameter/
+        # invoke/calls terminators afterwards. Arm only for that parsed shape;
+        # an isolated end tag, or a normal XML call, gains no cleanup budget.
+        if (not stack and re.match(r"<\s*(?:run_code|run_shell)\b", normalized, re.I)
+                and re.search(r"<\s*/\s*\|DSML\|\s*parameter\s*>", normalized, re.I)):
+            self._owned_closers.extend(("calls", "invoke", "parameter", "invoke"))
 
     def feed(self, text):
         if not text:
             return []
-        self.buf = _strip_orphan_closes(self.buf + text)
-        idx = _first_call_candidate(self.buf)
-        if idx is None:
-            return self._release_all()
+        self.buf += text
         out = []
-        if idx:
-            out.append(("text", self.buf[:idx]))
-            self.buf = self.buf[idx:]
-        if len(self.buf) > self.MAX_HOLD:
-            out.extend(self._release_all())
-            return out
-        prefix, rest = _split_at_call_close(self.buf)
-        if prefix is None:
-            return out
-        calls, clean = parse_leaked_tool_calls(prefix)
-        if not calls:
-            calls, clean = parse_dsml_tool_calls(prefix)
-        if not calls:
-            return out
-        self.buf = rest
-        out.append(("calls", calls))
-        if clean:
-            out.append(("text", clean))
-        # Prose after the call can go out at once; only text that may still
-        # grow into another call stays buffered.
-        self.buf = _strip_orphan_closes(self.buf)
-        idx = _first_call_candidate(self.buf)
-        if idx is None:
-            out.extend(self._release_all())
-        elif idx:
-            out.append(("text", self.buf[:idx]))
-            self.buf = self.buf[idx:]
+        while self.buf:
+            if len(self.buf) > self.MAX_HOLD:
+                out.extend(self._release_all())
+                return out
+            if not self._consume_owned_closers():
+                return out
+            idx = _first_call_candidate(self.buf)
+            if idx is None:
+                out.extend(self._release_all())
+                return out
+            if idx:
+                out.append(("text", self.buf[:idx]))
+                self.buf = self.buf[idx:]
+            prefix, rest = _split_at_call_close(self.buf)
+            if prefix is None:
+                return out
+            calls, clean = parse_leaked_tool_calls(prefix)
+            if not calls:
+                calls, clean = parse_dsml_tool_calls(prefix)
+            if not calls:
+                return out
+            self._remember_wrapper(prefix)
+            self.buf = rest
+            out.append(("calls", calls))
+            if clean:
+                out.append(("text", clean))
         return out
 
     def flush(self):
+        self._consume_owned_closers()
         if not self.buf:
+            self._owned_closers = []
             return []
-        buf, self.buf = _strip_orphan_closes(self.buf), ""
+        buf, self.buf = self.buf, ""
+        self._owned_closers = []
         if not buf:
             return []
         calls, clean = parse_leaked_tool_calls(buf)
@@ -18554,8 +18574,10 @@ def _stream_chat_events(upstream, model, holder):
             holder["usage_recorded"] = False
             scrubber = ReasoningScrubber()
             leak_filter = LeakedToolCallStreamFilter()
-            all_printed_calls = []
             native_tools = False
+            pending_printed_calls = []
+            printed_tail_text = []
+            content_prefix_len = 0
             held_finish, finish, saw_finish = None, "stop", False
             for raw in current:
                 line = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
@@ -18598,14 +18620,21 @@ def _stream_chat_events(upstream, model, holder):
                     if delta.get("content"):
                         text.append(delta["content"])
                         actions = leak_filter.feed(delta["content"])
-                        delta["content"] = "".join(value for kind, value in actions if kind == "text")
+                        visible = []
                         for kind, value in actions:
                             if kind == "calls":
                                 # Hold the recovered call until the turn ends
                                 # normally: a stream that dies before its
                                 # terminal must not run a side effect the model
                                 # never finished delivering.
-                                all_printed_calls.extend(value)
+                                pending_printed_calls.extend(value)
+                            elif pending_printed_calls:
+                                # Text after a withheld call keeps its original
+                                # order and is only released with that call.
+                                printed_tail_text.append((kind, value))
+                            else:
+                                visible.append(value)
+                        delta["content"] = "".join(visible)
                         if str(delta["content"]).strip():
                             holder["client_content_seen"] = True
                     calls = delta.get("tool_calls") or []
@@ -18628,6 +18657,9 @@ def _stream_chat_events(upstream, model, holder):
                     held_finish = finish
                 cleaned = clean_chunk(json.dumps(frame, ensure_ascii=False))
                 if cleaned:
+                    content_prefix_len += sum(
+                        len((c.get("delta") or {}).get("content") or "")
+                        for c in frame.get("choices") or [])
                     yield ("data: " + cleaned + "\n\n").encode("utf-8")
             tail = scrubber.feed(final=True)
             if tail and not holder.get("incomplete_reason"):
@@ -18635,12 +18667,34 @@ def _stream_chat_events(upstream, model, holder):
                 yield _chat_frame(holder, {"reasoning_content": tail})
             if not saw_finish and not holder.get("incomplete_reason"):
                 holder["incomplete_reason"] = "upstream_truncated"
+            if holder.get("incomplete_reason"):
+                # A parser may already have consumed a call and its closers.
+                # On failure restore the entire unissued original suffix, in
+                # order, as text. Never turn it into an executable tool call.
+                value = "".join(text)[content_prefix_len:]
+                if value:
+                    holder["client_content_seen"] = True
+                    content_prefix_len += len(value)
+                    yield _chat_frame(holder, {"content": value})
             if not holder.get("incomplete_reason"):
                 # Never synthesize tools after a guard error or truncated
                 # transport; native calls take precedence over printed copies.
-                actions = leak_filter._release_all() if native_tools else leak_filter.flush()
-                if not native_tools and all_printed_calls:
-                    actions = [("calls", all_printed_calls)] + actions
+                # A filtered/unknown terminal must keep the printed markup as
+                # text: only a normal stop, tool_calls or length may execute it.
+                recoverable = finish in ("stop", "tool_calls", "length")
+                actions = ([("text", "".join(text)[content_prefix_len:])]
+                           if native_tools or not recoverable else
+                           printed_tail_text + leak_filter.flush())
+                if not native_tools and recoverable:
+                    terminal_actions = []
+                    for kind, value in actions:
+                        if kind == "calls":
+                            pending_printed_calls.extend(value)
+                        else:
+                            terminal_actions.append((kind, value))
+                    actions = terminal_actions
+                    if pending_printed_calls:
+                        actions.append(("calls", pending_printed_calls))
                 for kind, value in actions:
                     if kind == "text" and value:
                         holder["client_content_seen"] = True
