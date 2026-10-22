@@ -64,13 +64,6 @@ def prepare_test_fixtures(gateway):
                            '(sys.builtin_module_names + ("math", "zlib")))')
     assets.write_text(source, encoding='utf8')
 
-    # The harness checks parent-before-child relationships, but its synthetic
-    # /proc fixture assumes numeric sibling order. tmpfs readdir is unordered.
-    contracts = gateway / 'tests/_test_run_all_contracts.py'
-    source = contracts.read_text(encoding='utf8')
-    old = 'names = [n for n in os.listdir(proc_root) if n.isdigit()]'
-    assert source.count(old) == 1, 'pinned process-table fixture changed'
-    contracts.write_text(source.replace(old, 'names = sorted(n for n in os.listdir(proc_root) if n.isdigit())'), encoding='utf8')
     # These suites rebind the parent's hardcoded ACCOUNTS_DIR, but the inline
     # child runner omits that rebind. Keep both pricing/realm fingerprints on
     # their synthetic directory rather than the gateway's empty default dir.

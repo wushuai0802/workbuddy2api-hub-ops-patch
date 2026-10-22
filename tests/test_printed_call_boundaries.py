@@ -105,7 +105,8 @@ class PrintedCallBoundaryTests(unittest.TestCase):
             Stream(rows, error=http.client.IncompleteRead(b"")))
         self.assertIsInstance(error, http.client.IncompleteRead)
         self.assertFalse(any(calls for _text, calls in frames))
-        self.assertIn("BEFORE ", "".join(text for text, _calls in frames))
+        self.assertEqual("".join(text for text, _calls in frames),
+                         "BEFORE " + CALL + " AFTER")
 
     def test_native_tools_take_precedence_over_printed_copy(self):
         rows = [chunk({"content": CALL}),

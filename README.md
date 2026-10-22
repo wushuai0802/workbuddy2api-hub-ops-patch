@@ -4,17 +4,17 @@
 
 为 WorkBuddy 网关提供 DeepSeek 复读保护、受限认证续期、推理历史与工具图片兼容，以及流式协议边界修复。基于[官方项目](https://github.com/ardeyouxipianyi/workbuddy2api-hub)，可检查、可回退，遵循 MIT。
 
-当前版本：**v1.7.24-ops.20261021.2**。
+当前版本：**v1.7.28-ops.20261022.1**。
 
-本次重基官方v1.7.24，吸收账号任务开关（`tasksEnabled`）与API启停分离、打印式工具调用即时释放、断流不再伪造`[DONE]`、网页活跃按小时排程/并发/去重/线性退避、Key账号绑定、仅可用模型过滤、思考档位映射、全局提示词正文编辑、站点内容版本、看板热力图刷新及Windows便携版一键更新。保留原有防复读、一次安全恢复、401期限、用量结算、连接池与工具兼容保护。
+本次重基官方v1.7.28，纳入账号ID脱敏、会员档位、账号排序、11-128身份句兼容和更新回退修复；跨出口回退保留官方默认关闭。补齐旧r2断流原文保留与过滤结束不转工具的遗漏，并冻结恢复请求的账号白名单。
 
-- [下载 ZIP 与 SHA256SUMS.txt](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.7.24-ops.20261021.2)
-- 文件名：`workbuddy2api-hub-v1.7.24-wushuai0802-ops-20261021-r2.zip`
-- 仅支持官方 **v1.7.24**，提交 `205d8b622d626f4b09da7b57efb3259f91403f4e`。
+- [下载 ZIP 与 SHA256SUMS.txt](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.7.28-ops.20261022.1)
+- 文件名：`workbuddy2api-hub-v1.7.28-wushuai0802-ops-20261022-r1.zip`
+- 仅支持官方 **v1.7.28**，提交 `c22109def2793234236e0c3ab1d2c11f02a05c39`。
 - Python 3.11+。Docker 用户从打过完整补丁的准确源码重新构建镜像。
 - 安装器替换四个上游Python模块（proxy、accounts、webtools、upstream_pool）及看板，新增 ops、stall、observe 三个模块；不操作账号、Key、配置、历史或部署。
 
-本版把已有补丁迁移到官方 v1.7.24，保留混合复读、推理别名预算、工具图片、拒答、用量结算和连接所有权保护。来源与许可见 [NOTICE.md](NOTICE.md) 和 [THIRD-PARTY-zh.md](THIRD-PARTY-zh.md)。
+本版把已有补丁迁移到官方 v1.7.28，保留混合复读、推理别名预算、工具图片、拒答、用量结算和连接所有权保护。来源与许可见 [NOTICE.md](NOTICE.md) 和 [THIRD-PARTY-zh.md](THIRD-PARTY-zh.md)。
 
 本次修复响应头预算被固定45秒覆盖的问题：响应头尊重面板设置，返回后才开始45秒首帧预算；初始连接、恢复和网页工具后续生成共享原300秒总期限。纯推理循环的唯一一次安全恢复默认加入简短接续提示，可用 `WB_OPS_LOOP_RECOVERY_HINT=0` 关闭提示。连续已知失败前缀最多清理16段/65536字符，保留未知后缀和客户端原历史。持久观察新增匿名规则、窗口计数和恢复停止原因；检测阈值保持。
 
@@ -32,7 +32,17 @@
 
 上游 v1.7.4/1.7.5 增加默认关闭的SQLite日志及保留限制、checkpoint修复、凭据手动导入、新主题/统计面板、每日及手动模型目录刷新、来源标记和原始目录归档。模型目录/倍率现在优先使用实际API结果，显示可能变化；这些原生功能不代替防复读。SQLite日志是否启用沿用用户设置，公开包不自动开启。
 
-## v1.7.24 升级与修复
+## v1.7.28 升级与修复
+
+官方v1.7.25～v1.7.28修复账号ID被手机号规则改写后面板报`no such account`、账号排序与冷却提示错位、会员档位来源以及DSH身份句兼容；新增更新备份/回退和默认关闭的国际版到国内版回退。官方能力直接由基线提供；删除了已由v1.7.27覆盖的`/proc`测试顺序兼容改写。
+
+本补丁接入新版回退时共享原期限、保留Key白名单和实际出口；定址请求、显式出口、风控暂停或已过期的期限不允许跨出口重试。恢复闭包冻结白名单，旧适配器缺少账号限制参数时明确拒绝，不能静默去掉限制。
+
+复核纠正了旧r2覆盖不足：当底层读取抛异常时，原测试只断言前缀，暂存的打印调用文本仍丢失；现在Chat、Responses、Messages流会先交还完整已收文字再报告原错误。`content_filter`保护扩展到全部六条协议路径，保留原文和不完整状态、不生成工具。新增7项专项用例并加强既有断流断言，旧实现能复现失败。
+
+国际版档位查询原生每天最多增加一次计费摘要读取，不发生成请求。官方更新执行器不保证保留第三方补丁，NAS仍使用本补丁镜像部署流程。现有模型、账号、配置、数据和防复读阈值保持。
+
+## v1.7.24 升级与修复（历史）
 
 v1.7.19～v1.7.24 的官方能力由新基线直接提供：账号 `tasksEnabled` 与 API `enabled` 分离（可只停签到/成长任务而保留取号）、打印式工具调用在识别到闭合标签后即时释放（#549）、流中途失败改发标准 error 帧而不再伪造 `[DONE]`（#549）、网页活跃按小时排程与并发/去重/线性退避、API Key 绑定账号、仅返回可用模型、思考档位映射、全局提示词正文、站点内容版本、看板热力图刷新、Windows 便携版一键更新与外部执行器更新通道。
 
@@ -42,7 +52,7 @@ v1.7.19～v1.7.24 的官方能力由新基线直接提供：账号 `tasksEnabled
 - 打印式调用改为在正常终止后才放行：完整调用仍会被解析，但传输被截断或上游报错时不合成工具，避免半截回合触发副作用工具。
 - 正文通道的复读检测改用去除 DSML 区域的视图：工具参数里重复的字符串属于数据，不再被当成正文复读。
 
-r2 在此基础上补强了三点：闭合标签改为按“已解析调用”的归属栈清理，普通正文里的 `</calls>`、`</invoke>` 或代码块示例不再被误删；失败或断流时把已扣住但未发出的原文按原顺序还给客户端，既不丢失也不执行；`content_filter` 等非正常终止只保留打印文本，绝不转成可执行工具。新增 6 项回归覆盖这三类边界。
+r2增加闭合标签归属栈及6项回归。其断流与过滤覆盖不完整，完整修复及验证范围见上面的v1.7.28说明。
 
 本补丁继续保留：DeepSeek混合/引用复读检测与一次安全恢复、推理别名预算、工具图片兼容、六路径失败终态与原始用量快照、401有界刷新与绝对期限、连接池租约、首帧包装、SSE分块和安装/回滚保护。官方已发布的功能由v1.7.24基线提供，不在补丁里重复实现。
 
@@ -91,11 +101,11 @@ Chat流式响应在客户端尚未收到任何字节时，对同一账号、同�
 先保存旧镜像、源码、配置和数据，在新目录获取两个准确版本：
 
 ~~~sh
-git clone --depth 1 --branch v1.7.24-ops.20261021.2 https://github.com/wushuai0802/workbuddy2api-hub-ops-patch.git ops-patch-v1724
-git clone --depth 1 --branch v1.7.24 https://github.com/ardeyouxipianyi/workbuddy2api-hub.git workbuddy2api-hub-v1.7.24
-git -C workbuddy2api-hub-v1.7.24 rev-parse HEAD
-python3 -B ops-patch-v1724/apply.py --verify-package
-python3 -B ops-patch-v1724/apply.py --target ./workbuddy2api-hub-v1.7.24 --dry-run
+git clone --depth 1 --branch v1.7.28-ops.20261022.1 https://github.com/wushuai0802/workbuddy2api-hub-ops-patch.git ops-patch-v1728
+git clone --depth 1 --branch v1.7.28 https://github.com/ardeyouxipianyi/workbuddy2api-hub.git workbuddy2api-hub-v1.7.28
+git -C workbuddy2api-hub-v1.7.28 rev-parse HEAD
+python3 -B ops-patch-v1728/apply.py --verify-package
+python3 -B ops-patch-v1728/apply.py --target ./workbuddy2api-hub-v1.7.28 --dry-run
 ~~~
 
 提交必须匹配上面的完整SHA。预检通过后，按[安装指南](docs/INSTALL.md)暂停唯一目标服务、应用完整补丁、构建并定向切换。已有旧补丁（包括v1.7.3）不能直接叠加；不要删除状态/备份绕过检查。旧Release/tag继续保留。
@@ -104,7 +114,7 @@ python3 -B ops-patch-v1724/apply.py --target ./workbuddy2api-hub-v1.7.24 --dry-r
 
 ## 验证与边界
 
-离线runner包含190组Python回归（37组补丁及全部153组官方Python），另有52组官方Node及2组补丁Node；新增打印调用拆分闭合、截断不合成工具、DSML参数不参与正文复读、闭合标签归属与失败原文保留等回归；面板使用官方Node合成DOM测试。CI检查Linux3.11/3.12与Windows3.11，实际结果见[验证记录](docs/VERIFICATION.md)。
+离线runner包含194组Python回归（38组补丁及全部156组官方Python），另有53组官方Node及2组补丁Node。新增跨出口/白名单/期限、六路径过滤与三路径读取异常回归；面板使用官方Node合成DOM测试。CI检查Linux3.11/3.12与Windows3.11，实际结果见[验证记录](docs/VERIFICATION.md)。
 
 测试使用合成账号、空数据和本机HTTP，不含真实会话。检测仍以单次生成为范围，尚无通用跨工具回合业务进展熔断。健康、模块指纹或离线测试不等于真实长会话输出质量验收。
 

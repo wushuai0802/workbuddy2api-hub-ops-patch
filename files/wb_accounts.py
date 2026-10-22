@@ -476,6 +476,11 @@ RESOURCE_PAID_PACKAGES_PATH = "/billing/meter/get-user-resource-paid-packages"
 CHECKIN_STATUS_PATH = "/v2/billing/meter/checkin-activity-status"
 ENTERPRISE_USAGE_PATH = "/billing/meter/get-enterprise-user-usage"
 
+#: 账号档位（付费 / 免费）的有效期。计费摘要里的 `IsPaidUser` 只在真正
+#: 刷新时读一次，一天一次足够：档位不会分钟级变化，而这是国际版唯一一次
+#: 额外的计费请求（国内版的详细积分路径本来就在打同一个接口，见 #505）。
+TIER_TTL_SECONDS = 24 * 3600.0
+
 LOGIN_PENDING = 11217
 LOGIN_TTL_SECONDS = 600
 USER_AGENT = REALM_CONFIGS['intl']['chat_ua']
@@ -486,6 +491,34 @@ DEFAULT_UA_VERSION = wb_identity.DESKTOP_VERSION_INTL
 
 def get_realm_config(realm):
     return REALM_CONFIGS.get(realm) or REALM_CONFIGS["intl"]
+
+
+def tier_from_summary(data):
+    """Normalise one billing-summary payload into a tier record (#505).
+
+    Both realms answer the same fields on `/billing/meter/get-user-resource-summary`;
+    intl omits `ProTrialStatus`. `SubscriptionPackageCode` was empty on every
+    account measured, so the package *name* is what gets displayed.
+
+    Returns None when the payload carries no `IsPaidUser`: "no answer" must
+    never be recorded as "free".
+    """
+    if not isinstance(data, dict) or "IsPaidUser" not in data:
+        return None
+    try:
+        trial = int(data.get("ProTrialStatus") or 0)
+    except (TypeError, ValueError):
+        trial = 0
+    return {
+        "paid": bool(data.get("IsPaidUser")),
+        "package": str(data.get("SubscriptionPackageName") or ""),
+        "package_code": str(data.get("SubscriptionPackageCode") or ""),
+        "protected_price": bool(data.get("IsProtectedPriceUser")),
+        "trial": trial,
+        "checked_at": time.time(),
+        "source": "billing",
+    }
+
 
 def _jwt_claims(token):
     try:
@@ -931,13 +964,20 @@ class Account(object):
         # 最近一次软限流（429）的时刻：两条软限流阶梯用同一个时间窗。
         self.last_soft_at = 0.0
         self.credits = data.get("credits") or None
-        # Whether the upstream says this is a paid (PRO) account. Read from the
-        # last credits snapshot the account saved; an account that never
-        # refreshed credits is treated as free, so a PRO-only model is not
-        # handed to it before the tier is known.
-        self.is_paid_user = bool(
-            self.credits.get("is_paid_user")
-            if isinstance(self.credits, dict) else False)
+        # 账号档位，来自计费摘要（#505）：{paid, package, package_code,
+        # protected_price, trial, checked_at, source}。企业账号不写——上游对
+        # 它们的 IsPaidUser 语义还没验证过（见 _fetch_tier_summary）。
+        self.tier = data.get("tier") if isinstance(data.get("tier"), dict) else None
+        # Whether the upstream says this is a paid (PRO) account. The billing
+        # summary is authoritative once it has answered (#505); otherwise fall
+        # back to the last credits snapshot. An account that never refreshed is
+        # treated as free, so a PRO-only model is not handed to it before the
+        # tier is known.
+        paid = self.tier_paid()
+        if paid is None:
+            paid = bool(self.credits.get("is_paid_user")
+                        if isinstance(self.credits, dict) else False)
+        self.is_paid_user = paid
         self.last_checkin = data.get("lastCheckin") or None
         self.last_daily_chat = data.get("lastDailyChat") or None
         # 国内版每天一次的「对话活跃上报」（点亮官方 growth 连登/热力墙）上次
@@ -1059,6 +1099,10 @@ class Account(object):
             # normalise_import_row() 不认这个字段，换机器不会把账号一起停掉。
             "restrictedUntil": self.restricted_until,
             "credits": self.credits,
+            # 账号档位（#505）。持久化：一天一次的计费摘要结论，重启后仍然
+            # 有效；导入到另一台机器时按 VOLATILE_FIELDS 丢掉，不把上一台
+            # 机器的档位当成结论。
+            "tier": self.tier,
             "lastCheckin": self.last_checkin,
             "lastDailyChat": self.last_daily_chat,
             "lastActivityReport": self.last_activity_report,
@@ -1144,6 +1188,8 @@ class Account(object):
             "addedAt": self.added_at,
             "file": os.path.basename(self.path) if self.path else None,
             "credits": self.credits,
+            # 账号档位（#505）：面板在「会员类型」旁显示包名与读取时刻。
+            "tier": self.tier,
             "reserveCredits": int(self.reserve_credits or 0),
             "reserveBlocked": self.reserve_blocked(),
             "dailyTokenLimit": int(self.daily_token_limit or 0),
@@ -2478,6 +2524,16 @@ class Account(object):
         if s_res.get("code") != 0:
             return {"ok": False, "error": s_res.get("msg") or f"code {s_res.get('code')}"}
         s_data = s_res.get("data") or {}
+        # 同一份摘要顺带给出档位（#505）：国内版的详细积分路径本来就在打这个
+        # 接口，不额外花请求。企业账号跳过——上游对它们的 IsPaidUser 语义
+        # 还没验证过，写进去会把「企业额度」覆盖成「免费」。
+        if not self.is_enterprise():
+            tier = tier_from_summary(s_data)
+            if tier:
+                self.apply_tier(tier)
+        paid_flag = self.tier_paid()
+        if paid_flag is None:
+            paid_flag = bool(s_data.get("IsPaidUser"))
         summary_pkgs = s_data.get("Packages") or []
         pkg_codes = [p.get("PackageCode") for p in summary_pkgs if p.get("PackageCode")]
 
@@ -2579,7 +2635,7 @@ class Account(object):
             "size": tot_size,
             "used_percent": f"{(tot_used / tot_size * 100):.1f}%" if tot_size > 0 else "0.0%",
             "remain_percent": f"{(tot_remain / tot_size * 100):.1f}%" if tot_size > 0 else "100.0%",
-            "is_paid_user": bool(s_data.get("IsPaidUser")),
+            "is_paid_user": paid_flag,
             "checkin": checkin_info,
             "earliest_expiring": earliest_expiring,
             "packages": packages,
@@ -2662,7 +2718,9 @@ class Account(object):
             "size": tot_size,
             "used_percent": f"{(tot_used / tot_size * 100):.1f}%" if tot_size > 0 else "0.0%",
             "remain_percent": f"{(tot_remain / tot_size * 100):.1f}%" if tot_size > 0 else "100.0%",
-            "is_paid_user": False,
+            # 国际版的 `get-user-resource` 没有档位字段，这里用计费摘要的结论
+            # （#505）；摘要还没跑过时按免费处理，与旧行为一致。
+            "is_paid_user": bool(self.tier_paid()),
             "checkin": getattr(self, "credits", {}).get("checkin") if isinstance(getattr(self, "credits", None), dict) else None,
             "earliest_expiring": earliest_expiring,
             "packages": packages,
@@ -2768,6 +2826,92 @@ class Account(object):
             self.save(os.path.dirname(self.path))
         return {"ok": True, "credits": self.credits}
 
+    def tier_paid(self):
+        """True / False once the billing summary has answered, None when unknown.
+
+        `None` is not "free": a summary that failed or never ran must not
+        quietly withhold PRO models from a paying account. Callers fall back to
+        the last credits snapshot instead (see __init__).
+        """
+        tier = self.tier if isinstance(self.tier, dict) else None
+        if not tier:
+            return None
+        paid = tier.get("paid")
+        return bool(paid) if paid is not None else None
+
+    def tier_is_fresh(self, now=None):
+        """True while the stored tier is inside TIER_TTL_SECONDS."""
+        tier = self.tier if isinstance(self.tier, dict) else None
+        if not tier or tier.get("paid") is None:
+            return False
+        try:
+            checked = float(tier.get("checked_at") or 0)
+        except (TypeError, ValueError):
+            return False
+        now = time.time() if now is None else now
+        # `0 < delta` 会漏掉「刚读完」那一瞬间：同一毫秒内 delta 就是 0.0，
+        # 于是第二次调用又去请求一次。只要求时间戳有效、且没超过 TTL。
+        return checked > 0 and (now - checked) < TIER_TTL_SECONDS
+
+    def apply_tier(self, info):
+        """Record a billing-summary answer and mirror it into the credits view.
+
+        The panel reads `credits.is_paid_user`; keeping the two in step is what
+        makes the badge and the model gate agree. A partial answer is ignored
+        rather than stored, so a malformed response cannot erase a known tier.
+        """
+        if not isinstance(info, dict) or info.get("paid") is None:
+            return False
+        self.tier = dict(info)
+        self.is_paid_user = bool(info.get("paid"))
+        if isinstance(self.credits, dict):
+            self.credits["is_paid_user"] = self.is_paid_user
+        return True
+
+    def _fetch_tier_summary(self, headers=None):
+        """Read the tier from the billing summary (#505).
+
+        CN's detailed balance path already calls this endpoint, so it hands the
+        parsed answer to apply_tier() instead of paying for a second request.
+        The intl balance path (`get-user-resource`) carries neither
+        `IsPaidUser` nor `SubscriptionPackageName`, so there this is one extra
+        request per TIER_TTL_SECONDS.
+
+        Returns None on any failure. "No answer" must never become a tier
+        conclusion: 401 / non-zero code / network error leaves the previous
+        value and its timestamp exactly as they were.
+        """
+        if self.is_enterprise():
+            # 企业空间的 IsPaidUser 语义未验证（#505），先按「未知」处理。
+            return None
+        if self.restricted_until > time.time():
+            # 账号正被上游限制：这时再打计费接口只会继续喂风控。
+            return None
+        if headers is None:
+            headers = self.headers(purpose="billing")
+        headers = dict(headers)
+        headers["X-Client-Platform"] = "web"
+        url = get_realm_config(self.realm)["billing_upstream"] + RESOURCE_SUMMARY_PATH
+        try:
+            res = http_json(url, data=b"{}", method="POST", headers=headers,
+                            timeout=15, proxy=self.proxy)
+        except Exception:
+            return None
+        if not isinstance(res, dict) or res.get("code") != 0:
+            return None
+        return tier_from_summary(res.get("data"))
+
+    def _refresh_tier_if_due(self):
+        """Refresh the tier at most once per TIER_TTL_SECONDS."""
+        if self.tier_is_fresh():
+            return None
+        info = self._fetch_tier_summary()
+        if not info or not self.apply_tier(info):
+            return None
+        if self.path and os.path.exists(os.path.dirname(self.path)):
+            self.save(os.path.dirname(self.path))
+        return info
+
     def fetch_credits(self):
         """Refresh the balance; a refresh that shows credits again also lifts
         an early 402 park (revive_balance_cooldown).
@@ -2781,6 +2925,12 @@ class Account(object):
             res = self._fetch_credits_raw()
             if isinstance(res, dict) and res.get("ok"):
                 self.revive_balance_cooldown()
+                # 档位跟着积分刷新走（#505）：同一处节流、同一个后台循环，
+                # 不新开定时器；失败不写结论，旧值和时间戳原样保留。
+                tier = self._refresh_tier_if_due()
+                if tier:
+                    res = dict(res)
+                    res["tier"] = tier
             return res
 
     def _fetch_credits_raw(self):
@@ -3326,6 +3476,12 @@ class CreditsRefresher(threading.Thread):
             self.last_error = None
             self.log("已刷新 %s 的积分（%s）"
                      % (account.uid[:8], (account.credits or {}).get("updated_iso")))
+            tier = result.get("tier") if isinstance(result, dict) else None
+            if isinstance(tier, dict):
+                self.log("已读取 %s 的账号档位：%s%s"
+                         % (account.uid[:8],
+                            "付费" if tier.get("paid") else "免费",
+                            (" · " + tier["package"]) if tier.get("package") else ""))
             return account.uid
 
     def run(self):
@@ -3441,6 +3597,9 @@ class AccountPool(object):
                 account.path = existing.path
                 if not account.credits and existing.credits:
                     account.credits = existing.credits
+                # 重新登录 / 扫码换 token 不该丢掉已经读到的档位（#505）。
+                if not account.tier and existing.tier:
+                    account.apply_tier(existing.tier)
                 if not account.last_checkin and existing.last_checkin:
                     account.last_checkin = existing.last_checkin
                 if not account.last_daily_chat and existing.last_daily_chat:
@@ -4505,7 +4664,7 @@ EXPORT_VERSION = 1
 # exported for inspection but never trusted on import: a stale cooldown or a
 # disabled flag from another machine would silently cripple the target pool.
 VOLATILE_FIELDS = ("cooldownUntil", "lastError", "credits", "lastCheckin",
-                   "lastDailyChat", "lastActivityReport", "modelCaps")
+                   "lastDailyChat", "lastActivityReport", "modelCaps", "tier")
 
 # The subset of VOLATILE_FIELDS that must not round-trip through the local
 # credential file at all: they are not trusted on load and not written by save(),

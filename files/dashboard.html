@@ -1918,6 +1918,12 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     '最快到期优先': 'Expiring soonest first',
     '出口级瞬时失败退避': 'Egress-level transient backoff',
     '启用出口级退避': 'Enable egress backoff',
+    '跨出口回退（国际版 → 国内版）': 'Cross-exit fallback (Global → China)',
+    '启用跨出口回退': 'Enable cross-exit fallback',
+    '已启用：国际版限流时回退到国内版': 'Enabled: retrying on the China exit when Global is throttled',
+    '已关闭跨出口回退': 'Cross-exit fallback disabled',
+    '国际版出口把某个模型限流、当日额度用满、或整池都在冷却时，允许改用同名的国内版出口再试一次。默认关闭——两个出口是两套上游、两套额度、两套积分口径，混用会让「这个 Key 只花国际额度」的部署失去保证。': 'When the Global exit throttles a model, spends its daily quota, or has every account cooling down, the same model may be retried on the China exit. Off by default: the two exits are separate upstreams with separate quota and separate credit ledgers, so mixing them breaks deployments that spend Global credit only.',
+    '只对两个出口都提供的模型生效（gpt-* / gemini-* 等国际版独占模型不回退）；方向是单向的，国内版永远不会回退到国际版。出口被显式指定的请求（Key 绑定了出口，或客户端带了 X-Realm / ?realm=）不受影响。': 'Only for models both exits serve (Global-only models such as gpt-* / gemini-* never fall back). The direction is one-way: the China exit never falls back to Global. Requests that name an exit explicitly (a key bound to one, or an X-Realm / ?realm= header) are left alone.',
     '传输类失败与 502/503/504 改记在「出口」而不是账号上：同一个出口的账号共用一个计数器，退避是秒级（1 秒起、翻倍、封顶 15 秒、带抖动），任一次成功即清零；账号级熔断（30 分钟起、翻倍到 6 小时）不再被一次链路抖动触发。500 与 401/403/429 仍走原路径。默认关闭。': 'Transport failures and 502/503/504 are charged to the egress instead of the account: accounts sharing one egress share one counter, the backoff is seconds-scale (1s, doubling, capped at 15s, jittered) and any success clears it; the account breaker (30 minutes, doubling to 6h) is no longer tripped by a link hiccup. 500 and 401/403/429 keep their old paths. Off by default.',
     '已启用：出口级瞬时失败退避': 'On: egress-level transient backoff',
     '已关闭出口级瞬时失败退避': 'Egress-level transient backoff off',
@@ -2015,6 +2021,36 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     '上次检查': 'Last check',
     '每天自动检查更新': 'Check for updates daily',
     '默认关闭。开启后最多每 24 小时自动检查一次；安装仍需手动点击。': 'Off by default. When enabled, it checks at most once every 24 hours; installation still requires a manual click.',
+    '保留历史版本备份': 'Keep backups of previous versions',
+    '不保留（无法回退）': 'Keep none (no rollback)',
+    '1 份': '1 backup',
+    '2 份': '2 backups',
+    '3 份': '3 backups',
+    '每次更新成功后把旧版本的程序文件留在 updates/ 下，回退用它恢复，不会下载旧安装包。0 = 与旧版本行为一致（不留备份，回退不可用）；1 = 只能回退一步；每份约 5 MB。': 'After each successful update the previous version\'s program files are kept under updates/ and a rollback restores them without downloading an old package. 0 = same as before (no backup, no rollback); 1 = one step back; each copy is roughly 5 MB.',
+    '已保存：不再保留历史版本备份（回退不可用）': 'Saved: no backups are kept (rollback unavailable)',
+    '版本回退': 'Version rollback',
+    '回退用更新时留在本机的备份恢复旧版本，不下载安装包；回退会重启网关，账号与用量数据会保留。': 'A rollback restores the copy an earlier update left on this machine, without downloading a package; it briefly restarts the gateway and preserves accounts and usage data.',
+    '刷新备份列表': 'Refresh backups',
+    '备份版本': 'Backup version',
+    '备份时间': 'Created',
+    '文件数': 'Files',
+    '完整性': 'Integrity',
+    '操作': 'Action',
+    '完整': 'Complete',
+    '不完整': 'Incomplete',
+    '回退到此版本': 'Roll back to this version',
+    '没有可回退的本地备份': 'No local backup to roll back to',
+    '正在读取备份…': 'Reading backups…',
+    '读取备份列表失败': 'Could not read the backup list',
+    '这就是当前版本': 'This is the running version',
+    '当前设置为不保留备份，回退不可用': 'Backups are disabled in the settings, so rollback is unavailable',
+    '更新成功后才会留下可回退的备份': 'A backup becomes available after the first successful update',
+    '正在回退到历史版本': 'Rolling back',
+    '回退完成': 'Rollback completed',
+    '回退会重启网关并中断当前请求，账号与用量数据不受影响。继续吗？': 'Rolling back restarts the gateway and interrupts in-flight requests; accounts and usage data are not affected. Continue?',
+    '已开始回退': 'Rollback started',
+    '回退仍在执行，请稍后刷新': 'Rollback is still running; refresh again in a moment',
+    '请选择要回退的版本': 'Choose a version to roll back to',
     '已是最新': 'Up to date',
     '发现新版本': 'Update available',
     '检查失败': 'Check failed',
@@ -3053,6 +3089,12 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     "剩余用量优先调度": "剩餘用量優先排程",
     "出口级瞬时失败退避": "出口級瞬時失敗退避",
     "启用出口级退避": "啟用出口級退避",
+    "跨出口回退（国际版 → 国内版）": "跨出口回退（國際版 → 國內版）",
+    "启用跨出口回退": "啟用跨出口回退",
+    "已启用：国际版限流时回退到国内版": "已啟用：國際版限流時回退到國內版",
+    "已关闭跨出口回退": "已關閉跨出口回退",
+    "国际版出口把某个模型限流、当日额度用满、或整池都在冷却时，允许改用同名的国内版出口再试一次。默认关闭——两个出口是两套上游、两套额度、两套积分口径，混用会让「这个 Key 只花国际额度」的部署失去保证。": "國際版出口把某個模型限流、當日額度用滿、或整池都在冷卻時，允許改用同名的國內版出口再試一次。預設關閉——兩個出口是兩套上游、兩套額度、兩套積分口徑，混用會讓「這個 Key 只花國際額度」的部署失去保證。",
+    "只对两个出口都提供的模型生效（gpt-* / gemini-* 等国际版独占模型不回退）；方向是单向的，国内版永远不会回退到国际版。出口被显式指定的请求（Key 绑定了出口，或客户端带了 X-Realm / ?realm=）不受影响。": "只對兩個出口都提供的模型生效（gpt-* / gemini-* 等國際版獨佔模型不回退）；方向是單向的，國內版永遠不會回退到國際版。出口被明確指定的請求（Key 綁定了出口，或客戶端帶了 X-Realm / ?realm=）不受影響。",
     "传输类失败与 502/503/504 改记在「出口」而不是账号上：同一个出口的账号共用一个计数器，退避是秒级（1 秒起、翻倍、封顶 15 秒、带抖动），任一次成功即清零；账号级熔断（30 分钟起、翻倍到 6 小时）不再被一次链路抖动触发。500 与 401/403/429 仍走原路径。默认关闭。": "傳輸類失敗與 502/503/504 改記在「出口」而不是帳號上：同一個出口的帳號共用一個計數器，退避是秒級（1 秒起、翻倍、封頂 15 秒、帶抖動），任一次成功即清零；帳號級熔斷（30 分鐘起、翻倍到 6 小時）不再被一次鏈路抖動觸發。500 與 401/403/429 仍走原路徑。預設關閉。",
     "已启用：出口级瞬时失败退避": "已啟用：出口級瞬時失敗退避",
     "已关闭出口级瞬时失败退避": "已關閉出口級瞬時失敗退避",
@@ -5082,6 +5124,27 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
       <section>
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
           <div>
+            <h2 style="margin:0">跨出口回退（国际版 → 国内版） <em id="setRealmFallbackState"></em></h2>
+            <div style="font-size:12px;color:var(--dim);margin-top:4px">
+              国际版出口把某个模型限流、当日额度用满、或整池都在冷却时，允许改用同名的国内版出口再试一次。默认关闭——两个出口是两套上游、两套额度、两套积分口径，混用会让「这个 Key 只花国际额度」的部署失去保证。
+            </div>
+            <div style="font-size:12px;color:var(--warn);margin-top:4px">
+              只对两个出口都提供的模型生效（gpt-* / gemini-* 等国际版独占模型不回退）；方向是单向的，国内版永远不会回退到国际版。出口被显式指定的请求（Key 绑定了出口，或客户端带了 X-Realm / ?realm=）不受影响。
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+            <label style="display:flex;align-items:center;gap:6px;font-size:13px;min-height:40px">
+              <input id="setRealmFallback" type="checkbox" style="width:16px;height:16px">
+              启用跨出口回退
+            </label>
+            <button onclick="saveRealmFallback(this)">保存</button>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+          <div>
             <h2 style="margin:0">模型额度窗口探针 <em id="setWindowProbeState"></em></h2>
             <div style="font-size:12px;color:var(--dim);margin-top:4px">
               上游的免费额度窗口按「首次请求」起算：某账号在某模型上被限流（429）后，上游会给出一个重置时刻。开启后，网关会在该时刻到点主动补一个最小请求，把新一轮窗口的计时起点钉在重置那一刻——否则要等到下一次真实请求窗口才开始计时，额度白白空转。默认开启。
@@ -5260,6 +5323,45 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
         <div style="margin-top:10px">
           <button onclick="saveUpdateCheckEnabled(this)">保存</button>
         </div>
+        <div style="margin-top:18px;padding-top:14px;border-top:1px solid var(--line)">
+          <div style="font-size:12px;color:var(--dim);margin-bottom:4px">保留历史版本备份</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+            <select id="setKeepBackups"
+                    style="background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 12px;color:var(--fg);font:inherit">
+              <option value="0">不保留（无法回退）</option>
+              <option value="1">1 份</option>
+              <option value="2">2 份</option>
+              <option value="3">3 份</option>
+            </select>
+            <button onclick="saveKeepBackups(this)">保存</button>
+          </div>
+          <div style="font-size:12px;color:var(--dim);margin-top:4px">
+            每次更新成功后把旧版本的程序文件留在 updates/ 下，回退用它恢复，不会下载旧安装包。0 = 与旧版本行为一致（不留备份，回退不可用）；1 = 只能回退一步；每份约 5 MB。
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+          <div>
+            <h2 style="margin:0">版本回退 <em id="setRollbackState"></em></h2>
+            <div style="font-size:12px;color:var(--dim);margin-top:4px">
+              回退用更新时留在本机的备份恢复旧版本，不下载安装包；回退会重启网关，账号与用量数据会保留。
+            </div>
+          </div>
+          <div>
+            <button class="sec" onclick="loadUpdateBackups(true)">刷新备份列表</button>
+          </div>
+        </div>
+        <table>
+          <thead>
+            <tr><th>备份版本</th><th>备份时间</th><th>文件数</th><th>完整性</th><th>操作</th></tr>
+          </thead>
+          <tbody id="setRollbackRows">
+            <tr><td colspan="5" style="color:var(--dim)">正在读取备份…</td></tr>
+          </tbody>
+        </table>
+        <div id="setRollbackHint" style="font-size:12px;color:var(--dim);margin-top:8px"></div>
       </section>
 
       <section>
@@ -7042,7 +7144,16 @@ function applyTableSort(id){
   table.setAttribute('data-sort-id', id);
   const rows = Array.from(tbody.children).filter(r => r.tagName === 'TR');
   const pinN = SORT_PIN_ROWS[id] || 0;
-  const body = rows.slice(pinN);
+  /* 续行（账号表里 cool-row 的冷却 / 达限胶囊）是上一行的附注，不是独立数据行：
+     只排 accountRow 会把胶囊留在原地，排完就是「账号 账号 胶囊 胶囊」——胶囊跟
+     的不是它自己那行账号。按「行 + 它的续行」成组排，整块一起走。 */
+  const isCont = r => !!(r.classList && r.classList.contains('cool-row'));
+  const units = [];
+  for(const r of rows){
+    if(units.length && isCont(r)) units[units.length - 1].extras.push(r);
+    else units.push({row: r, extras: []});
+  }
+  const body = units.slice(pinN).map(u => u.row);
   const ths = Array.from(thead.querySelectorAll('th'));
   const kinds = ths.map((th, i) => colKind(id, i, body, ths.length));
   const st = SORT_STATE[id] || null;
@@ -7086,8 +7197,8 @@ function applyTableSort(id){
   if(!st || !kinds[st.col]) return;
   const kind = kinds[st.col];
   const dir = st.dir === 'asc' ? 1 : -1;
-  const sorted = body
-    .map((r, i) => [cellSortValue(r.children[st.col], kind), i, r])
+  const sorted = units.slice(pinN)
+    .map((u, i) => [cellSortValue(u.row.children[st.col], kind), i, u])
     .sort((a, b) => {
       const av = a[0], bv = b[0];
       if(av == null || bv == null){
@@ -7099,7 +7210,8 @@ function applyTableSort(id){
       return c ? c * dir : a[1] - b[1];   // 同值保持原序，表不会自己抖
     })
     .map(t => t[2]);
-  const ordered = rows.slice(0, pinN).concat(sorted);
+  const ordered = units.slice(0, pinN).concat(sorted)
+    .reduce((acc, u) => acc.concat([u.row], u.extras), []);
   /* 顺序没变就别碰 DOM：每一轮轮询都会走这里，白挪一遍行没有任何收益，只会多触发
      一轮 i18n 的 MutationObserver 重扫。 */
   if(ordered.some((r, i) => rows[i] !== r)){
@@ -9139,6 +9251,10 @@ async function openCreditsDetail(uid, forceRefresh = false){
       tierEl.style.display = "inline-block";
       tierEl.className = acct.credits.is_paid_user ? "badge mini ok" : "badge mini";
       tierEl.textContent = acct.credits.is_paid_user ? "付费用户" : "普通用户";
+      const tier = acct.tier;
+      tierEl.title = (tier && tier.package)
+        ? (tier.package + (tier.checked_at ? " · " + new Date(tier.checked_at * 1000).toLocaleString() : ""))
+        : "";
     } else {
       tierEl.style.display = "none";
     }
@@ -9352,7 +9468,15 @@ function renderCreditsDetail(credits, acct){
       if(c.today_credit) items.push('今日领取: ' + c.today_credit + ' 积分');
     }
     if(credits.is_paid_user !== undefined){
-      items.push('会员类型: ' + (credits.is_paid_user ? '<span class="badge ok mini">付费用户</span>' : '<span class="badge mini">普通/体验用户</span>'));
+      // 档位来自计费摘要（#505）：付费 / 免费之外把包名也带上，方便一眼看出
+      // 池子里哪些号是免费档、结论是什么时候读的。
+      let tierText = credits.is_paid_user ? '<span class="badge ok mini">付费用户</span>' : '<span class="badge mini">普通/体验用户</span>';
+      const tier = acct && acct.tier;
+      if(tier && tier.package){
+        const checked = tier.checked_at ? new Date(tier.checked_at * 1000).toLocaleString() : '';
+        tierText += ' <span class="badge mini" title="计费摘要' + (checked ? ' · ' + checked : '') + '">' + escapeHtml(tier.package) + '</span>';
+      }
+      items.push('会员类型: ' + tierText);
     }
     if(items.length){
       checkinText.innerHTML = items.join(' · ');
@@ -11169,6 +11293,14 @@ async function loadSettings(showToast){
         remainingPriorityState.textContent = remainingPriority ? '(已启用)' : '(未启用)';
         remainingPriorityState.style.color = remainingPriority ? 'var(--accent2)' : 'var(--dim)';
       }
+      const realmFallback = data.realm_fallback_enabled === true;
+      const realmFallbackInput = document.getElementById('setRealmFallback');
+      if(realmFallbackInput) realmFallbackInput.checked = realmFallback;
+      const realmFallbackState = document.getElementById('setRealmFallbackState');
+      if(realmFallbackState){
+        realmFallbackState.textContent = realmFallback ? '(已启用)' : '(未启用)';
+        realmFallbackState.style.color = realmFallback ? 'var(--accent2)' : 'var(--dim)';
+      }
       const windowProbe = data.window_probe !== false;
       const windowProbeInput = document.getElementById('setWindowProbe');
       if(windowProbeInput) windowProbeInput.checked = windowProbe;
@@ -11251,6 +11383,13 @@ async function loadSettings(showToast){
     // 更新状态来自 /updates 而不是 /settings，单独拉一次；它自带兜底，
     // 失败只写在自己的状态行里，不会把上面这些区块一起带走。
     loadUpdateStatus();
+    // 备份份数走 /settings 的既有字段；备份列表与当前版本另有一份只读接口，
+    // 拉不到时只影响「版本回退」卡片，不影响上面的更新卡片。
+    const keepSelect = document.getElementById('setKeepBackups');
+    if(keepSelect){
+      keepSelect.value = String((typeof data.keep_backups === 'number') ? data.keep_backups : 1);
+    }
+    loadUpdateBackups();
       // 用量聚合保留窗口：没改过时后端给的就是内置默认（小时层 48 / 日桶 32），
       // 所以「等于默认」按默认态显示，只有被调过才标出实际值。
       const usageKeep = data.usage || {};
@@ -12313,6 +12452,21 @@ async function saveRemainingPriority(btn){
   }
 }
 
+async function saveRealmFallback(btn){
+  const el = document.getElementById('setRealmFallback');
+  const value = !!(el && el.checked);
+  if(btn) btn.disabled = true;
+  try {
+    await postJSON('/settings/save', {realm_fallback_enabled: value});
+    toast(value ? '已启用：国际版限流时回退到国内版' : '已关闭跨出口回退', 'ok');
+    loadSettings();
+  } catch(e) {
+    toast('保存失败: ' + e.message, 'bad');
+  } finally {
+    if(btn) btn.disabled = false;
+  }
+}
+
 async function saveWindowProbe(btn){
   const el = document.getElementById('setWindowProbe');
   const value = !!(el && el.checked);
@@ -12453,6 +12607,11 @@ function updateStateLabel(data){
   return '尚未检查';
 }
 
+/* 更新/回退进行中的状态：安装按钮与回退按钮共用同一份，避免两处列表漂移。 */
+const INSTALL_BUSY_STATES = ['queued','downloading','verifying','backing_up','stopping',
+  'applying','restoring','restarting','checking','rolling_back'];
+let LAST_INSTALL_STATE = 'idle';
+
 function applyUpdateStatus(data){
   data = data || {};
   const failure = updateCheckFailure(data);
@@ -12472,12 +12631,15 @@ function applyUpdateStatus(data){
   if(err) err.textContent = failure ? ('上次检查失败：' + failure) : '';
   const installation = data.installation || {};
   const installState = String(installation.state || 'idle');
+  LAST_INSTALL_STATE = installState;
   const installLabels = {
     idle: '尚未开始', queued: '等待安装', downloading: '正在下载更新包',
     verifying: '正在校验更新包', backing_up: '正在备份程序文件',
     stopping: '正在停止网关', applying: '正在安装程序',
+    restoring: '正在回退到历史版本',
     restarting: '正在重启网关', checking: '正在检查网关',
-    succeeded: '更新完成', rolling_back: '更新失败，正在回滚',
+    succeeded: '更新完成', restored: '回退完成',
+    rolling_back: '更新失败，正在回滚',
     rolled_back: '更新已回滚', failed: '更新失败', unavailable: '更新服务未安装'
   };
   const installStatus = document.getElementById('setUpdateInstallStatus');
@@ -12491,8 +12653,7 @@ function applyUpdateStatus(data){
   }
   const install = document.getElementById('setUpdateInstallBtn');
   if(install){
-    const busy = ['queued','downloading','verifying','backing_up','stopping',
-      'applying','restarting','checking','rolling_back'].includes(installState);
+    const busy = INSTALL_BUSY_STATES.includes(installState);
     const canInstall = data.install_enabled === true && data.update_available === true
       && !!data.latest_tag && !!data.release_url && !data.checking && !busy
       && installState !== 'unavailable';
@@ -12594,6 +12755,130 @@ async function saveUpdateCheckEnabled(btn){
   } finally {
     if(btn) btn.disabled = false;
   }
+}
+
+/* ---- 版本回退：列出本机保留的备份，回退到其中一版 ---- */
+async function saveKeepBackups(btn){
+  const el = document.getElementById('setKeepBackups');
+  const value = parseInt((el && el.value) || '1', 10);
+  if(btn) btn.disabled = true;
+  try {
+    await postJSON('/settings/save', {keep_backups: value});
+    toast(value === 0 ? '已保存：不再保留历史版本备份（回退不可用）'
+                      : ('已保存：保留 ' + value + ' 份历史版本备份'), 'ok');
+    await loadUpdateBackups();
+  } catch(e) {
+    toast('保存失败: ' + e.message, 'bad');
+  } finally {
+    if(btn) btn.disabled = false;
+  }
+}
+
+function renderRollbackRows(data){
+  data = data || {};
+  const body = document.getElementById('setRollbackRows');
+  const hint = document.getElementById('setRollbackHint');
+  const state = document.getElementById('setRollbackState');
+  const current = String(data.current_version || '');
+  const rows = Array.isArray(data.backups) ? data.backups : [];
+  const keep = (typeof data.keep_backups === 'number') ? data.keep_backups : 1;
+  const enabled = data.rollback_enabled === true;
+  const busy = INSTALL_BUSY_STATES.includes(LAST_INSTALL_STATE);
+  if(state) state.textContent = current ? ('(当前 ' + current + ')') : '';
+  if(body){
+    if(!rows.length){
+      body.innerHTML = '<tr><td colspan="5" style="color:var(--dim)">没有可回退的本地备份</td></tr>';
+    } else {
+      body.innerHTML = rows.map(row => {
+        const version = String(row.version || '');
+        // The onclick argument is built from backend data: keep it to the
+        // characters a version can contain, so an odd backup name cannot break
+        // out of the attribute.
+        const arg = version.replace(/[^0-9.]/g, '');
+        const complete = row.complete === true;
+        const same = !!version && version === current;
+        const reason = !complete ? (row.reason || '备份不完整')
+          : same ? '这就是当前版本'
+          : !enabled ? '更新服务未安装'
+          : busy ? '已有更新任务正在运行' : '';
+        const disabled = !!reason;
+        const integrity = complete ? '完整'
+          : ('<span style="color:var(--warn)">不完整</span>'
+             + (row.reason ? '<div style="font-size:11px;color:var(--dim)">' + esc(row.reason) + '</div>' : ''));
+        return '<tr>'
+          + '<td class="mono">' + esc(version || '-') + '</td>'
+          + '<td class="mono">' + esc(row.created_at || '-') + '</td>'
+          + '<td>' + esc(String(row.files || 0)) + '</td>'
+          + '<td>' + integrity + '</td>'
+          + '<td><button class="sec" ' + (disabled ? 'disabled ' : '')
+          +   'title="' + esc(reason) + '" '
+          +   'onclick="rollbackToVersion(this, \'' + esc(arg) + '\')">回退到此版本</button></td>'
+          + '</tr>';
+      }).join('');
+    }
+  }
+  if(hint){
+    if(keep === 0){
+      hint.textContent = '当前设置为不保留备份，回退不可用';
+    } else if(!rows.length){
+      hint.textContent = '更新成功后才会留下可回退的备份';
+    } else {
+      hint.textContent = '';
+    }
+  }
+}
+
+async function loadUpdateBackups(showToast){
+  const body = document.getElementById('setRollbackRows');
+  try {
+    const data = await getJSON('/updates/backups');
+    renderRollbackRows(data);
+  } catch(e) {
+    // 老版本后端没有这个接口（404），或者读取本身失败：只让这张卡片降级，
+    // 上面的「更新」卡片照旧。
+    if(body) body.innerHTML = '<tr><td colspan="5" style="color:var(--warn)">读取备份列表失败</td></tr>';
+    if(showToast) toast('读取备份列表失败: ' + e.message, 'bad');
+  }
+}
+
+async function rollbackToVersion(btn, version){
+  if(btn) btn.disabled = true;
+  try {
+    if(!confirm('回退到 ' + version + ' 会重启网关并中断当前请求，账号与用量数据不受影响。继续吗？')) return;
+    const accepted = await postJSON('/updates/rollback', {version: version});
+    if(accepted && accepted.ok === false) throw new Error(accepted.msg || '提交回退任务失败');
+    toast('已开始回退到 ' + version, 'ok');
+    await pollUpdateRollback(version);
+  } catch(e) {
+    toast('回退失败: ' + e.message, 'bad');
+  } finally {
+    if(btn) btn.disabled = false;
+    loadUpdateBackups();
+  }
+}
+
+async function pollUpdateRollback(version){
+  for(let i = 0; i < 120; i++){
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    try {
+      const data = await getJSON('/updates');
+      applyUpdateStatus(data);
+      const installation = data.installation || {};
+      const state = String(installation.state || '');
+      if(state === 'restored'){
+        toast('已回退到 ' + version + '，正在刷新页面', 'ok');
+        setTimeout(() => window.location.reload(), 1200);
+        return;
+      }
+      if(state === 'failed' || state === 'rolled_back'){
+        toast('回退失败：' + (installation.message || ''), 'bad');
+        return;
+      }
+    } catch(e) {
+      // 回退过程中网关会短暂停止，这里的读取失败是预期的。
+    }
+  }
+  toast('回退仍在执行，请稍后刷新', 'warn');
 }
 
 /* ---- Model quota scan: watch a chosen set of models on a fixed timer ---- */

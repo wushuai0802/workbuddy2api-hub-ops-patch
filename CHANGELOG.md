@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.7.28-ops.20261022.1 — 2026-10-22
+
+- 重基官方v1.7.28 / `c22109def2793234236e0c3ab1d2c11f02a05c39`，继承ID脱敏、会员档位、账号排序、11-128兼容、备份回退及默认关闭的跨出口回退。移除上游已覆盖的`/proc`测试适配。
+- 修复r2尚未覆盖的读取异常丢失暂存原文，以及部分协议将过滤结果转为打印工具的问题；三条流接口保留完整已收原文，六条协议路径过滤结果不执行工具。强化原断流断言，补充7项专项回归。
+- 跨出口初始请求、同账号首帧重开保留实际出口、白名单和期限；禁止定址/显式出口/风控暂停/期限耗尽时跨出口。恢复白名单冻结，旧适配器不可静默移除账号限制。
+- Restore the historical r1 diff from its immutable release tag; no published tag or asset is rewritten. Runtime safeguards and configuration defaults remain unchanged. Validation inventory: 194 Python and 55 Node suites.
+
 ## v1.7.24-ops.20261021.2 — 2026-10-21
 
 - 吸收外部v1.7.24补丁包中三处更严格的流边界，并补齐回归：闭合标签按“已解析调用”的归属栈清理，普通正文/代码块里的`</calls>`、`</invoke>`不再被误删；失败或断流时把已扣住但未发出的原文按原顺序交还客户端，既不丢失也不执行；`content_filter`等非正常终止只保留打印文本，绝不转成可执行工具。

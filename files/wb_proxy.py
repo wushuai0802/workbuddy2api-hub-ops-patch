@@ -10190,6 +10190,8 @@ def runtime_settings_view():
             wb_settings.remaining_priority_enabled(ACCOUNTS_DIR),
         "egress_backoff_enabled":
             wb_settings.egress_backoff_enabled(ACCOUNTS_DIR),
+        "realm_fallback_enabled":
+            wb_settings.realm_fallback_enabled(ACCOUNTS_DIR),
         "log_db_enabled": wb_settings.log_db_enabled(ACCOUNTS_DIR),
         "log_db_max_rows": wb_settings.log_db_max_rows(ACCOUNTS_DIR),
         "log_db_max_days": wb_settings.log_db_max_days(ACCOUNTS_DIR),
@@ -10199,6 +10201,8 @@ def runtime_settings_view():
         "key_before_hidden": wb_settings.key_before_hidden(ACCOUNTS_DIR),
         "hidden_pages": wb_settings.hidden_pages(ACCOUNTS_DIR),
         "update_check_enabled": wb_settings.update_check_enabled(ACCOUNTS_DIR),
+        "keep_backups": wb_settings.keep_backups(ACCOUNTS_DIR),
+        "keep_backups_max": wb_settings.MAX_KEEP_BACKUPS,
         "upstream": wb_settings.upstream_config(ACCOUNTS_DIR),
         "usage": wb_settings.usage_config(ACCOUNTS_DIR),
         "prompt": wb_settings.prompt_config(ACCOUNTS_DIR),
@@ -10209,7 +10213,7 @@ def runtime_settings_view():
         "accounts_dir": ACCOUNTS_DIR,
         "usage_dir": USAGE_DIR,
         "settings_file": wb_settings.settings_path(ACCOUNTS_DIR),
-        "version": "1.7.24",
+        "version": "1.7.28",
     }
 def current_account():
     """Account used for display purposes (health / usage summaries)."""
@@ -10359,9 +10363,22 @@ _LOG_COUNTER = 0
 # 根本凑不满 11 位，二者的数字边界 (?!\d)/(?<!\d) 依旧成立。
 _PHONE_EXACT = re.compile(r"^1[3-9]\d{9}$")
 _PHONE_SEP = r"[ \t\-.·]?"
+# 文本级还要挡住「标识符里恰好有一段 3-4-4 数字」：#581 的国内号 uid
+# `6ef20bf4-76fa-4085-b179-97517476cc1e` 里的 `179-97517476` 满足 3-4-4 形状，
+# 掩码后 uid 变成 `…b179****7476cc1e`，面板拿这个假 uid 回传，
+# `AccountPool.get()` 永远返回 None → 404 no such account → 前端「操作失败」。
+# 左右都要求不是标识符字符（字母 / 数字 / 下划线），散文里的号码不受影响
+# （中文、空格、标点都是合法边界）。
 _PHONE_IN_TEXT = re.compile(
-    r"(?<!\d)(1[3-9]\d)" + _PHONE_SEP + r"(\d{4})" + _PHONE_SEP + r"(\d{4})(?!\d)"
+    r"(?<![0-9A-Za-z_])(1[3-9]\d)" + _PHONE_SEP + r"(\d{4})" + _PHONE_SEP
+    + r"(\d{4})(?![0-9A-Za-z_])"
 )
+# 键名本身承载标识符：这些值里的数字串不是手机号，一律原样返回。
+# 值级正则（_mask_phone）只看 nickname，不受影响。
+_IDENTITY_KEYS = frozenset((
+    "uid", "account", "accountId", "id", "file", "path", "machineId",
+    "sessionId", "key", "token", "accessToken", "refreshToken",
+))
 
 
 def _mask_phone(value):
@@ -10407,6 +10424,9 @@ def _redact_account_names(obj):
                 nv = _mask_phone(v)
                 if nv is v:
                     nv = _mask_text(v)
+            elif isinstance(v, str) and k in _IDENTITY_KEYS:
+                # 标识符原样：改写 uid 会让面板拿到池子里不存在的 id（#581）。
+                nv = v
             else:
                 nv = _redact_account_names(v)
             if nv is not v:
@@ -11519,7 +11539,7 @@ def _patch_payload_fingerprint():
     return hashlib.sha256(''.join(records).encode('ascii')).hexdigest()
 
 _OPS_PATCH_FINGERPRINT = _patch_payload_fingerprint()
-_OPS_PATCH_ID = "v1.7.24-ops.20261021.2"
+_OPS_PATCH_ID = "v1.7.28-ops.20261022.1"
 _OBSERVATION_STORE = None
 _OBSERVATION_STORE_LOCK = threading.Lock()
 
@@ -12587,7 +12607,8 @@ def _open_with_compat(body, **kwargs):
             return open_upstream(body, **kwargs)
         except TypeError as exc:
             match = re.search(r"unexpected keyword argument '([^']+)'", str(exc))
-            if not match or match.group(1) not in kwargs:
+            if (not match or match.group(1) not in kwargs or
+                    match.group(1) in ('allowed_accounts', 'pin_account')):
                 raise
             kwargs.pop(match.group(1))
     return open_upstream(body, **kwargs)
@@ -12597,6 +12618,7 @@ def _make_retry_call(body, session_key, realm, allowed_accounts=None):
     # The stream may run on a different worker: thread-local route context
     # must not disappear and silently turn /u/<ref>/ into a rotating request.
     pinned = pinned_account()
+    allowed_accounts = frozenset(allowed_accounts) if allowed_accounts is not None else None
     def retry_call(excluded, deadline_at=None, recovery_hint=False):
         if pinned is not None:
             raise PinnedAccountError(503, "pinned account recovery cannot rotate accounts", pinned.uid)
@@ -12621,7 +12643,7 @@ def _make_retry_call(body, session_key, realm, allowed_accounts=None):
 
 
 def _open_first_stream(body, session_key=None, realm=None, prebuilt_body=None,
-                       allowed_accounts=None):
+                       allowed_accounts=None, allow_realm_fallback=False):
     """Separate header and first-frame budgets under one generation deadline."""
     generation_end = _generation_deadline({})
     header_end = _phase_deadline(generation_end, upstream_timeouts()[0])
@@ -12630,18 +12652,17 @@ def _open_first_stream(body, session_key=None, realm=None, prebuilt_body=None,
         options = {'session_key': session_key, 'target_realm': realm, 'deadline_at': header_end,
                    'defer_egress_success': True}
         if allowed_accounts is not None:
-            options['allowed_accounts'] = allowed_accounts
+            options['allowed_accounts'] = frozenset(allowed_accounts)
         if prebuilt_body is not None:
             options['prebuilt_body'] = prebuilt_body
-        upstream, account, effort = open_upstream(body, **options)
+        upstream, account, effort = open_upstream_with_fallback(
+            body, allow_realm_fallback=allow_realm_fallback, **options)
+        options['target_realm'] = getattr(account, 'realm', realm)
 
         def same_account_retry(_excluded, deadline_at=None):
             retry_options = dict(options)
             retry_options['pin_account'] = account
-            # probe_first_frame already enforces its own first-frame deadline;
-            # avoid imposing a second, caller-specific keyword on lightweight
-            # upstream adapters.
-            retry_options.pop('deadline_at', None)
+            retry_options['deadline_at'] = deadline_at
             return _open_with_compat(body, **retry_options)[:2]
 
         same_account_retry._ops_deadline = True
@@ -12811,8 +12832,9 @@ SANITIZE_OMO_JUNIOR_RE = re.compile(
 # 大小写不敏感、连续子串匹配；单独品牌词或改词后放行。这里整句换成中性句，
 # 不依赖具体品牌，也不保留 "powered by / built on" 结构。
 #
-# 只作用于 system / developer 角色（见 sanitize_messages）：user / tool 里的品牌词
-# 是用户数据，改写会让模型看到与磁盘不一致的内容（#537）。
+# 只作用于 system / developer / assistant 角色（见 sanitize_messages）：user / tool
+# 里的品牌词是用户数据，改写会让模型看到与磁盘不一致的内容（#537）。assistant 在
+# 1.7.25 及以前没被覆盖，而同一句放进 assistant 历史会稳定 400（#574）。
 #
 # 1.7.18 及以前只认 "agent powered by" / "assistant built on" 两种动词搭配，而同一类
 # 经纬句还有 "built by"（如 "You are <Product> Agent, built by <Vendor>."）、
@@ -12833,6 +12855,32 @@ SANITIZE_IDENTITY_RE = re.compile(
     r"[^\n]*?(?:\.(?=\s|$)|(?=\n|$))",
     re.IGNORECASE)
 SANITIZE_IDENTITY_REPLACEMENT = "You are a helpful AI assistant."
+# GUI 描述段（#570）：DSH 的系统提示里有一段 GUI 描述，上游按「A 句 + B 句连续出现」
+# 判 11-128。逐段二分实测：指纹是整段，改 A 句、改 B 句、或在两句之间插东西都会失配。
+#
+# 这里选改动最小的一种：只把 A 句尾的语序换一下（`the runtime context names` ->
+# `is named in the runtime context`），一个词都不删——`DeepSeek Harness` 全名保留，
+# 句子意思完全不变。既不碰品牌词，也不像插入不可见字符那样在提示词里留下无法 diff
+# 的痕迹。
+#
+# 只锚定这一句：句子之外的同名品牌、路径、包名都不受影响。
+SANITIZE_DSH_GUI_RE = re.compile(
+    r"(?i)(You are interacting with the user through the "
+    r"DeepSeek[ \t]+Harness[ \t]+Web[ \t]+GUI)"
+    r" whose URL the runtime context names\.")
+SANITIZE_DSH_GUI_REPLACEMENT = r"\1 whose URL is named in the runtime context."
+SANITIZE_DSH_GUI_LOWER = "whose url the runtime context names"
+# 品牌词缩减（#574）：`DeepSeek Harness` 单独出现放行，但它和 GUI 描述句
+# （`this page` / `this GUI` / `this app`）连续出现时命中同一套 11-128 校验。
+# 逐段二分实测：只把品牌缩成 `DeepSeek` 就能通过，句子其余部分不用动；
+# 换成 DSH / the project / AI assistant 也都能过，取语义损失最小的那个。
+#
+# 只匹配散文里的空格 / 制表符形式。`deepseek-harness`、`deepseek_harness`、
+# `/opt/deepseek-harness/app` 这类路径与标识符保持原样（#574 里实测过
+# `[ \t_-]*` 会把它们一起改坏）。
+SANITIZE_BRAND_RE = re.compile(r"DeepSeek[ \t]+Harness", re.IGNORECASE)
+SANITIZE_BRAND_REPLACEMENT = "DeepSeek"
+SANITIZE_BRAND_LOWER = "harness"
 # 指纹判定的字面量快路径（见 has_fingerprint）：原先对每段文本跑两个 (?i) 正则，
 # 4KB 输入实测 319µs，其中正则 137+188µs、几个 `in` 只占 9µs；64KB 文本要
 # 6.2ms，而 sanitize_messages 会给每个文本段都过一遍——build_upstream_body
@@ -12871,6 +12919,14 @@ def has_fingerprint(text, identity=True):
         return True
     if not identity:
         return False
+    # 品牌词缩减：`harness` 是廉价前置筛，真命中交给正则。
+    if (SANITIZE_BRAND_LOWER in low
+            and SANITIZE_BRAND_RE.search(text) is not None):
+        return True
+    # GUI 描述段：先做一次字面量探测，命中才走正则。
+    if (SANITIZE_DSH_GUI_LOWER in low
+            and SANITIZE_DSH_GUI_RE.search(text) is not None):
+        return True
     # 动词短语只是廉价前置筛：真命中与否交给正则判定。这样 "powered by" 出现在
     # 与自我介绍无关的句子（工具/插件的产品描述）时不会走进 sanitize_text 的其余
     # 清洗步骤，也不会白白改写。
@@ -12889,6 +12945,10 @@ def sanitize_text(text, identity=True):
     text = SANITIZE_OMO_JUNIOR_RE.sub("Sisyphus-Junior - Focused executor", text)
     if identity:
         text = SANITIZE_IDENTITY_RE.sub(SANITIZE_IDENTITY_REPLACEMENT, text)
+        # GUI 描述段单独一条规则：锚定整句，只调整句尾语序。
+        text = SANITIZE_DSH_GUI_RE.sub(SANITIZE_DSH_GUI_REPLACEMENT, text)
+        # 品牌词缩减放在最后：GUI 规则还认全名，先让它匹配原文。
+        text = SANITIZE_BRAND_RE.sub(SANITIZE_BRAND_REPLACEMENT, text)
     for old, new in SANITIZE_REWRITES:
         text = text.replace(old, new)
     text = SANITIZE_HDR_RE.sub("", text)
@@ -13085,7 +13145,10 @@ def sanitize_messages(messages):
             item = dict(m)
             preserve_tool_result = (preserve_request_contract_enabled()
                                     and item.get("role") in ("tool", "function"))
-            identity = item.get("role") in ("system", "developer")
+            # assistant 历史里的身份句同样是已确认的指纹（#574：同一句放在
+            # assistant 里 400/400/400，放在 user 里 200/200/200）。user / tool
+            # 仍是用户数据，不改写。
+            identity = item.get("role") in ("system", "developer", "assistant")
             if "content" in item and not preserve_tool_result:
                 item["content"] = sanitize_content(item["content"],
                                                    identity=identity)
@@ -16176,6 +16239,101 @@ def open_upstream(payload, session_key=None, target_realm=None,
                        "expired or parked by the daily token limit%s"
                        % (realm, pool_unavailable_detail(realm, model)))
 
+
+# ---- 跨出口回退：国际版 → 国内版（开关默认关）--------------------------------
+#
+# 两个出口是两套独立的上游（www.workbuddy.ai / copilot.tencent.com）、两套
+# 配额、两套积分。派发路径一直把它们当两个互不相干的池子：realm 在请求入口
+# 定死，AccountPool.pick() 只挑同 realm 的账号，跨 realm 的候选会直接跳过。
+# 这条规则保证了「这个 Key 只花国际额度」这类部署，但代价是——国际版整池被
+# 限流时，明明国内版还有号，请求也只会等 429。
+#
+# 下面这层是那个缺口的兜底，只在运营者显式打开时生效。
+
+def realm_fallback_enabled():
+    """持久化开关，与 remaining_priority_enabled() 同一形状。"""
+    return wb_settings.realm_fallback_enabled(ACCOUNTS_DIR) is True
+
+
+def realm_fallback_target(realm, model, allowed_accounts=None):
+    """回退的目标 realm；返回 "" 表示这次请求不该回退。
+
+    三个条件同时成立：
+      * 当前走的是国际版出口 —— 单向，永不 cn→intl（国内号是免费的/便宜的一侧，
+        把流量悄悄挪到国际出口会花掉运营者没打算花的额度）；
+      * 模型两个出口都提供（`exclusive_realm` 为空）—— gpt-* / gemini-* 只有
+        国际版有，换过去只会把一个 429 变成一个更难解释的 403；
+      * 国内版此刻确实有账号能服务这个模型 —— 否则重试只是一次白跑的上游往返，
+        还会把「限流」换成一个「没有可用账号」。
+    """
+    if realm != "intl":
+        return ""
+    if exclusive_realm(model):
+        return ""
+    if POOL is None:
+        return ""
+    try:
+        policy = {'allowed': allowed_accounts} if allowed_accounts is not None else {}
+        if POOL.count_ready(realm="cn", model=model, **policy) <= 0:
+            return ""
+    except Exception:
+        return ""
+    return "cn"
+
+
+def open_upstream_with_fallback(payload, session_key=None, target_realm=None,
+                                allow_realm_fallback=True, **kwargs):
+    """open_upstream()，外围加一次「国际版限流 → 国内版」的回退。
+
+    只在两条失败上回退：
+      * `RateLimited` —— 上游 429、24h 额度窗口用满（code 6004）、网关本地合成
+        的「所有账号都在冷却该模型」。共同点是**这条出口的配额线暂时走不通**；
+      * `no usable account` 的 RuntimeError —— 该出口的账号全部停用/过期/熔断，
+        池子空了。
+
+    别的失败照原样抛出。403 11140（账号被上游风控限制）尤其不能跨出口重打：
+    项目对它有一条红线（见 RESTRICTED_403_ROTATE_MAX 附近），换出口继续打同一台
+    设备正是它要防的那件事。pinned / 参数错误更不是换出口能修的。
+
+    `allow_realm_fallback=False` 表示这次请求的出口是**显式指定**的（Key 绑定了
+    realm，或客户端带了 X-Realm / ?realm=）：那是运营者写下来的意图，兜底不该
+    越过它。
+    """
+    realm = target_realm or detect_model_realm(payload.get("model")) or CURRENT_REALM
+
+    def _backup_or_raise(exc):
+        if not allow_realm_fallback or not realm_fallback_enabled():
+            raise exc
+        if kwargs.get('pin_account') is not None or pinned_account() is not None:
+            raise exc
+        if restriction_hold_remaining(realm) > 0:
+            raise exc
+        deadline = kwargs.get('deadline_at')
+        if deadline is not None and time.monotonic() >= deadline:
+            raise exc
+        backup = realm_fallback_target(realm, payload.get("model"), kwargs.get('allowed_accounts'))
+        if not backup:
+            raise exc
+        detail = getattr(exc, "detail", "") or getattr(exc, "message", "") \
+            or str(exc)
+        log("realm fallback: %s cannot serve '%s' (%s), retrying on %s"
+            % (realm, payload.get("model") or "-", detail[:120], backup))
+        return backup
+
+    try:
+        return open_upstream(payload, session_key=session_key,
+                             target_realm=target_realm, **kwargs)
+    except RateLimited as exc:
+        backup = _backup_or_raise(exc)
+    except RuntimeError as exc:
+        if not str(exc).startswith("no usable account"):
+            raise
+        backup = _backup_or_raise(exc)
+    # 第二次尝试的失败原样抛出：两边都限流时，客户端该等多久由**国内版**给出的
+    # 重置时钟决定，那比国际版那条更接近「下一次能成」的时刻。
+    return open_upstream(payload, session_key=session_key,
+                         target_realm=backup, **kwargs)
+
 def pool_unavailable_detail(realm, model=None):
     """把该区域每个账号不可用的原因拼成一句，附在「没有可用账号」后面。
 
@@ -16657,14 +16815,15 @@ def _aggregate_stream_impl(raw_iter, model, resp_id):
         failed_reason = "upstream_truncated"
         finish = "length"
     full_text = "".join(content)
-    dsml_calls, clean_text = parse_dsml_tool_calls(full_text)
+    recover_printed = saw_finish and not failed_reason and finish in ("stop", "tool_calls", "length")
+    dsml_calls, clean_text = parse_dsml_tool_calls(full_text) if recover_printed else (None, full_text)
     if saw_finish and not failed_reason and not tool_calls_map and dsml_calls:
         for index, call in enumerate(dsml_calls):
             tool_calls_map[index] = {"id": call.get("id") or _new_id("call_"),
                                      "type": "function", "function": {
                                          "name": call.get("name"),
                                          "arguments": call.get("arguments") or "{}"}}
-    if re.search(TAG_START, clean_text):
+    if recover_printed and re.search(TAG_START, clean_text):
         clean_text, _ = quarantine_dsml_text(clean_text)
     content[:] = [clean_text]
     message = {"role": "assistant", "content": clean_text}
@@ -16675,7 +16834,7 @@ def _aggregate_stream_impl(raw_iter, model, resp_id):
     # A call the model printed instead of emitting arrives as `content`. The
     # Responses path has parsed that shape for a while; this one did not, so the
     # client saw prose, found no call, and ended the turn with nothing to run.
-    if saw_finish and not failed_reason and not tool_calls_map and repair_leaked_tool_calls(message):
+    if recover_printed and not tool_calls_map and repair_leaked_tool_calls(message):
         finish = "tool_calls"
     # PATCH2-BY-OPS: 二次防御——剔除「无函数名且无参数」的空 tool_call。
     # 即使上游以 tool_calls 数组形式发空占位，也不会泄漏给客户端。
@@ -18401,8 +18560,9 @@ def chat_to_response(chat_obj, model, custom_names=None, request_meta=None, name
                 "name": name,
                 "arguments": fn.get("arguments") or "{}",
             })
-    # DeepSeek DSML tool calls fallback
-    if not (msg.get("tool_calls")):
+    recover_printed = (not chat_obj.get('_ops_failure') and
+                       (choice.get('finish_reason') or 'stop') in ('stop', 'tool_calls', 'length'))
+    if recover_printed and not (msg.get("tool_calls")):
         dsml_calls, clean_t = parse_dsml_tool_calls(text)
         if dsml_calls:
             for dc in dsml_calls:
@@ -18415,7 +18575,7 @@ def chat_to_response(chat_obj, model, custom_names=None, request_meta=None, name
                     "arguments": dc.get("arguments") or "{}",
                 })
             text = clean_t
-    if re.search(TAG_START, text):
+    if recover_printed and re.search(TAG_START, text):
         text, _ = quarantine_dsml_text(text)
     if text or refusal or not output:
         parts = ([{"type": "output_text", "text": text,
@@ -18579,7 +18739,20 @@ def _stream_chat_events(upstream, model, holder):
             printed_tail_text = []
             content_prefix_len = 0
             held_finish, finish, saw_finish = None, "stop", False
-            for raw in current:
+            iterator = iter(current)
+            while True:
+                try:
+                    raw = next(iterator)
+                except StopIteration:
+                    break
+                except Exception:
+                    # The reader failed before a valid terminal. Flush only
+                    # text already received, then preserve its error identity.
+                    suffix = ''.join(text)[content_prefix_len:]
+                    if suffix:
+                        holder['client_content_seen'] = True
+                        yield _chat_frame(holder, {'content': suffix})
+                    raise
                 line = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
                 data = strip_data_prefix(line)
                 if data == "[DONE]":
@@ -18607,7 +18780,6 @@ def _stream_chat_events(upstream, model, holder):
                     # also carries choices.
                     frame.pop("usage", None)
                 terminal = False
-                printed_calls = []
                 for choice in frame.get("choices") or []:
                     delta = choice.get("delta") or {}
                     if isinstance(delta.get("refusal"), str) and delta["refusal"].strip():
@@ -19063,7 +19235,8 @@ def _stream_responses_impl(upstream, model, holder):
             yield ev("response.output_item.done",
                      {"output_index": reason_index, "item": outputs[reason_index]})
         # 1. Emit completed structured tool calls
-        complete_calls = saw_finish and not holder.get("incomplete_reason")
+        complete_calls = (saw_finish and not holder.get("incomplete_reason") and
+                          finish in ('stop', 'tool_calls', 'length'))
         for idx in (sorted(tool_calls_map.keys()) if complete_calls else ()):
             entry = tool_calls_map[idx]
             if entry.get("custom"):
@@ -19104,11 +19277,12 @@ def _stream_responses_impl(upstream, model, holder):
             })
         # Flush remaining buffered text if any
         if text_buffer:
-            calls_rem, clean_rem = parse_dsml_tool_calls(text_buffer)
+            calls_rem, clean_rem = (parse_dsml_tool_calls(text_buffer) if complete_calls and not tool_calls_map
+                                    else (None, text_buffer))
             if calls_rem:
                 dsml_tool_calls.extend(calls_rem)
             if clean_rem:
-                if re.search(TAG_START, clean_rem):
+                if complete_calls and not tool_calls_map and re.search(TAG_START, clean_rem):
                     clean_rem, _ = quarantine_dsml_text(clean_rem)
                 text_parts.append(clean_rem)
                 if msg_index is not None:
@@ -19120,7 +19294,7 @@ def _stream_responses_impl(upstream, model, holder):
         # 2. DSML fallback: emit buffered/parsed DSML tool calls if no structured tool_calls were emitted
         full_text = "".join(text_parts)
         dsml_calls = dsml_tool_calls
-        if not dsml_calls:
+        if not dsml_calls and complete_calls and not tool_calls_map:
             extra_calls, clean_text = parse_dsml_tool_calls(full_text)
             if extra_calls:
                 dsml_calls = extra_calls
@@ -19304,7 +19478,22 @@ def _stream_responses_impl(upstream, model, holder):
     if not holder.get("suppress_lifecycle") and holder.get("emit_created", True):
         yield ev("response.created", {"response": resp_obj("in_progress")})
         yield ev("response.in_progress", {"response": resp_obj("in_progress")})
-    for raw in upstream:
+    iterator = iter(upstream)
+    while True:
+        try:
+            raw = next(iterator)
+        except StopIteration:
+            break
+        except Exception:
+            if text_buffer:
+                yield from ensure_message_part('output_text')
+                text_parts.append(text_buffer)
+                yield ev('response.output_text.delta', {
+                    'item_id': msg_id, 'output_index': msg_index,
+                    'content_index': content_indexes['output_text'], 'delta': text_buffer,
+                })
+                text_buffer = ''
+            raise
         data = strip_data_prefix(raw.decode("utf-8", "replace"))
         if data == "[DONE]":
             saw_done = True
@@ -19432,11 +19621,10 @@ def _stream_responses_impl(upstream, model, holder):
                                 "item_id": msg_id, "output_index": msg_index,
                                 "content_index": content_indexes["output_text"], "delta": lead,
                             })
-                        calls_found, _ = parse_dsml_tool_calls(m.group(0))
-                        if calls_found:
-                            dsml_tool_calls.extend(calls_found)
-                        text_buffer = text_buffer[m.end():]
-                        continue
+                        # Keep the received suffix until its terminal permits
+                        # recovery; filtered/error turns must retain this text.
+                        text_buffer = text_buffer[idx:]
+                        break
                     cand = text_buffer[idx:idx+30]
                     is_cand = ("DSML" in cand) or (len(cand) < 10 and not any(c in cand for c in (" ", "\t", "\n", ">")))
                     if is_cand:
@@ -19665,7 +19853,7 @@ class Handler(BaseHTTPRequestHandler):
             super().finish()
         except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
             pass
-    server_version = "wb-proxy/1.7.24"
+    server_version = "wb-proxy/1.7.28"
     def log_message(self, fmt, *args):
         # 静默过滤前端看板高频定时心跳的正常 200 GET 请求（/logs、/usage、/accounts 轮询等）
         # 避免自增死循环刷屏与日志污染。遇 4xx/5xx 异常或所有非 GET 业务操作依然如实记录。
@@ -20314,6 +20502,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._get_settings()
         if path == "/updates":
             return self._get_updates()
+        if path == "/updates/backups":
+            return self._get_update_backups()
         if path == "/proxy/slots":
             if not self._panel_ok():
                 return self._error(
@@ -20774,6 +20964,27 @@ class Handler(BaseHTTPRequestHandler):
                 "msg": "更新检查未运行",
             }
         payload.update(wb_update_request.status())
+        return self._json(200, payload)
+
+    def _get_update_backups(self):
+        """What a rollback could restore, for the panel's rollback card.
+
+        Read-only: it lists the backups the registered executor kept, says which
+        ones are complete (and why not, when they are not), and reports the
+        retention setting so the card can explain an empty list. The panel never
+        sees a path - only versions, sizes and times.
+        """
+        if not self._authorized():
+            return
+        try:
+            payload = wb_update_request.backups()
+        except Exception as exc:
+            payload = {"source": "", "backups": [],
+                       "msg": "无法读取备份列表: %s" % str(exc)[:120]}
+        payload["current_version"] = running_version()
+        payload["keep_backups"] = wb_settings.keep_backups(ACCOUNTS_DIR)
+        payload["keep_backups_max"] = wb_settings.MAX_KEEP_BACKUPS
+        payload["rollback_enabled"] = wb_update_request.install_enabled()
         return self._json(200, payload)
 
     def _get_logs(self, query):
@@ -21477,6 +21688,15 @@ class Handler(BaseHTTPRequestHandler):
                 # 由下一个请求照常推（此刻就算推也要先折一次剩余估算，没必要
                 # 为一个开关多付这一趟）。
                 POOL.apply_remaining_weights(None)
+        if "realm_fallback_enabled" in payload:
+            # 跨出口回退（默认关）：与 remaining_priority_enabled 同一形状——
+            # 严格 JSON 布尔，字符串 "false" 会是真值。
+            raw = payload.get("realm_fallback_enabled")
+            if not isinstance(raw, bool):
+                return self._error(400, "realm_fallback_enabled must be true or false",
+                                   "invalid_request_error")
+            wb_settings.set_realm_fallback_enabled(ACCOUNTS_DIR, raw)
+            reply["realm_fallback_enabled"] = raw
         if "log_db_enabled" in payload or "log_db_max_rows" in payload \
                 or "log_db_max_days" in payload or "log_db_max_bytes" in payload:
             # 日志落库（默认关闭）：开关与三条保留上限一次提交里可以任选子集，
@@ -21554,6 +21774,18 @@ class Handler(BaseHTTPRequestHandler):
             if UPDATES and raw:
                 # Turning it on should not wait out the rest of the poll sleep.
                 UPDATES.wake()
+        if "keep_backups" in payload:
+            # An integer count, not a boolean-ish string: "2" would otherwise
+            # be accepted by int() and "true" would silently become 1.
+            raw = payload.get("keep_backups")
+            if isinstance(raw, bool) or not isinstance(raw, int):
+                return self._error(400, "keep_backups must be an integer 0-3",
+                                   "invalid_request_error")
+            stored = wb_settings.set_keep_backups(ACCOUNTS_DIR, raw)
+            reply["keep_backups"] = stored
+            # The panel's hint promises this takes effect now: a lower value
+            # has to drop the extra folders immediately, not at the next update.
+            reply["pruned_backups"] = wb_update_request.apply_keep_backups(stored)
         if "upstream" in payload:
             raw = payload.get("upstream")
             if not isinstance(raw, dict):
@@ -22403,6 +22635,26 @@ class Handler(BaseHTTPRequestHandler):
         queued["ok"] = True
         return self._json(202, queued)
 
+    def _route_update_rollback(self, payload):
+        """Restore one retained backup, on the operator's explicit request.
+
+        409 with a Chinese reason for everything the panel could have got wrong:
+        an unknown version, a half-written backup, or a task already in flight.
+        """
+        version = str(payload.get("version") or "").strip()
+        if not version:
+            return self._json(409, {"ok": False, "msg": "请选择要回退的版本"})
+        try:
+            host = self.server.server_address[0]
+            lan = host not in ("127.0.0.1", "::1", "localhost")
+            queued = wb_update_request.request_rollback(
+                version, running_version(),
+                port=self.server.server_port, lan=lan)
+        except wb_update_request.UpdateRequestError as exc:
+            return self._json(409, {"ok": False, "msg": str(exc)})
+        queued["ok"] = True
+        return self._json(202, queued)
+
     def _route_scheduler_trigger(self, payload):
         if SCHEDULER:
             return self._json_panel(200, SCHEDULER.trigger_now())
@@ -22949,7 +23201,8 @@ class Handler(BaseHTTPRequestHandler):
                sorted(custom_names) or "-", key_label(self._key_id()) or "-")
         )
         try:
-            req_realm = self._request_realm() or CURRENT_REALM
+            explicit_realm = self._request_realm()
+            req_realm = explicit_realm or CURRENT_REALM
             blocked = self._cross_realm_error(chat_req.get("model"), req_realm)
             if blocked:
                 return self._error(400, blocked, "invalid_request_error")
@@ -22961,7 +23214,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(400, key_blocked, "invalid_request_error")
             upstream, account, effort = _open_first_stream(
                 chat_req, session_key=session_key, realm=req_realm,
+                allow_realm_fallback=not explicit_realm,
                 allowed_accounts=_key_allowed_accounts_for(self))
+            req_realm = getattr(account, 'realm', req_realm)
         except PinnedAccountError as exc:
             record_error(model, exc.status, exc.message[:200],
                          elapsed_ms=int((time.time() - t_start) * 1000),
@@ -23258,7 +23513,8 @@ class Handler(BaseHTTPRequestHandler):
                chat_req.get("reasoning_effort"), len(chat_req.get("tools") or []),
                key_label(self._key_id()) or "-"))
         try:
-            req_realm = self._request_realm() or CURRENT_REALM
+            explicit_realm = self._request_realm()
+            req_realm = explicit_realm or CURRENT_REALM
             blocked = self._cross_realm_error(chat_req.get("model"), req_realm)
             if blocked:
                 return self._anthropic_error(400, blocked, "invalid_request_error")
@@ -23270,7 +23526,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._anthropic_error(400, key_blocked, "invalid_request_error")
             upstream, account, effort = _open_first_stream(
                 chat_req, session_key=session_key, realm=req_realm,
+                allow_realm_fallback=not explicit_realm,
                 allowed_accounts=_key_allowed_accounts_for(self))
+            req_realm = getattr(account, 'realm', req_realm)
         except PinnedAccountError as exc:
             record_error(model, exc.status, exc.message[:200],
                          elapsed_ms=int((time.time() - t_start) * 1000),
@@ -23483,6 +23741,16 @@ class Handler(BaseHTTPRequestHandler):
             if not self._panel_ok():
                 return self._error(401, "panel password required", "invalid_request_error")
             return self._route_update_install()
+        if path == "/updates/rollback":
+            # Same gate as the install button: the panel session may only queue
+            # a version that already has a complete local backup, and the
+            # executor re-checks everything before touching a file.
+            if not self._panel_ok():
+                return self._error(401, "panel password required", "invalid_request_error")
+            payload = self._payload_or_error()
+            if payload is None:
+                return
+            return self._route_update_rollback(payload)
         if path in ("/pricing/refresh", "/pricing/mapping"):
             # Panel-only management writes (the pricing table is the panel's
             # own view of the estimate). Registered here because the generic
@@ -23675,7 +23943,8 @@ class Handler(BaseHTTPRequestHandler):
         model = payload.get("model") or "hy4-preview"
         t_start = time.time()
         try:
-            req_realm = self._request_realm() or CURRENT_REALM
+            explicit_realm = self._request_realm()
+            req_realm = explicit_realm or CURRENT_REALM
             blocked = self._cross_realm_error(payload.get("model"), req_realm)
             if blocked:
                 return self._error(400, blocked, "invalid_request_error")
@@ -23688,7 +23957,9 @@ class Handler(BaseHTTPRequestHandler):
             upstream, account, effort = _open_first_stream(
                 payload, session_key=session_key, realm=req_realm,
                 prebuilt_body=forwarded,
+                allow_realm_fallback=not explicit_realm,
                 allowed_accounts=_key_allowed_accounts_for(self))
+            req_realm = getattr(account, 'realm', req_realm)
         except PinnedAccountError as exc:
             record_error(model, exc.status, exc.message[:200],
                          elapsed_ms=int((time.time() - t_start) * 1000),

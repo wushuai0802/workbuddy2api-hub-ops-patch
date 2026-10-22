@@ -1,5 +1,5 @@
 {
-  "base_tag": "v1.7.24",
+  "base_tag": "v1.7.28",
   "compatibility": {
     "wb_activity.py": "da70fdd4b791198b9147d7624f734bcff396b5086a1736a75722c3e4b5ad69a9",
     "wb_agents.py": "904a4019ff9f5059388d4c51c28292255ea08ec17cbef5aed601b2b13feaa658",
@@ -17,13 +17,13 @@
     "wb_prompt.py": "80cb6a8b0ece4043a7f2de859e495e21850c405482f8b6c2df157866fc180f49",
     "wb_quota_scan.py": "aeaab6ddecb565424238dfe0913ca2b00e33ec3ecdf5ac082efe74801e43c8fd",
     "wb_scheduler.py": "0462ad299ea3045874287dd6c9d395af2930358fe3186a4f866fd01c4eca5e1f",
-    "wb_settings.py": "06ddc562990388947b2023aea55ee1a9d0328191f1e5c127b5f439f9f9dadb7a",
+    "wb_settings.py": "1375720b13185d6edb07663d3851647b71cdbd5347d5b818891080c202633a5f",
     "wb_tasks.py": "7439265d30f32a758d9ab04363036d5d415eb957d53ffd26ca79d9fb7d1b75aa",
     "wb_tiers.py": "b60254dafa66ed65d53a2beb83f6efee3aaaab3ab0ed35ff6b27dfc9b428cd57",
-    "wb_update_apply.py": "84c0cac912f709a21d8164314023759b5e030e4ae46818541581c83f3778bc1d",
-    "wb_update_external.py": "797e785690c70b9ddc4356c2ad68f52b28aa882758e4413560515002c6f2690c",
-    "wb_update_portable.py": "c3baea5bb13ba76a608a0cd3ab6ec92ce461c2e679bc768195b6a30da41b56f9",
-    "wb_update_request.py": "6f332779616bb7ca9465c9caa5e10d718942c486463281fa2aa90435cc74ea81",
+    "wb_update_apply.py": "d9d88c9c6b6b7c3be9366d378f09038131f83999f5432a0cc21f419499764dc5",
+    "wb_update_external.py": "dfb6066b9f881a8192cd5f67db62751d17a43e5ea4208728a12c93b2aa7d6904",
+    "wb_update_portable.py": "f0c1f3f783c94b1155da79d64e66d8397e145cf3c73d1ab4ab1351acf50377cb",
+    "wb_update_request.py": "353ebbe82dc5e4eca6e5a2b58cd33564c8b0ebbe926caca82080337f50b7431d",
     "wb_updates.py": "a39703a90a47a3d07c63e0577b584f9ab0288ee04c8b857bddbaf776a95a7ec3",
     "wb_webagent.py": "1258023afb2df58131947970ad3aa00e59c9e71899fd5e7e6557ee9dcc560828",
     "wb_webprompts.py": "ff607ffccab5d7b4ce1fbbd74ea507021d3509930036f3fd97f4671b2c97aaab",
@@ -31,12 +31,12 @@
   },
   "files": {
     "dashboard.html": {
-      "base_sha256": "09f971c537dcd6ad68a2bd2dfc6c92fe331fde09f575333254482d845b55d299",
-      "patched_sha256": "6db31bac35811cdb4ef42530d8665fa1e49919b0cc298556dad7ae4e661d10f0"
+      "base_sha256": "9c88330711d69e63fd2225e8a6fac0d828a50671128788b686c8baf677b7bc58",
+      "patched_sha256": "41a5c1fd6a233708852e939255e88c2eef9fdc6e7e627f6f4c381b7c4d24827a"
     },
     "wb_accounts.py": {
-      "base_sha256": "8675a381a4404794eeb04b444597aa83207429d0bf7bca4160092f9fe82fc65b",
-      "patched_sha256": "1a9a1e25ee9fc49e09fd5e21c1a1ba723d61eb176b841d721766613b89307c9d"
+      "base_sha256": "2e62473fed8759cb9966c1e5233df8c1c79d6fbf80e7e93d7e4224e69d0feff0",
+      "patched_sha256": "3f5d33243e65964d818221512445839b2c918d35d5c58b54b31f5570acc3d0d6"
     },
     "wb_observe.py": {
       "base_sha256": null,
@@ -47,8 +47,8 @@
       "patched_sha256": "fe26ca2f939b33dae0b847e81731ef8b7ca21b156fb71df7fde3ed42538af20f"
     },
     "wb_proxy.py": {
-      "base_sha256": "3ff89170a483f2aace1093c9e4f67c84e02440c6637bacfc8f60fdd7d497f3eb",
-      "patched_sha256": "ee70637c34829933b2181d88b269b4102eb862310842a8dc289673795693c7b5"
+      "base_sha256": "3f0ad012c4db4a6da59018253735a43db8b190fc79b7ac468745fc5048a1a708",
+      "patched_sha256": "48e6c2018e4b56ed6175b2fe29414cae27bd675d5353fa3843c2b7fd094be768"
     },
     "wb_stall.py": {
       "base_sha256": null,
@@ -63,11 +63,11 @@
       "patched_sha256": "f3a09e170e9393592179638378781b72be075fb6c9596e847db01e4e11b154da"
     }
   },
-  "patch_id": "v1.7.24-ops.20261021.2",
+  "patch_id": "v1.7.28-ops.20261022.1",
   "patch_source": "wushuai0802/workbuddy2api-hub-ops-patch",
-  "payload_fingerprint": "8e4ef8398813aea2a9cbf09324284bfed7ee928127218e3d43100eed3a05ef3d",
+  "payload_fingerprint": "faed7ec5fb05c4fd561e7c6f0cd426f37bdd170df05e345dd85aef864e972b8b",
   "python_requires": ">=3.11",
   "repository": "https://github.com/ardeyouxipianyi/workbuddy2api-hub",
   "schema_version": 1,
-  "upstream_commit": "205d8b622d626f4b09da7b57efb3259f91403f4e"
+  "upstream_commit": "c22109def2793234236e0c3ab1d2c11f02a05c39"
 }
