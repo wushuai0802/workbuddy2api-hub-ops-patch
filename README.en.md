@@ -2,9 +2,9 @@
 
 [中文](README.md) · [Install and rollback](docs/INSTALL.md) · [Patch scope](docs/PATCHES.md) · [Verification](docs/VERIFICATION.md)
 
-Release **v1.7.28-ops.20261022.1**, targeting upstream **v1.7.28** at `c22109def2793234236e0c3ab1d2c11f02a05c39`. Python 3.11+ is required.
+Release **v1.7.28-ops.20261022.2**, targeting upstream **v1.7.28** at `c22109def2793234236e0c3ab1d2c11f02a05c39`. Python 3.11+ is required.
 
-[Download ZIP and SHA256SUMS.txt](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.7.28-ops.20261022.1): `workbuddy2api-hub-v1.7.28-wushuai0802-ops-20261022-r1.zip`.
+[Download ZIP and SHA256SUMS.txt](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.7.28-ops.20261022.2): `workbuddy2api-hub-v1.7.28-wushuai0802-ops-20261022-r2.zip`.
 
 This version migrates our retained safeguards onto the exact v1.7.28 source and retains our mixed-stall guard, reasoning-alias budget, tool-image compatibility, refusals, bounded refresh, and pooled connection ownership. It preserves upstream additional-tools/custom namespace support, Anthropic thinking, DSML fallback, block I/O and shared TLS contexts.
 
@@ -31,6 +31,8 @@ Absorbs official v1.7.19–v1.7.24: account `tasksEnabled` separated from API `e
 Three stream-boundary fixes are carried by this patch, each with regression coverage. A closing tag split across deltas (`</invoke>` then `</calls>`) is swallowed instead of leaking a literal `DSML` fragment as prose. Printed calls are released only after a normal terminal, so a truncated or failed transport never synthesizes a side-effecting tool. The content loop detector now reads a DSML-scrubbed view, so a repeated value inside a tool parameter is not treated as repeated prose.
 
 r2 introduced closing-tag ownership and six regressions. Its disconnect and filtered-terminal coverage was incomplete; the v1.7.28 section describes the corrected implementation and scope.
+
+r2.2 absorbs three cross-exit boundaries from the external v1.7.28 package: a fallback helper called without an explicit deadline now shares one panel-configured header budget across both exits, a domestic exit under a restriction hold is not selected as a backup, and a slow backup-eligibility check that exhausts the remaining budget no longer opens a second upstream connection. Eight focused regressions cover the six adapters' actual realm/account/billing attribution and the first-frame same-account phase deadline.
 
 ## v1.7.17 changes
 
@@ -80,7 +82,7 @@ A response whose wire body was read in one block retains its connection lease un
 
 ## Verification and limits
 
-The runner covers 194 Python groups (38 patch and all 156 official groups), plus 53 official and 2 patch Node groups. CI checks Linux3.11/3.12 and Windows3.11; see [VERIFICATION.md](docs/VERIFICATION.md). Tests use synthetic data and loopback HTTP with external Python sockets denied; they do not establish online task completion.
+The runner covers 195 Python groups (39 patch and all 156 official groups), plus 53 official and 2 patch Node groups. CI checks Linux3.11/3.12 and Windows3.11; see [VERIFICATION.md](docs/VERIFICATION.md). Tests use synthetic data and loopback HTTP with external Python sockets denied; they do not establish online task completion.
 
 r2 protects quoted repetition examples, preserves already-consumed provider usage across guard failure, transport errors and cancellation, and bounds SSE lines/events (4/8MiB defaults). A request-local history observer reports repeated tool results without blocking or replaying tools. It does not combine sessions or infer generic shell-command progress. Durable metrics distinguish requests from guarded attempts and legal-output recovery from business completion, with explicit time/version/protocol grouping and retention limits.
 

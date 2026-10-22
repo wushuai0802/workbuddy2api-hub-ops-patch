@@ -11539,7 +11539,7 @@ def _patch_payload_fingerprint():
     return hashlib.sha256(''.join(records).encode('ascii')).hexdigest()
 
 _OPS_PATCH_FINGERPRINT = _patch_payload_fingerprint()
-_OPS_PATCH_ID = "v1.7.28-ops.20261022.1"
+_OPS_PATCH_ID = "v1.7.28-ops.20261022.2"
 _OBSERVATION_STORE = None
 _OBSERVATION_STORE_LOCK = threading.Lock()
 
@@ -16273,6 +16273,8 @@ def realm_fallback_target(realm, model, allowed_accounts=None):
     if POOL is None:
         return ""
     try:
+        if restriction_hold_remaining('cn') > 0:
+            return ""
         policy = {'allowed': allowed_accounts} if allowed_accounts is not None else {}
         if POOL.count_ready(realm="cn", model=model, **policy) <= 0:
             return ""
@@ -16301,6 +16303,12 @@ def open_upstream_with_fallback(payload, session_key=None, target_realm=None,
     """
     realm = target_realm or detect_model_realm(payload.get("model")) or CURRENT_REALM
 
+    # Standalone callers may omit the deadline supplied by the HTTP adapters.
+    # Opt-in fallback still shares one configured header budget across exits.
+    if (kwargs.get('deadline_at') is None and allow_realm_fallback
+            and realm_fallback_enabled()):
+        kwargs['deadline_at'] = _phase_deadline(_generation_deadline({}), upstream_timeouts()[0])
+
     def _backup_or_raise(exc):
         if not allow_realm_fallback or not realm_fallback_enabled():
             raise exc
@@ -16314,6 +16322,8 @@ def open_upstream_with_fallback(payload, session_key=None, target_realm=None,
         backup = realm_fallback_target(realm, payload.get("model"), kwargs.get('allowed_accounts'))
         if not backup:
             raise exc
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError('upstream connection deadline exceeded before realm fallback') from exc
         detail = getattr(exc, "detail", "") or getattr(exc, "message", "") \
             or str(exc)
         log("realm fallback: %s cannot serve '%s' (%s), retrying on %s"

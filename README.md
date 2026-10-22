@@ -4,12 +4,12 @@
 
 为 WorkBuddy 网关提供 DeepSeek 复读保护、受限认证续期、推理历史与工具图片兼容，以及流式协议边界修复。基于[官方项目](https://github.com/ardeyouxipianyi/workbuddy2api-hub)，可检查、可回退，遵循 MIT。
 
-当前版本：**v1.7.28-ops.20261022.1**。
+当前版本：**v1.7.28-ops.20261022.2**。
 
 本次重基官方v1.7.28，纳入账号ID脱敏、会员档位、账号排序、11-128身份句兼容和更新回退修复；跨出口回退保留官方默认关闭。补齐旧r2断流原文保留与过滤结束不转工具的遗漏，并冻结恢复请求的账号白名单。
 
-- [下载 ZIP 与 SHA256SUMS.txt](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.7.28-ops.20261022.1)
-- 文件名：`workbuddy2api-hub-v1.7.28-wushuai0802-ops-20261022-r1.zip`
+- [下载 ZIP 与 SHA256SUMS.txt](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.7.28-ops.20261022.2)
+- 文件名：`workbuddy2api-hub-v1.7.28-wushuai0802-ops-20261022-r2.zip`
 - 仅支持官方 **v1.7.28**，提交 `c22109def2793234236e0c3ab1d2c11f02a05c39`。
 - Python 3.11+。Docker 用户从打过完整补丁的准确源码重新构建镜像。
 - 安装器替换四个上游Python模块（proxy、accounts、webtools、upstream_pool）及看板，新增 ops、stall、observe 三个模块；不操作账号、Key、配置、历史或部署。
@@ -53,6 +53,8 @@ v1.7.19～v1.7.24 的官方能力由新基线直接提供：账号 `tasksEnabled
 - 正文通道的复读检测改用去除 DSML 区域的视图：工具参数里重复的字符串属于数据，不再被当成正文复读。
 
 r2增加闭合标签归属栈及6项回归。其断流与过滤覆盖不完整，完整修复及验证范围见上面的v1.7.28说明。
+
+r2.2（`v1.7.28-ops.20261022.2`）吸收外部v1.7.28补丁包中三处跨出口边界：直接调用回退helper时未显式给期限，也按面板响应头预算为两次连接共享一个deadline；国内出口处于风控暂停时不进入回退；候选可用性检查耗尽剩余期限后不再发起第二次上游连接。新增8项专项回归，覆盖六接口实际出口、账号与计费用量归属，以及首帧同号重开的期限。
 
 本补丁继续保留：DeepSeek混合/引用复读检测与一次安全恢复、推理别名预算、工具图片兼容、六路径失败终态与原始用量快照、401有界刷新与绝对期限、连接池租约、首帧包装、SSE分块和安装/回滚保护。官方已发布的功能由v1.7.24基线提供，不在补丁里重复实现。
 
@@ -114,7 +116,7 @@ python3 -B ops-patch-v1728/apply.py --target ./workbuddy2api-hub-v1.7.28 --dry-r
 
 ## 验证与边界
 
-离线runner包含194组Python回归（38组补丁及全部156组官方Python），另有53组官方Node及2组补丁Node。新增跨出口/白名单/期限、六路径过滤与三路径读取异常回归；面板使用官方Node合成DOM测试。CI检查Linux3.11/3.12与Windows3.11，实际结果见[验证记录](docs/VERIFICATION.md)。
+离线runner包含195组Python回归（39组补丁及全部156组官方Python），另有53组官方Node及2组补丁Node。新增跨出口/白名单/期限、六路径过滤与三路径读取异常回归；面板使用官方Node合成DOM测试。CI检查Linux3.11/3.12与Windows3.11，实际结果见[验证记录](docs/VERIFICATION.md)。
 
 测试使用合成账号、空数据和本机HTTP，不含真实会话。检测仍以单次生成为范围，尚无通用跨工具回合业务进展熔断。健康、模块指纹或离线测试不等于真实长会话输出质量验收。
 
