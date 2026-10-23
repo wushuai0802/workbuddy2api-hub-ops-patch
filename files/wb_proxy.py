@@ -11607,7 +11607,7 @@ def _patch_payload_fingerprint():
     return hashlib.sha256(''.join(records).encode('ascii')).hexdigest()
 
 _OPS_PATCH_FINGERPRINT = _patch_payload_fingerprint()
-_OPS_PATCH_ID = "v1.7.33-ops.20261023.1"
+_OPS_PATCH_ID = "v1.7.33-ops.20261023.2"
 _OBSERVATION_STORE = None
 _OBSERVATION_STORE_LOCK = threading.Lock()
 
@@ -11871,6 +11871,11 @@ def _close_upstream(upstream):
         upstream.close()
     except Exception:
         pass
+
+
+def _interrupt_probe_deadline(upstream, expired):
+    expired.set()
+    _interrupt_upstream(upstream)
 
 
 _STREAM_GUARD_CODES = {"reasoning_loop_detected", "content_loop_detected", "generation_timeout",
@@ -12534,6 +12539,7 @@ def probe_first_frame(upstream, retry_call=None, tried=None, deadline_at=None, r
         getattr(upstream, '_ops_generation_deadline', None), FIRST_FRAME_DEADLINE)
     for attempt in range(FIRST_FRAME_MAX_ATTEMPTS):
         timer = None
+        watchdog_expired = threading.Event()
         socket_deadline_limited = False
         try:
             if cancel_holder is not None:
@@ -12548,7 +12554,7 @@ def probe_first_frame(upstream, retry_call=None, tried=None, deadline_at=None, r
             if sock is not None:
                 sock.settimeout(remaining)
                 socket_deadline_limited = True
-            timer = threading.Timer(remaining, _interrupt_upstream, args=(upstream,))
+            timer = threading.Timer(remaining, _interrupt_probe_deadline, args=(upstream, watchdog_expired))
             timer.daemon = True
             timer.start()
             read_hook = [None]
@@ -12566,7 +12572,7 @@ def probe_first_frame(upstream, retry_call=None, tried=None, deadline_at=None, r
             for raw in iterator:
                 if cancel_holder is not None and cancel_holder.get("ops_client_closed"):
                     raise _ClientStreamClosed()
-                if time.monotonic() >= deadline_at:
+                if watchdog_expired.is_set() or time.monotonic() >= deadline_at:
                     raise TimeoutError("first-frame deadline exceeded")
                 prefix.append(raw)
                 preamble_bytes += len(raw)
@@ -12591,7 +12597,7 @@ def probe_first_frame(upstream, retry_call=None, tried=None, deadline_at=None, r
                     continue
                 timer.cancel()
                 timer.join()
-                if time.monotonic() >= deadline_at:
+                if watchdog_expired.is_set() or time.monotonic() >= deadline_at:
                     raise TimeoutError("first-frame deadline exceeded")
                 if sock is not None:
                     sock.settimeout(upstream_timeouts()[1])
@@ -12600,7 +12606,7 @@ def probe_first_frame(upstream, retry_call=None, tried=None, deadline_at=None, r
                 return probed, account
             # Socket shutdown at the deadline may produce EOF rather than an
             # OSError (notably on Linux). An expired probe is never successful.
-            if time.monotonic() >= deadline_at:
+            if watchdog_expired.is_set() or time.monotonic() >= deadline_at:
                 raise TimeoutError("first-frame deadline exceeded")
             if retry_call is None and not prefix and not require_frame:
                 probed = _ProbedStream(upstream, iterator, [], read_hook, usage_hook)
@@ -12611,14 +12617,15 @@ def probe_first_frame(upstream, retry_call=None, tried=None, deadline_at=None, r
             _close_upstream(upstream)
             raise
         except Exception as exc:
+            if cancel_holder is not None and cancel_holder.get("ops_client_closed"):
+                _close_upstream(upstream)
+                raise _ClientStreamClosed() from exc
             egress_key = getattr(upstream, "_wb_stream_egress", None)
             if egress_key and wb_settings.egress_backoff_enabled(ACCOUNTS_DIR):
                 # A read that dies before the first frame still leaves the
                 # egress unhealthy; a later successful retry must not erase it.
                 wb_egress.note_transient(egress_key)
             _close_upstream(upstream)
-            if cancel_holder is not None and cancel_holder.get("ops_client_closed"):
-                raise _ClientStreamClosed() from exc
             if isinstance(exc, http.client.IncompleteRead) and time.monotonic() >= deadline_at:
                 # Linux returns EOF at the probe deadline without raising a
                 # socket timeout; the short body is deadline expiry, not a
@@ -12627,11 +12634,13 @@ def probe_first_frame(upstream, retry_call=None, tried=None, deadline_at=None, r
             if isinstance(exc, _SSELimitError):
                 raise
             if retry_call is None:
+                if watchdog_expired.is_set():
+                    raise TimeoutError("first-frame deadline exceeded") from exc
                 raise
             # A socket set to the remaining probe budget may expire one clock
             # tick early on Windows. That is terminal phase expiry, not a
             # spare budget for opening another upstream connection.
-            phase_expired = (time.monotonic() >= deadline_at or
+            phase_expired = (watchdog_expired.is_set() or time.monotonic() >= deadline_at or
                              (socket_deadline_limited and isinstance(exc, socket.timeout)))
             if attempt + 1 >= FIRST_FRAME_MAX_ATTEMPTS or phase_expired:
                 retry_bump("first_frame_giveup")

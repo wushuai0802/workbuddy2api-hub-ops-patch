@@ -17,7 +17,7 @@ def main():
     args = parser.parse_args()
     bundle = Bundle(ROOT)
     args.output.mkdir(parents=True, exist_ok=True)
-    filename = 'workbuddy2api-hub-v1.7.33-wushuai0802-ops-20261023-r1.zip'
+    filename = 'workbuddy2api-hub-v1.7.33-wushuai0802-ops-20261023-r2.zip'
     archive = args.output / filename
     members = [line.split('  ', 1)[1] for line in (ROOT / 'MANIFEST.sha256').read_text().splitlines()]
     members.append('MANIFEST.sha256')

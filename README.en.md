@@ -2,9 +2,9 @@
 
 [中文](README.md) · [Install and rollback](docs/INSTALL.md) · [Patch scope](docs/PATCHES.md) · [Verification](docs/VERIFICATION.md)
 
-Release **v1.7.33-ops.20261023.1**, targeting upstream **v1.7.33** at `47775c5e4aceb9f977bdebf5dd20175b44b5a78b`. Python 3.11+ is required. Offline/synthetic checks passed; successful live upstream validation remains pending. Upstream has announced tighter unofficial-client detection and reduced maintenance; this patch cannot remove upstream restrictions.
+Release **v1.7.33-ops.20261023.2**, targeting upstream **v1.7.33** at `47775c5e4aceb9f977bdebf5dd20175b44b5a78b`. Python 3.11+ is required. Offline/synthetic checks passed; successful live upstream validation remains pending. Upstream has announced tighter unofficial-client detection and reduced maintenance; this patch cannot remove upstream restrictions.
 
-[Download ZIP and SHA256SUMS.txt](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.7.33-ops.20261023.1): `workbuddy2api-hub-v1.7.33-wushuai0802-ops-20261023-r1.zip`.
+[Download ZIP and SHA256SUMS.txt](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.7.33-ops.20261023.2): `workbuddy2api-hub-v1.7.33-wushuai0802-ops-20261023-r2.zip`.
 
 This version migrates our retained safeguards onto the exact v1.7.33 source and retains our mixed-stall guard, reasoning-alias budget, tool-image compatibility, refusals, bounded refresh, and pooled connection ownership. It preserves upstream additional-tools/custom namespace support, Anthropic thinking, DSML fallback, block I/O and shared TLS contexts.
 
@@ -16,9 +16,11 @@ The supplied v1.7.5-r2 reference informed quote-span masking and detached valida
 
 ## v1.7.33 changes
 
+The first-frame watchdog records expiry before closing its owned socket, so a Windows clock-tick race cannot open extra connections. Client cancellation is handled before egress penalties. Both cases have deterministic regressions; the original single-connection assertion remains.
+
 Native successful-request credential recovery, initial tool-argument deltas, daily-activity budgets/ordered candidates and restored model cooldowns come from upstream. Review the new 600-second daily budget, random slots and default-on startup catch-up before updating. The public installer preserves settings.
 
-The external r3 reference informed Windows timed-read interruption and cancellation during recovery. Only the owned socket handle may close; released pool leases remain protected. Cancellation is checked before recovery, after connection and during probing, closes the new response and cannot become an account error or another retry. Initial-silence heartbeats and original deadlines remain. Six new cases exercise real sockets across three protocols, cancellation, released leases and fragmented/interleaved native tool arguments.
+The external r3 reference informed Windows timed-read interruption and cancellation during recovery. Only the owned socket handle may close; released pool leases remain protected. Cancellation is checked before recovery, after connection and during probing, closes the new response and cannot become an account error or another retry. Initial-silence heartbeats and original deadlines remain. Eight new cases exercise real sockets across three protocols, cancellation, released leases and fragmented/interleaved native tool arguments.
 
 ## v1.7.32 changes (historical safeguards retained)
 
@@ -95,7 +97,7 @@ Anthropic Messages and count_tokens endpoints now return400 by default, after au
 Prepare separate clean pinned sources, keep the previous deployment and backups, and verify first:
 
 ~~~sh
-git clone --depth 1 --branch v1.7.33-ops.20261023.1 https://github.com/wushuai0802/workbuddy2api-hub-ops-patch.git ops-patch-v1733
+git clone --depth 1 --branch v1.7.33-ops.20261023.2 https://github.com/wushuai0802/workbuddy2api-hub-ops-patch.git ops-patch-v1733
 git clone --depth 1 --branch v1.7.33 https://github.com/ardeyouxipianyi/workbuddy2api-hub.git workbuddy2api-hub-v1.7.33
 git -C workbuddy2api-hub-v1.7.33 rev-parse HEAD
 python3 -B ops-patch-v1733/apply.py --verify-package

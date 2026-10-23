@@ -125,6 +125,38 @@ class V1733Tests(HeartbeatLifecycleTests):
                     seq = [e['sequence_number'] for e in events]
                     self.assertEqual(seq, list(range(seq[0], seq[0] + len(seq))))
 
+    def test_probe_watchdog_error_is_terminal_even_before_next_clock_tick(self):
+        class FiredTimer:
+            def __init__(self, interval, callback, args=(), kwargs=None):
+                self.callback, self.args, self.kwargs = callback, args, kwargs or {}
+            def start(self): self.callback(*self.args, **self.kwargs)
+            def cancel(self): pass
+            def join(self): pass
+        source = ChunkSource([])
+        source.read1 = mock.Mock(side_effect=OSError(10038, 'socket handle closed by watchdog'))
+        retry = mock.Mock(return_value=(None, None))
+        with mock.patch.object(wb.threading, 'Timer', FiredTimer), \
+             mock.patch.object(wb.time, 'monotonic', return_value=100):
+            result, _ = wb.probe_first_frame(source, retry_call=retry, deadline_at=101)
+        self.assertIsNone(result)
+        self.assertTrue(source.closed)
+        retry.assert_not_called()
+
+    def test_probe_client_cancel_does_not_penalize_egress(self):
+        holder = {}
+        source = ChunkSource([])
+        source._wb_stream_egress = 'synthetic-egress'
+        def closed_read(_size):
+            holder['ops_client_closed'] = True
+            raise OSError(10038, 'socket closed after client cancel')
+        source.read1 = closed_read
+        with mock.patch.object(wb.wb_settings, 'egress_backoff_enabled', return_value=True), \
+             mock.patch.object(wb.wb_egress, 'note_transient') as penalize:
+            with self.assertRaises(wb._ClientStreamClosed):
+                wb.probe_first_frame(source, cancel_holder=holder)
+        self.assertTrue(source.closed)
+        penalize.assert_not_called()
+
 
 if __name__ == '__main__':
     suite = unittest.TestSuite(V1733Tests(name) for name in V1733Tests.__dict__ if name.startswith('test_'))

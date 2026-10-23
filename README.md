@@ -4,12 +4,12 @@
 
 为 WorkBuddy 网关提供 DeepSeek 复读保护、受限认证续期、推理历史与工具图片兼容，以及流式协议边界修复。基于[官方项目](https://github.com/ardeyouxipianyi/workbuddy2api-hub)，可检查、可回退，遵循 MIT。
 
-当前版本：**v1.7.33-ops.20261023.1**。完整离线与合成验证已通过；真实上游成功验收仍待完成，验证范围见[记录](docs/VERIFICATION.md)。
+当前版本：**v1.7.33-ops.20261023.2**。完整离线与合成验证已通过；真实上游成功验收仍待完成，验证范围见[记录](docs/VERIFICATION.md)。
 
 升级官方v1.7.33，继承成功请求解除凭证失效标记、Responses首段工具参数增量、每日活跃预算/有序候选与429窗口恢复。参考外部r3完善Windows心跳断连唤醒和恢复连接取消收尾，保留我们的首帧心跳、期限、压缩、防复读、401、计费与名额保护。官方已公告收紧非官方客户端识别并进入低频维护；本补丁不能解除云端风控。
 
-- [下载 ZIP 与 SHA256SUMS.txt](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.7.33-ops.20261023.1)
-- 文件名：`workbuddy2api-hub-v1.7.33-wushuai0802-ops-20261023-r1.zip`
+- [下载 ZIP 与 SHA256SUMS.txt](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.7.33-ops.20261023.2)
+- 文件名：`workbuddy2api-hub-v1.7.33-wushuai0802-ops-20261023-r2.zip`
 - 仅支持官方 **v1.7.33**，提交 `47775c5e4aceb9f977bdebf5dd20175b44b5a78b`。
 - Python 3.11+。Docker 用户从打过完整补丁的准确源码重新构建镜像。
 - 安装器替换四个上游Python模块（proxy、accounts、webtools、upstream_pool）及看板，新增 ops、stall、observe 三个模块；不操作账号、Key、配置、历史或部署。
@@ -34,9 +34,11 @@
 
 ## v1.7.33 升级与补充
 
+首帧看门狗先设置明确到期标记，再中断所属读取；Windows时钟差一个刻度也不会误开额外连接。客户端取消在出口退避分类前收尾，不把断连记为出口故障。两项确定性反例先复现失败，原“只连接一次”断言保持。
+
 四项原生修复由官方基线提供，不再复制为额外补丁。每日活跃现在使用单账号总预算（默认600秒）、有序模型候选、两个随机时段（显式时段优先）及默认开启的启动补跑；旧模型配置按原含义读取。更新前核对这些行为；公开安装器不修改设置。已有账号风控时，本次没有执行真实模型探测。
 
-Windows心跳断连会关闭当前拥有的socket句柄以唤醒带超时的读取，已释放的池连接仍不能被旧响应关闭。恢复前、建连返回后和首帧探测期间复核取消；取消立即关闭新响应，不探测、不重试、不再记账号失败。首帧前15秒心跳和原绝对期限继续保留。新增6项专项包含三个协议的真实HTTPResponse/socket、取消竞态、连接所有权以及原生工具参数不丢失/不重复。
+Windows心跳断连会关闭当前拥有的socket句柄以唤醒带超时的读取，已释放的池连接仍不能被旧响应关闭。恢复前、建连返回后和首帧探测期间复核取消；取消立即关闭新响应，不探测、不重试、不再记账号失败。首帧前15秒心跳和原绝对期限继续保留。新增8项专项包含三个协议的真实HTTPResponse/socket、取消竞态、连接所有权以及原生工具参数不丢失/不重复。
 
 ## v1.7.32 升级与补丁衔接（历史保护）
 
@@ -133,7 +135,7 @@ v1.7.6～v1.7.30曾仅按模型名把`gpt-5.6-terra / gpt-5.6-luna / gpt-5.3-cod
 先保存旧镜像、源码、配置和数据，在新目录获取两个准确版本：
 
 ~~~sh
-git clone --depth 1 --branch v1.7.33-ops.20261023.1 https://github.com/wushuai0802/workbuddy2api-hub-ops-patch.git ops-patch-v1733
+git clone --depth 1 --branch v1.7.33-ops.20261023.2 https://github.com/wushuai0802/workbuddy2api-hub-ops-patch.git ops-patch-v1733
 git clone --depth 1 --branch v1.7.33 https://github.com/ardeyouxipianyi/workbuddy2api-hub.git workbuddy2api-hub-v1.7.33
 git -C workbuddy2api-hub-v1.7.33 rev-parse HEAD
 python3 -B ops-patch-v1733/apply.py --verify-package
@@ -146,7 +148,7 @@ python3 -B ops-patch-v1733/apply.py --target ./workbuddy2api-hub-v1.7.33 --dry-r
 
 ## 验证与边界
 
-离线runner包含210组Python回归（44组补丁及全部166组官方Python），另有59组官方Node及2组补丁Node。新增6项v1.7.33专项，保留7项心跳、14项名额生命周期、2项401证据及2项缓存用量回归，含六接口、真实loopback HTTP与并发close。CI检查Linux3.11/3.12与Windows3.11，实际结果见[验证记录](docs/VERIFICATION.md)。
+离线runner包含210组Python回归（44组补丁及全部166组官方Python），另有59组官方Node及2组补丁Node。新增8项v1.7.33专项，保留7项心跳、14项名额生命周期、2项401证据及2项缓存用量回归，含六接口、真实loopback HTTP与并发close。CI检查Linux3.11/3.12与Windows3.11，实际结果见[验证记录](docs/VERIFICATION.md)。
 
 测试使用合成账号、空数据和本机HTTP，不含真实会话。检测仍以单次生成为范围，尚无通用跨工具回合业务进展熔断。健康、模块指纹或离线测试不等于真实长会话输出质量验收。
 
