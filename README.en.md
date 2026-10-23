@@ -2,11 +2,11 @@
 
 [中文](README.md) · [Install and rollback](docs/INSTALL.md) · [Patch scope](docs/PATCHES.md) · [Verification](docs/VERIFICATION.md)
 
-Release **v1.7.30-ops.20261023.2**, targeting upstream **v1.7.30** at `84dbc99b1a34182130ee9035f9d80b69a0fc2e8b`. Python 3.11+ is required.
+Release **v1.7.32-ops.20261023.1**, targeting upstream **v1.7.32** at `477ba36ceea78ec4252c47a68e94a5a1612bab0b`. Python 3.11+ is required. Offline/synthetic checks passed; successful live upstream validation remains pending. See the verification record for the exact scope.
 
-[Download ZIP and SHA256SUMS.txt](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.7.30-ops.20261023.2): `workbuddy2api-hub-v1.7.30-wushuai0802-ops-20261023-r2.zip`.
+[Download ZIP and SHA256SUMS.txt](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.7.32-ops.20261023.1): `workbuddy2api-hub-v1.7.32-wushuai0802-ops-20261023-r1.zip`.
 
-This version migrates our retained safeguards onto the exact v1.7.30 source and retains our mixed-stall guard, reasoning-alias budget, tool-image compatibility, refusals, bounded refresh, and pooled connection ownership. It preserves upstream additional-tools/custom namespace support, Anthropic thinking, DSML fallback, block I/O and shared TLS contexts.
+This version migrates our retained safeguards onto the exact v1.7.32 source and retains our mixed-stall guard, reasoning-alias budget, tool-image compatibility, refusals, bounded refresh, and pooled connection ownership. It preserves upstream additional-tools/custom namespace support, Anthropic thinking, DSML fallback, block I/O and shared TLS contexts.
 
 The installer replaces four upstream Python modules and the dashboard, and adds `wb_ops.py`, `wb_stall.py` and `wb_observe.py`, checking the unchanged core dependencies. It preserves accounts, keys, configuration and usage and does not deploy. The running gateway writes a separate bounded observation log, disabled with `WB_OPS_OBSERVE=0`.
 
@@ -14,11 +14,21 @@ The header phase respects panel settings (120 seconds by default); its 45-second
 
 The supplied v1.7.5-r2 reference informed quote-span masking and detached validated cumulative usage snapshots. Quoted examples remain protected while short quoted tool names no longer exempt a surrounding repeated plan. Original SSE bytes and tool arguments are preserved.
 
-## v1.7.30 changes
+## v1.7.32 changes
+
+Includes native model aliases, metadata-only background rewriting, corrected realm gates, actual OpenCode context/output limits, accessible theme colors and direct-file entry guidance. Explicit model choices now reach their named model. Existing account/key/routing settings are retained.
+
+The native 15-second SSEHeartbeat shares the guarded buffered writer across Chat, Responses and Messages, including silence before the first upstream frame. Comments do not count as model output, TTFT or usage and never reset generation/phase deadlines. Stream headers precede first-frame probing, so subsequent probe failures are SSE errors; authentication/connection failures and nonstreaming statuses retain their prior behavior. Downstream heartbeat failure interrupts the owned upstream, forbids replay and is visible to the request thread. Close/error/cancellation stop the heartbeat, including before same-account reopen.
+
+Messages upstream resets now remain upstream failures with original usage instead of being mislabeled as client cancellation. First-frame errors preserve the actual billed model. Seven new cases cover all three protocols and real loopback HTTP. The inventory is 210 Python and 61 Node suites; no extra generation retries are introduced.
+
+Three connection-deadline regressions additionally cover budget exhaustion during preparation, headers returned after the deadline, and expired socket errors. No connection starts after preparation spends the budget; late responses close without success or account penalties, with slots returned. Existing waits, retry counts and model selection are retained. Heartbeats cannot restore unavailable upstreams; proxy refusal, quotas and context limits on other provider routes require route-specific treatment.
+
+## v1.7.30 changes (historical safeguards retained)
 
 r2 adopts selected fixes from the supplied v1.7.30-r2 reference. Only counted admissions own slots: unlimited requests cannot release earlier requests, concurrent close releases once, and all exits close unreturned responses. OAuth refresh releases before renewal and reacquires under the original policy/deadline. Only complete bounded JSON-object 401 bodies establish expiry in request-triggered refresh; no late error-body reads occur after its watchdog. Background retry policy and verified TLS context remain unchanged. Cache accounting skips malformed details, booleans, nonfinite values and numeric overflow without rewriting the provider snapshot.
 
-The validation inventory is 206 Python suites (41 patch and 165 native) plus 59 Node suites. Eighteen added cases cover slot ownership, six adapters, cancellation, loop recovery, real loopback HTTP, 401 evidence and cache aliases. Synthetic tests do not establish production long-session completion rates.
+The v1.7.30 r2 inventory was 206 Python suites (41 patch and 165 native) plus 59 Node suites. Its eighteen added cases cover slot ownership, six adapters, cancellation, loop recovery, real loopback HTTP, 401 evidence and cache aliases; those safeguards remain in the current inventory above. Synthetic tests do not establish production long-session completion rates.
 
 Includes native check-in/keepalive/scheduler fixes, body draining and single chunk IDs, web-conversation cleanup/backoff, static API-key accounts, remote compaction v2, custom dropdowns and key policy persistence. Account concurrency, stable affinity, realm fallback and paid fallback retain existing settings and their off defaults.
 
@@ -70,7 +80,7 @@ The retained patch now normalizes positive cache-hit aliases at Chat/Responses o
 
 ## Retained v1.7.6 compatibility
 
-Upstream now redirects three named models (`gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.3-codex`) to DeepSeek by default. Matching uses the model name alone, so explicit foreground requests also match. Set `WB_BACKGROUND_MODEL_NAMES=""` to retain original routing, or configure the list/target explicitly.
+Upstream v1.7.6 through v1.7.30 redirected three named models (`gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.3-codex`) by name alone. Since v1.7.31, redirection requires explicit background metadata; foreground model choices are preserved. Set `WB_BACKGROUND_MODEL_NAMES=""` to disable background redirection, or configure the list/target explicitly.
 
 Anthropic Messages and count_tokens endpoints now return400 by default, after authentication and before payload forwarding. The bridge still ignores `cache_control`; cache parity is not fixed. Set `WB_ENABLE_ANTHROPIC_MESSAGES=1` only when retaining this protocol is intended. This public bundle preserves the upstream defaults; existing protocol regression suites opt in explicitly.
 
@@ -79,11 +89,11 @@ Anthropic Messages and count_tokens endpoints now return400 by default, after au
 Prepare separate clean pinned sources, keep the previous deployment and backups, and verify first:
 
 ~~~sh
-git clone --depth 1 --branch v1.7.30-ops.20261023.2 https://github.com/wushuai0802/workbuddy2api-hub-ops-patch.git ops-patch-v1730
-git clone --depth 1 --branch v1.7.30 https://github.com/ardeyouxipianyi/workbuddy2api-hub.git workbuddy2api-hub-v1.7.30
-git -C workbuddy2api-hub-v1.7.30 rev-parse HEAD
-python3 -B ops-patch-v1730/apply.py --verify-package
-python3 -B ops-patch-v1730/apply.py --target ./workbuddy2api-hub-v1.7.30 --dry-run
+git clone --depth 1 --branch v1.7.32-ops.20261023.1 https://github.com/wushuai0802/workbuddy2api-hub-ops-patch.git ops-patch-v1732
+git clone --depth 1 --branch v1.7.32 https://github.com/ardeyouxipianyi/workbuddy2api-hub.git workbuddy2api-hub-v1.7.32
+git -C workbuddy2api-hub-v1.7.32 rev-parse HEAD
+python3 -B ops-patch-v1732/apply.py --verify-package
+python3 -B ops-patch-v1732/apply.py --target ./workbuddy2api-hub-v1.7.32 --dry-run
 ~~~
 
 Use [INSTALL.md](docs/INSTALL.md) to stop the one intended service, apply, rebuild and recreate it with its original parameters. Earlier patched trees are not overlays; do not delete state or checksum metadata to bypass a refusal. The [previous v1.6.20 release](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.6.20-ops.20261012.1) remains available.
@@ -94,7 +104,7 @@ A response whose wire body was read in one block retains its connection lease un
 
 ## Verification and limits
 
-The runner covers 205 Python groups (40 patch and all 165 official groups), plus 57 official and 2 patch Node groups. CI checks Linux3.11/3.12 and Windows3.11; see [VERIFICATION.md](docs/VERIFICATION.md). Tests use synthetic data and loopback HTTP with external Python sockets denied; they do not establish online task completion.
+The runner covers 210 Python groups (43 patch and all 167 official groups), plus 59 official and 2 patch Node groups. CI checks Linux3.11/3.12 and Windows3.11; see [VERIFICATION.md](docs/VERIFICATION.md). Tests use synthetic data and loopback HTTP with external Python sockets denied; they do not establish online task completion.
 
 r2 protects quoted repetition examples, preserves already-consumed provider usage across guard failure, transport errors and cancellation, and bounds SSE lines/events (4/8MiB defaults). A request-local history observer reports repeated tool results without blocking or replaying tools. It does not combine sessions or infer generic shell-command progress. Durable metrics distinguish requests from guarded attempts and legal-output recovery from business completion, with explicit time/version/protocol grouping and retention limits.
 

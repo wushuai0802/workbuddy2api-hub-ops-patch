@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.7.32-ops.20261023.1 — 2026-10-23
+
+- 结合实际建连超时现象补齐3项期限反例：准备耗尽后不发包，迟到响应关闭且不记成功，超期异常不惩罚账号或重试；原连接/生成预算与模型选择保持。
+- 重基官方v1.7.32 / `477ba36ceea78ec4252c47a68e94a5a1612bab0b`，含v1.7.31：模型别名、后台改道仅认元数据、CN判定、OpenCode上下文、15秒SSE心跳、主题对比度及HTTP入口提示。
+- 心跳接入现有共享缓冲写出，覆盖首帧前静默；流式头先发、之后读取失败用SSE错误。注释不计模型输出/TTFT/用量，也不重置原期限。心跳写失败中断所属上游且不再恢复，所有终态停止线程，原地重开前先停旧线程。
+- Messages上游读异常不再误记客户端取消，保留错误帧与原provider用量；首帧错误继续保留实际计费模型。保留压缩、401、白名单、名额和历史/图片保护。
+- Added 7 heartbeat integration cases, including all three protocols and real loopback HTTP; retained native heartbeat, model/realm and dashboard tests. Explicit model choices follow the selected model; only declared background work can redirect. Validation inventory: 210 Python and 61 Node suites; retry counts and settings remain unchanged.
+
 ## v1.7.30-ops.20261023.2 — 2026-10-23
 
 - 参考外部v1.7.30-r2，名额仅由实际计数请求拥有；关闭限额不误还旧请求，close并发一次性归还。每次尝试finally关闭未交出的响应并归还，401先释放再刷新/准入，短等待服从原deadline。保留原白名单、候选ready与排除检查。

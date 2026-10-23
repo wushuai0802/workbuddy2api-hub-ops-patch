@@ -51,16 +51,20 @@ class V176DispatchTests(unittest.TestCase):
 
     def test_alias_dispatch_changes_only_model_before_generation(self):
         for path in ('/v1/chat/completions','/v1/responses','/v1/messages'):
-            body={'model':'gpt-5.6-terra','messages':[{'role':'user','content':'Synthetic task'}],
-                  'max_tokens':8,'stream':True,'tools':[{'type':'function','function':{'name':'inspect'}}]}
-            before=copy.deepcopy(body)
-            handler=self.handler(path,body)
-            with mock.patch.dict(os.environ,{'WB_ENABLE_ANTHROPIC_MESSAGES':'1'}), \
-                 mock.patch.object(wb,'BACKGROUND_MODEL_NAMES',('gpt-5.6-terra',)), \
-                 mock.patch.object(wb,'BACKGROUND_MODEL_TARGET','deepseek-v4.1-flash'),mock.patch.object(wb,'log'):
-                handler.do_POST()
-            self.assertEqual(body,dict(before,model='deepseek-v4.1-flash'))
-            (handler._handle_messages if path.endswith('/messages') else handler._dispatch_chat_post).assert_called_once()
+            for background in (False, True):
+                body={'model':'gpt-5.6-terra','messages':[{'role':'user','content':'Synthetic task'}],
+                      'max_tokens':8,'stream':True,'tools':[{'type':'function','function':{'name':'inspect'}}]}
+                if background:
+                    body['client_metadata']={'request_kind':'memory','thread_source':'memory_consolidation'}
+                before=copy.deepcopy(body)
+                handler=self.handler(path,body)
+                with mock.patch.dict(os.environ,{'WB_ENABLE_ANTHROPIC_MESSAGES':'1'}), \
+                     mock.patch.object(wb,'BACKGROUND_MODEL_NAMES',('gpt-5.6-terra',)), \
+                     mock.patch.object(wb,'BACKGROUND_MODEL_TARGET','deepseek-v4.1-flash'),mock.patch.object(wb,'log'):
+                    handler.do_POST()
+                expected='deepseek-v4.1-flash' if background else 'gpt-5.6-terra'
+                self.assertEqual(body,dict(before,model=expected))
+                (handler._handle_messages if path.endswith('/messages') else handler._dispatch_chat_post).assert_called_once()
 
     def test_empty_alias_list_preserves_explicit_model_routing(self):
         body={'model':'gpt-5.6-terra','messages':[]}

@@ -1282,6 +1282,7 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     material: {label:'Material', light:{"--bg":"#fefbff","--panel":"#ffffff","--panel2":"#f5eff7","--panel3":"#ece6f0","--line":"#cac4d0","--line-hover":"#b4aab8","--fg":"#1d1b20","--dim":"#5b5b66","--dim-light":"#767680","--accent":"#6750a4","--accent-hover":"#4f378b","--accent-soft":"#eaddff","--accent-selected-bg":"#e8def8","--accent2":"#006a60","--accent2-soft":"#ccfbee","--warn":"#7e5260","--bad":"#b3261e","--bad-soft":"#f9dedc","--think":"#5e5891","--think-soft":"#e5dffa","--shadow-sm":"0 1px 2px 0 rgba(29,27,32,.15)","--shadow":"0 1px 2px 0 rgba(29,27,32,.18),0 1px 3px 1px rgba(29,27,32,.10)","--shadow-md":"0 2px 4px -1px rgba(29,27,32,.12),0 4px 6px 1px rgba(29,27,32,.10)","--header-bg":"rgba(254,251,255,.94)","--hm0":"#e8def8","--hm1":"#d3c2f1","--hm2":"#b8a1ec","--hm3":"#9a82e3","--hm4":"#6750a4"}, dark:{"--bg":"#141218","--panel":"#211f26","--panel2":"#2b2930","--panel3":"#36343b","--line":"#49454f","--line-hover":"#5b5963","--fg":"#e6e1e5","--dim":"#c4c5d0","--dim-light":"#928f9a","--accent":"#d0bcff","--accent-hover":"#b9a4fa","--accent-soft":"rgba(208,188,255,.24)","--accent-selected-bg":"rgba(208,188,255,.30)","--accent2":"#4ecdb4","--accent2-soft":"rgba(78,205,180,.24)","--warn":"#f2b8b4","--bad":"#f2b8b4","--bad-soft":"rgba(242,184,180,.24)","--think":"#cfc4f7","--think-soft":"rgba(207,196,247,.18)","--shadow-sm":"0 1px 2px 0 rgba(0,0,0,.30)","--shadow":"0 1px 2px 0 rgba(0,0,0,.40),0 1px 3px 1px rgba(0,0,0,.30)","--shadow-md":"0 2px 4px -1px rgba(0,0,0,.45),0 4px 6px 1px rgba(0,0,0,.32)","--header-bg":"rgba(20,18,24,.88)","--hm0":"#2b2930","--hm1":"#332e44","--hm2":"#3d3460","--hm3":"#4d4080","--hm4":"#d0bcff"}},
     miuix: {label:'MiuiX', light:{"--bg":"#f6f7fa","--panel":"#ffffff","--panel2":"#eef0f4","--panel3":"#e2e6ee","--line":"#dde1e8","--line-hover":"#c9d0db","--fg":"#1f2024","--dim":"#5f6671","--dim-light":"#8c93a0","--accent":"#ff5c00","--accent-hover":"#ff7a33","--accent-soft":"rgba(255,92,0,.10)","--accent-selected-bg":"rgba(255,92,0,.18)","--accent2":"#07c160","--accent2-soft":"rgba(7,193,96,.12)","--warn":"#d48200","--bad":"#e53935","--bad-soft":"rgba(229,57,53,.10)","--think":"#7c4dff","--think-soft":"rgba(124,77,255,.10)","--shadow-sm":"0 1px 2px 0 rgba(31,32,36,.05)","--shadow":"0 2px 6px 0 rgba(31,32,36,.08)","--shadow-md":"0 6px 16px 0 rgba(31,32,36,.10)","--header-bg":"rgba(255,255,255,.85)","--hm0":"#ffece0","--hm1":"#ffd0b8","--hm2":"#ffb085","--hm3":"#ff8c4a","--hm4":"#ff5c00"}, dark:{"--bg":"#0e0f12","--panel":"#191b1f","--panel2":"#22252b","--panel3":"#2a2d34","--line":"#2e3239","--line-hover":"#3a3f48","--fg":"#f0f1f4","--dim":"#9aa0aa","--dim-light":"#7a8090","--accent":"#ff7a33","--accent-hover":"#ff9056","--accent-soft":"rgba(255,122,51,.18)","--accent-selected-bg":"rgba(255,122,51,.26)","--accent2":"#3ed984","--accent2-soft":"rgba(62,217,132,.20)","--warn":"#ffb852","--bad":"#ff6f6f","--bad-soft":"rgba(255,111,111,.16)","--think":"#a78bff","--think-soft":"rgba(167,139,255,.18)","--shadow-sm":"0 1px 2px 0 rgba(0,0,0,.40)","--shadow":"0 2px 6px 0 rgba(0,0,0,.55)","--shadow-md":"0 6px 18px 0 rgba(0,0,0,.60)","--header-bg":"rgba(14,15,18,.78)","--hm0":"#22252b","--hm1":"#332820","--hm2":"#4a2c20","--hm3":"#5c3220","--hm4":"#ff7a33"}}
   };
+  window.__WB_THEME_STYLES__ = THEME_STYLES;
   var STYLE_GEOMETRY = {claude:12, material:14, miuix:20};
   Object.keys(THEME_STYLES).forEach(function(id){
     ['light','dark'].forEach(function(mode){
@@ -10659,6 +10660,11 @@ async function submitPanelLogin(){
   const password = (input && input.value) || '';
   if(!password){ if(msg) msg.textContent = '请输入面板密码'; return; }
   if(msg) msg.textContent = '';
+  if(location.protocol === 'file:'){
+    if(msg) msg.textContent = '请通过 http://127.0.0.1:8788/ 打开面板，不要直接双击 dashboard.html';
+    panelNeedsLogin();
+    return;
+  }
   try {
     const r = await fetch('/panel/login', {
       method: 'POST',
@@ -17356,6 +17362,7 @@ if (typeof SORT_DENY_TABLES !== 'undefined' && SORT_DENY_TABLES && SORT_DENY_TAB
     ['--accent2', '成功色', 'signal'],
     ['--warn', '警告色', 'signal'],
     ['--bad', '错误色', 'signal'],
+    ['--on-accent', '主按钮字', 'onaccent'],
     ['--bg', '页面底', 'layer'],
     ['--panel', '卡片', 'layer'],
     ['--panel2', '内嵌块', 'layer'],
@@ -17370,6 +17377,114 @@ if (typeof SORT_DENY_TABLES !== 'undefined' && SORT_DENY_TABLES && SORT_DENY_TAB
   var box = document.getElementById('tunerBox');
   var rowsEl = document.getElementById('tunerRows');
   var themeLabel = document.getElementById('tunerTheme');
+  var TEXT_MIN = 4.5;
+  /* Kept inline: the page is served as one HTML document, and a separate
+     <script src> would add a second request and a failure mode when the page
+     is opened from disk. tests/_test_dashboard_theme_contrast.js executes the
+     same functions from this block. */
+  var COLOR = (function(){
+    function clampByte(value){ return Math.max(0, Math.min(255, Math.round(Number(value)))); }
+    function parseColor(value, backdrop){
+      var text = String(value == null ? '' : value).trim();
+      if (!text) return null;
+      if (text.toLowerCase() === 'transparent') {
+        var clearBase = backdrop ? parseColor(backdrop) : [255,255,255,1];
+        return clearBase ? clearBase.slice() : null;
+      }
+      var rgba = text.match(/^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)(?:\s*,\s*([\d.]+))?\s*\)$/i);
+      if (rgba){
+        var alpha = rgba[4] === undefined ? 1 : Number(rgba[4]);
+        if (!isFinite(alpha) || alpha < 0 || alpha > 1) return null;
+        var base = backdrop ? parseColor(backdrop) : [255,255,255,1];
+        if (!base) return null;
+        return [
+          clampByte(Number(rgba[1]) * alpha + base[0] * (1 - alpha)),
+          clampByte(Number(rgba[2]) * alpha + base[1] * (1 - alpha)),
+          clampByte(Number(rgba[3]) * alpha + base[2] * (1 - alpha)),
+          1
+        ];
+      }
+      var hex = text.replace(/^#/, '');
+      if (hex.length === 3) hex = hex[0]+hex[0]+hex[1]+hex[1]+hex[2]+hex[2];
+      if (hex.length === 4) hex = hex[0]+hex[0]+hex[1]+hex[1]+hex[2]+hex[2]+hex[3]+hex[3];
+      if (/^[0-9a-f]{6}$/i.test(hex)) {
+        return [parseInt(hex.slice(0,2),16), parseInt(hex.slice(2,4),16),
+                parseInt(hex.slice(4,6),16), 1];
+      }
+      if (/^[0-9a-f]{8}$/i.test(hex)) {
+        var bg = backdrop ? parseColor(backdrop) : [255,255,255,1];
+        if (!bg) return null;
+        var a = parseInt(hex.slice(6,8),16) / 255;
+        return [
+          clampByte(parseInt(hex.slice(0,2),16) * a + bg[0] * (1 - a)),
+          clampByte(parseInt(hex.slice(2,4),16) * a + bg[1] * (1 - a)),
+          clampByte(parseInt(hex.slice(4,6),16) * a + bg[2] * (1 - a)),
+          1
+        ];
+      }
+      return null;
+    }
+    function hexOf(rgb){
+      if (!rgb) return null;
+      return '#' + rgb.slice(0,3).map(function(v){
+        return clampByte(v).toString(16).padStart(2,'0');
+      }).join('');
+    }
+    function channel(v){ v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); }
+    function luminance(value){
+      var rgb = parseColor(value);
+      if (!rgb) return null;
+      return 0.2126 * channel(rgb[0]) + 0.7152 * channel(rgb[1]) + 0.0722 * channel(rgb[2]);
+    }
+    function contrast(a, b){
+      var la = luminance(a), lb = luminance(b);
+      if (la == null || lb == null) return null;
+      return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
+    }
+    function worstContrast(value, backgrounds){
+      var worst = null;
+      for (var i = 0; i < backgrounds.length; i++){
+        var r = contrast(value, backgrounds[i]);
+        if (r == null) return null;
+        if (worst == null || r < worst) worst = r;
+      }
+      return worst;
+    }
+    function mix(from, to, amount){
+      var a = parseColor(from), b = parseColor(to);
+      if (!a || !b) return null;
+      return [
+        clampByte(a[0] + (b[0] - a[0]) * amount),
+        clampByte(a[1] + (b[1] - a[1]) * amount),
+        clampByte(a[2] + (b[2] - a[2]) * amount),
+        1
+      ];
+    }
+    function ensureContrast(value, backgrounds, fallback, minimum){
+      var min = typeof minimum === 'number' ? minimum : TEXT_MIN;
+      var ratio = worstContrast(value, backgrounds);
+      if (ratio != null && ratio >= min) return { value: value, ratio: ratio, adjusted: false };
+      var backup = worstContrast(fallback, backgrounds);
+      if (backup != null && backup >= min) return { value: fallback, ratio: backup, adjusted: true };
+      var seed = value;
+      if (worstContrast(seed, backgrounds) == null) seed = fallback;
+      if (worstContrast(seed, backgrounds) == null) seed = '#808080';
+      var black = worstContrast('#000000', backgrounds);
+      var white = worstContrast('#ffffff', backgrounds);
+      var target = (white != null && (black == null || white > black)) ? '#ffffff' : '#000000';
+      var best = seed, bestRatio = worstContrast(seed, backgrounds);
+      for (var step = 1; step <= 255; step++){
+        var candidate = hexOf(mix(seed, target, step / 255));
+        var candidateRatio = worstContrast(candidate, backgrounds);
+        if (candidateRatio == null) continue;
+        best = candidate; bestRatio = candidateRatio;
+        if (candidateRatio >= min) break;
+      }
+      return { value: best, ratio: bestRatio, adjusted: true };
+    }
+    return { parseColor: parseColor, hexOf: hexOf, contrast: contrast,
+             worstContrast: worstContrast, ensureContrast: ensureContrast };
+  })();
 
   function theme(){ return document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light'; }
   function readVar(n){
@@ -17383,26 +17498,47 @@ if (typeof SORT_DENY_TABLES !== 'undefined' && SORT_DENY_TABLES && SORT_DENY_TAB
     switching = true;
     var cur = document.documentElement.getAttribute('data-theme') || 'light';
     document.documentElement.setAttribute('data-theme', t);
+    var raw = {};
+    for (var i = 0; i < VARS.length; i++) raw[VARS[i][0]] = readVar(VARS[i][0]);
     var out = {};
-    for (var i = 0; i < VARS.length; i++) out[VARS[i][0]] = readVar(VARS[i][0]) || '#000000';
+    for (var i = 0; i < VARS.length; i++){
+      var name = VARS[i][0];
+      var backdrop = name === '--panel2' ? raw['--panel'] : null;
+      out[name] = COLOR.hexOf(COLOR.parseColor(raw[name], backdrop)) || '#000000';
+    }
     document.documentElement.setAttribute('data-theme', cur);
     switching = false;
     return out;
   }
-  function chan(v){ v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); }
-  function lum(hex){
-    hex = String(hex).replace('#', '');
-    if (hex.length === 3) hex = hex[0]+hex[0]+hex[1]+hex[1]+hex[2]+hex[2];
-    var r = parseInt(hex.slice(0,2),16), g = parseInt(hex.slice(2,4),16), b = parseInt(hex.slice(4,6),16);
-    if (isNaN(r) || isNaN(g) || isNaN(b)) return null;
-    return 0.2126 * chan(r) + 0.7152 * chan(g) + 0.0722 * chan(b);
+  /* The fallback must come from the built-in CSS, not from a saved tuner
+     value: an older low-contrast custom colour must not become the new floor. */
+  function readBuiltInVals(t){
+    var style = document.getElementById('tunerStyle');
+    var hostText = Array.prototype.map.call(document.querySelectorAll('style'), function(node){
+      return node === style ? '' : (node.textContent || '');
+    }).join('');
+    var themeData = window.__WB_THEME_STYLES__ || {};
+    var styleId = document.documentElement.getAttribute('data-theme-style') || 'claude';
+    var palette = themeData[styleId] && themeData[styleId][t];
+    var values = {};
+    for (var i = 0; i < VARS.length; i++) {
+      var name = VARS[i][0];
+      var re = new RegExp((t === 'dark' ? '\\[data-theme="dark"\\]' : ':root') +
+        '\\{(?=[^}]*' + name + '\\s*:)[^}]*' + name + '\\s*:\\s*([^;}]+)', 'i');
+      var m = hostText.match(re);
+      values[name] = (palette && palette[name]) || (m ? m[1].trim() : '');
+    }
+    return values;
   }
-  function ratio(a, b){
-    var la = lum(a), lb = lum(b);
-    if (la == null || lb == null) return null;
-    return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
+  function ratio(a, b){ return COLOR.contrast(a, b); }
+  function check(name, kind, t){
+    if (kind === 'onaccent') return ratio(t[name], t['--accent']);
+    if (kind === 'text') return COLOR.worstContrast(t[name], [t['--panel'], t['--bg']]);
+    if (kind === 'signal'){
+      return COLOR.worstContrast(t[name], [t['--panel'], t['--bg']]);
+    }
+    return ratio(t[name], t['--panel']);
   }
-
   var edits;
   try { var saved = JSON.parse(localStorage.getItem(KEY) || 'null'); } catch(e){ saved = null; }
   if (saved && saved.light && saved.dark && saved.light['--accent'] && saved.dark['--accent']) {
@@ -17410,6 +17546,7 @@ if (typeof SORT_DENY_TABLES !== 'undefined' && SORT_DENY_TABLES && SORT_DENY_TAB
   } else {
     edits = { light: readThemeVals('light'), dark: readThemeVals('dark') };
   }
+  var DEFAULT = { light: readBuiltInVals('light'), dark: readBuiltInVals('dark') };
 
   function apply(){
     if (!styleEl){ styleEl = document.createElement('style'); styleEl.id = 'tunerStyle'; document.head.appendChild(styleEl); }
@@ -17422,6 +17559,32 @@ if (typeof SORT_DENY_TABLES !== 'undefined' && SORT_DENY_TABLES && SORT_DENY_TAB
       '[data-theme="dark"] #pageAnalytics{' + scoped('dark') + '}';
   }
   function save(){ try { localStorage.setItem(KEY, JSON.stringify(edits)); } catch(e){} }
+
+  function backgrounds(name, t){
+    if (name === '--on-accent') return [t['--accent']];
+    if (name === '--accent' || name === '--accent2' || name === '--warn' || name === '--bad'){
+      return [t['--panel'], t['--bg']];
+    }
+    if (name === '--fg' || name === '--dim') return [t['--panel'], t['--bg']];
+    if (name === '--panel2') return [t['--panel']];
+    return [t['--panel']];
+  }
+
+  function safeValue(name, kind, t, mode){
+    var candidate = t[name];
+    if (kind === 'layer' || kind === 'edge') return candidate;
+    var fallback = (DEFAULT[mode] || {})[name] || '';
+    var result = COLOR.ensureContrast(candidate, backgrounds(name, t), fallback, TEXT_MIN);
+    return result.value || candidate;
+  }
+
+  function normalizeAll(){
+    ['light', 'dark'].forEach(function(t){
+      VARS.forEach(function(v){
+        edits[t][v[0]] = safeValue(v[0], v[2], edits[t], t);
+      });
+    });
+  }
 
   function renderRows(){
     var t = theme();
@@ -17439,7 +17602,9 @@ if (typeof SORT_DENY_TABLES !== 'undefined' && SORT_DENY_TABLES && SORT_DENY_TAB
       row.appendChild(lab); row.appendChild(inp); row.appendChild(code); row.appendChild(rat);
       inp.addEventListener('input', function(){
         edits[t][name] = inp.value;
-        code.textContent = inp.value;
+        edits[t][name] = safeValue(name, v[2], edits[t], t);
+        inp.value = edits[t][name];
+        code.textContent = edits[t][name];
         apply(); renderRatios(); save();
       });
       rowsEl.appendChild(row);
@@ -17455,14 +17620,15 @@ if (typeof SORT_DENY_TABLES !== 'undefined' && SORT_DENY_TABLES && SORT_DENY_TAB
       if(!rows || !rows[i] || !rows[i].children) continue;
       var el = rows[i].children[3];
       if(!el) continue;
-      var r = ratio(t[name], panel);
+      var r = check(name, kind, t);
       if (kind === 'layer'){
         if (name === '--panel') r = ratio(t['--panel'], t['--bg']);   /* 卡片行显示与页面底的层次 */
+        if (name === '--panel2') r = ratio(t['--panel2'], t['--panel']);
         el.textContent = '层次 ' + (r ? r.toFixed(2) : '-'); el.className = 'ratio';
       }
       else if (kind === 'edge'){ el.textContent = '边框 ' + (r ? r.toFixed(2) : '-'); el.className = 'ratio'; }
       else {
-        var ok = r != null && r >= 4.5;
+        var ok = r != null && r >= TEXT_MIN;
         el.textContent = (r ? r.toFixed(2) : '-') + (ok ? ' ✓' : ' ⚠');
         el.className = 'ratio ' + (ok ? 'ok' : 'low');
       }
@@ -17505,6 +17671,7 @@ if (typeof SORT_DENY_TABLES !== 'undefined' && SORT_DENY_TABLES && SORT_DENY_TAB
     try { localStorage.removeItem(KEY); } catch(e){}
     if (styleEl){ styleEl.remove(); styleEl = null; }
     edits = { light: readThemeVals('light'), dark: readThemeVals('dark') };
+    DEFAULT = { light: Object.assign({}, edits.light), dark: Object.assign({}, edits.dark) };
     apply(); renderRows();
   });
   document.getElementById('tunerExport').addEventListener('click', function(){
@@ -17522,6 +17689,7 @@ if (typeof SORT_DENY_TABLES !== 'undefined' && SORT_DENY_TABLES && SORT_DENY_TAB
     }).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
   }
 
+  normalizeAll();
   apply();
   renderRows();
 })();

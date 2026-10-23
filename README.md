@@ -4,17 +4,17 @@
 
 为 WorkBuddy 网关提供 DeepSeek 复读保护、受限认证续期、推理历史与工具图片兼容，以及流式协议边界修复。基于[官方项目](https://github.com/ardeyouxipianyi/workbuddy2api-hub)，可检查、可回退，遵循 MIT。
 
-当前版本：**v1.7.30-ops.20261023.2**。
+当前版本：**v1.7.32-ops.20261023.1**。完整离线与合成验证已通过；真实上游成功验收仍待完成，验证范围见[记录](docs/VERIFICATION.md)。
 
-本次参考外部v1.7.30-r2，修复关闭并发上限时误还旧请求名额、返回前异常漏关上游、401刷新占槽与等待超时误分类。收紧401过期证据，忽略畸形缓存用量别名；保留上一版完整压缩判定、防复读、历史/图片兼容及期限保护。官方最新仍为v1.7.30。
+升级官方v1.7.32，继承模型别名、显式选模型不再误改道、CN模型判定、OpenCode上下文与面板对比度修复。将原生15秒SSE心跳接入现有缓冲/流守卫，覆盖首帧前静默，保留压缩、防复读、401、计费与名额保护，并修复Messages上游断流误记客户端取消。
 
-- [下载 ZIP 与 SHA256SUMS.txt](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.7.30-ops.20261023.2)
-- 文件名：`workbuddy2api-hub-v1.7.30-wushuai0802-ops-20261023-r2.zip`
-- 仅支持官方 **v1.7.30**，提交 `84dbc99b1a34182130ee9035f9d80b69a0fc2e8b`。
+- [下载 ZIP 与 SHA256SUMS.txt](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.7.32-ops.20261023.1)
+- 文件名：`workbuddy2api-hub-v1.7.32-wushuai0802-ops-20261023-r1.zip`
+- 仅支持官方 **v1.7.32**，提交 `477ba36ceea78ec4252c47a68e94a5a1612bab0b`。
 - Python 3.11+。Docker 用户从打过完整补丁的准确源码重新构建镜像。
 - 安装器替换四个上游Python模块（proxy、accounts、webtools、upstream_pool）及看板，新增 ops、stall、observe 三个模块；不操作账号、Key、配置、历史或部署。
 
-本版把已有补丁迁移到官方 v1.7.30，保留混合复读、推理别名预算、工具图片、拒答、用量结算和连接所有权保护。来源与许可见 [NOTICE.md](NOTICE.md) 和 [THIRD-PARTY-zh.md](THIRD-PARTY-zh.md)。
+本版把已有补丁迁移到官方 v1.7.32，保留混合复读、推理别名预算、工具图片、拒答、用量结算和连接所有权保护。来源与许可见 [NOTICE.md](NOTICE.md) 和 [THIRD-PARTY-zh.md](THIRD-PARTY-zh.md)。
 
 本次修复响应头预算被固定45秒覆盖的问题：响应头尊重面板设置，返回后才开始45秒首帧预算；初始连接、恢复和网页工具后续生成共享原300秒总期限。纯推理循环的唯一一次安全恢复默认加入简短接续提示，可用 `WB_OPS_LOOP_RECOVERY_HINT=0` 关闭提示。连续已知失败前缀最多清理16段/65536字符，保留未知后缀和客户端原历史。持久观察新增匿名规则、窗口计数和恢复停止原因；检测阈值保持。
 
@@ -32,7 +32,17 @@
 
 上游 v1.7.4/1.7.5 增加默认关闭的SQLite日志及保留限制、checkpoint修复、凭据手动导入、新主题/统计面板、每日及手动模型目录刷新、来源标记和原始目录归档。模型目录/倍率现在优先使用实际API结果，显示可能变化；这些原生功能不代替防复读。SQLite日志是否启用沿用用户设置，公开包不自动开启。
 
-## v1.7.30 升级与修复
+## v1.7.32 升级与补丁衔接
+
+官方v1.7.31恢复model_aliases，在协议转换/选号前解析；后台免费改道仅对client_metadata明确识别的后台任务生效，显式选择GPT等模型按所选模型路由。收窄CN专属判定，国际版minimax-m3.1-flash不再误拦，OpenCode配置写入真实context/output上限。v1.7.32校正面板主题到WCAG AA，并为直接打开HTML给出HTTP入口提示。官方功能由基线提供，既有Key、账号、路由设置不由安装器修改。
+
+三条流接口共享原生SSEHeartbeat与缓冲写出锁，15秒静默发合法注释帧；心跳不算模型输出、首token或用量，不延长原生成/首帧期限。流式请求进入首帧探测前发送200/SSE响应头，首帧读取失败改发SSE错误；上游建连/认证错误和非流式状态保持原处理。心跳写失败会中断本请求拥有的上游，不再恢复生成；关闭线程后才进行允许的原地重开，避免两条线程写同一响应。结束/失败/取消均停止线程。
+
+Messages只把实际下游写失败视为客户端取消，上游ConnectionResetError保留错误帧和原provider用量。首帧错误在holder建立后仍按实际计费模型结算。新增7项专项，含三协议首帧/生成静默、真实HTTP、失败取消、原期限、重开线程清理及后台写错可见性；没有增加生成恢复次数。
+
+结合实际建连超时现象，增加3项连接期限回归并修复准备工作耗尽预算后仍发包、迟到响应仍记成功、预算耗尽后惩罚账号的问题。发包前复核剩余时间，响应头返回后再复核；超期关闭所属响应并归还名额，不增加等待/重试或更换模型。心跳只处理下游静默，不能使不可用的上游恢复；外部供应商的代理连接拒绝、额度/上下文错误仍需由对应线路处理。
+
+## v1.7.30 升级与修复（历史，保护继续保留）
 
 r2仅为真正计数的准入保留名额；关限额后的新请求不会归还旧请求名额。响应持有名额直到close，并用锁保证并发close只归还一次。请求准备、返回前记账、取消等退出都会关闭尚未交出的响应并归还名额；401先归还再刷新/重新准入，等待受原截止时间限制。
 
@@ -106,9 +116,9 @@ Chat流式响应在客户端尚未收到任何字节时，对同一账号、同�
 
 完善缓存规范化与本地补丁的衔接：Chat/Responses输出在有命中时使用对应标准字段，响应独立于原始记账快照；原始provider用量/明细保留。断网重试等待受原请求期限约束，未增加聊天恢复次数。测试覆盖六条协议路径、缓存别名及提前截止反例。
 
-## 保留的v1.7.6行为
+## v1.7.6 历史默认与当前区别
 
-上游默认把`gpt-5.6-terra / gpt-5.6-luna / gpt-5.3-codex`重定向到`deepseek-v4.1-flash`。它只按模型名匹配，主动请求这些模型也会被改写，不识别请求是否来自后台。`WB_BACKGROUND_MODEL_NAMES=""`可关闭；名单和目标均可自定义。
+v1.7.6～v1.7.30曾仅按模型名把`gpt-5.6-terra / gpt-5.6-luna / gpt-5.3-codex`改为`deepseek-v4.1-flash`。v1.7.31起修正为仅处理元数据明确的后台请求，显式选择保持；名单和目标仍可自定义，空名单关闭后台改道。
 
 `/v1/messages`、`/messages`及其count_tokens端点默认在转发前返回400；原API Key鉴权仍先执行。原因是转换层仍不透传`cache_control`，该更新没有修复缓存等价性。显式`WB_ENABLE_ANTHROPIC_MESSAGES=1`保留旧接口行为。升级前按已有调用决定兼容设置；本公开包保留上游默认，不自动启用这项协议。
 
@@ -117,11 +127,11 @@ Chat流式响应在客户端尚未收到任何字节时，对同一账号、同�
 先保存旧镜像、源码、配置和数据，在新目录获取两个准确版本：
 
 ~~~sh
-git clone --depth 1 --branch v1.7.30-ops.20261023.2 https://github.com/wushuai0802/workbuddy2api-hub-ops-patch.git ops-patch-v1730
-git clone --depth 1 --branch v1.7.30 https://github.com/ardeyouxipianyi/workbuddy2api-hub.git workbuddy2api-hub-v1.7.30
-git -C workbuddy2api-hub-v1.7.30 rev-parse HEAD
-python3 -B ops-patch-v1730/apply.py --verify-package
-python3 -B ops-patch-v1730/apply.py --target ./workbuddy2api-hub-v1.7.30 --dry-run
+git clone --depth 1 --branch v1.7.32-ops.20261023.1 https://github.com/wushuai0802/workbuddy2api-hub-ops-patch.git ops-patch-v1732
+git clone --depth 1 --branch v1.7.32 https://github.com/ardeyouxipianyi/workbuddy2api-hub.git workbuddy2api-hub-v1.7.32
+git -C workbuddy2api-hub-v1.7.32 rev-parse HEAD
+python3 -B ops-patch-v1732/apply.py --verify-package
+python3 -B ops-patch-v1732/apply.py --target ./workbuddy2api-hub-v1.7.32 --dry-run
 ~~~
 
 提交必须匹配上面的完整SHA。预检通过后，按[安装指南](docs/INSTALL.md)暂停唯一目标服务、应用完整补丁、构建并定向切换。已有旧补丁（包括v1.7.3）不能直接叠加；不要删除状态/备份绕过检查。旧Release/tag继续保留。
@@ -130,7 +140,7 @@ python3 -B ops-patch-v1730/apply.py --target ./workbuddy2api-hub-v1.7.30 --dry-r
 
 ## 验证与边界
 
-离线runner包含206组Python回归（41组补丁及全部165组官方Python），另有57组官方Node及2组补丁Node。r2新增14项名额生命周期、2项401证据及2项缓存用量回归，含六接口、真实loopback HTTP与并发close。CI检查Linux3.11/3.12与Windows3.11，实际结果见[验证记录](docs/VERIFICATION.md)。
+离线runner包含210组Python回归（43组补丁及全部167组官方Python），另有59组官方Node及2组补丁Node。新增7项心跳衔接专项。r2新增14项名额生命周期、2项401证据及2项缓存用量回归，含六接口、真实loopback HTTP与并发close。CI检查Linux3.11/3.12与Windows3.11，实际结果见[验证记录](docs/VERIFICATION.md)。
 
 测试使用合成账号、空数据和本机HTTP，不含真实会话。检测仍以单次生成为范围，尚无通用跨工具回合业务进展熔断。健康、模块指纹或离线测试不等于真实长会话输出质量验收。
 

@@ -229,7 +229,7 @@ def detect_model_realm(model_id):
 # hy3, glm-5.3 ...) is served by both exits, so it must not be treated as a
 # conflict.
 INTL_EXCLUSIVE_PREFIXES = ("gpt-", "gemini-")
-CN_EXCLUSIVE_PREFIXES = ("minimax-", "deepseek-v4-pro")
+CN_EXCLUSIVE_PREFIXES = ("deepseek-v4-pro",)
 INTL_EXCLUSIVE = {
     "gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
     "gpt-5.5", "gpt-5.4", "gpt-5.3-codex", "gemini-3.5-flash",
@@ -330,7 +330,13 @@ BACKGROUND_MODEL_NAMES = tuple(
 
 
 def _apply_background_model_alias(payload):
-    """Rewrite known client background-task models to a free target model."""
+    """Rewrite known client background-task models to a free target model.
+
+    A model name alone cannot tell a background job from a model the user
+    picked: the desktop client requests `gpt-5.6-terra` for both. Only rewrite
+    a body that also carries the client's background metadata; an explicit
+    picker request must reach the model it names (issue #619).
+    """
     if not isinstance(payload, dict):
         return
     name = payload.get("model")
@@ -338,8 +344,30 @@ def _apply_background_model_alias(payload):
         return
     if name.strip().lower() not in BACKGROUND_MODEL_NAMES:
         return
+    if not background_request_reason(payload):
+        return
     payload["model"] = BACKGROUND_MODEL_TARGET
     log("alias: background model %s -> %s" % (name, BACKGROUND_MODEL_TARGET))
+
+
+def _apply_model_aliases(payload, aliases):
+    """Rewrite a client's model name from the operator's alias table.
+
+    Claude Desktop's custom endpoint only offers ``claude-*`` names, while the
+    WorkBuddy upstream only knows its real ids.  The mapping belongs before any
+    protocol translation so chat, Responses and Anthropic requests all see the
+    resolved id.  Unknown names pass through unchanged.
+    """
+    if not isinstance(payload, dict) or not isinstance(aliases, dict):
+        return
+    name = payload.get("model")
+    if not isinstance(name, str):
+        return
+    target = aliases.get(name.strip().lower())
+    if not target or target == name:
+        return
+    payload["model"] = target
+    log("alias: model %s -> %s" % (name, target))
 
 
 # The WorkBuddy AI desktop app caches its account product config here on every
@@ -10232,7 +10260,7 @@ def runtime_settings_view():
         "accounts_dir": ACCOUNTS_DIR,
         "usage_dir": USAGE_DIR,
         "settings_file": wb_settings.settings_path(ACCOUNTS_DIR),
-        "version": "1.7.30",
+        "version": "1.7.32",
     }
 def current_account():
     """Account used for display purposes (health / usage summaries)."""
@@ -11577,7 +11605,7 @@ def _patch_payload_fingerprint():
     return hashlib.sha256(''.join(records).encode('ascii')).hexdigest()
 
 _OPS_PATCH_FINGERPRINT = _patch_payload_fingerprint()
-_OPS_PATCH_ID = "v1.7.30-ops.20261023.2"
+_OPS_PATCH_ID = "v1.7.32-ops.20261023.1"
 _OBSERVATION_STORE = None
 _OBSERVATION_STORE_LOCK = threading.Lock()
 
@@ -11969,6 +11997,7 @@ class _GuardedStream:
         self.upstream = upstream
         _hold_stream_response(upstream)
         self.holder = holder
+        holder["ops_active_stream"] = self
         holder["billed_model"] = getattr(upstream, "_wb_billed_model", None) or holder.get("model")
         holder.pop("loop_evidence", None)
         carried = getattr(upstream, '_ops_generation_deadline', _UNSET_DEADLINE)
@@ -12055,8 +12084,14 @@ class _GuardedStream:
     def __iter__(self):
         # Adapters decode raw SSE lines; keep one wire type even when a test
         # upstream or text-mode source yields str.
+        if self.holder.get("ops_client_closed"):
+            raise _ClientStreamClosed()
         for item in self._iter_items():
+            if self.holder.get("ops_client_closed"):
+                raise _ClientStreamClosed()
             yield item.encode("utf-8") if isinstance(item, str) else item
+        if self.holder.get("ops_client_closed"):
+            raise _ClientStreamClosed()
 
     def _iter_items(self):
         # Bound both the initial prefix and a newly suspicious short-intent
@@ -12414,6 +12449,10 @@ class _GuardedStream:
         if self.closed:
             return
         self.closed = True
+        if self.holder.get("ops_active_stream") is self:
+            self.holder.pop("ops_active_stream", None)
+        if self.holder.get("ops_heartbeat_upstream") is self.upstream:
+            self.holder.pop("ops_heartbeat_upstream", None)
         if self.leak_reported:
             _loop_event("thinking_content_summary",
                         metrics={"content_chars": self.received_chars-self.reason_chars,
@@ -12467,18 +12506,24 @@ class _ProbedStream:
         self.close()
 
 
-def probe_first_frame(upstream, retry_call=None, tried=None, deadline_at=None, require_frame=False):
-    """Validate and replay the first SSE data frame before sending HTTP 200."""
+def probe_first_frame(upstream, retry_call=None, tried=None, deadline_at=None, require_frame=False,
+                      cancel_holder=None):
+    """Validate and replay the first SSE frame within its original phase budget."""
     if isinstance(upstream, _ProbedStream):
         return upstream, None
     excluded = list(tried or [])
     account = None
     retried = False
-    deadline_at = deadline_at or time.monotonic() + FIRST_FRAME_DEADLINE
+    deadline_at = deadline_at or _phase_deadline(
+        getattr(upstream, '_ops_generation_deadline', None), FIRST_FRAME_DEADLINE)
     for attempt in range(FIRST_FRAME_MAX_ATTEMPTS):
         timer = None
         socket_deadline_limited = False
         try:
+            if cancel_holder is not None:
+                if cancel_holder.get("ops_client_closed"):
+                    raise _ClientStreamClosed()
+                cancel_holder["ops_heartbeat_upstream"] = upstream
             _hold_stream_response(upstream)
             remaining = deadline_at - time.monotonic()
             if remaining <= 0:
@@ -12503,6 +12548,8 @@ def probe_first_frame(upstream, retry_call=None, tried=None, deadline_at=None, r
             prefix = []
             preamble_bytes = 0
             for raw in iterator:
+                if cancel_holder is not None and cancel_holder.get("ops_client_closed"):
+                    raise _ClientStreamClosed()
                 if time.monotonic() >= deadline_at:
                     raise TimeoutError("first-frame deadline exceeded")
                 prefix.append(raw)
@@ -12554,6 +12601,8 @@ def probe_first_frame(upstream, retry_call=None, tried=None, deadline_at=None, r
                 # egress unhealthy; a later successful retry must not erase it.
                 wb_egress.note_transient(egress_key)
             _close_upstream(upstream)
+            if cancel_holder is not None and cancel_holder.get("ops_client_closed"):
+                raise _ClientStreamClosed() from exc
             if isinstance(exc, http.client.IncompleteRead) and time.monotonic() >= deadline_at:
                 # Linux returns EOF at the probe deadline without raising a
                 # socket timeout; the short body is deadline expiry, not a
@@ -14313,6 +14362,7 @@ BLOCK_BACKGROUND_REQUESTS = False
 # 命中任一关键字就视为背景请求（不分大小写、子字串比对）
 BACKGROUND_TRIGGER_KEYWORDS = (
     "memory_consolidation",
+    "memory",
     "memory-write",
     "memory_write",
     "memorywriting",
@@ -16045,11 +16095,16 @@ def open_upstream(payload, session_key=None, target_realm=None,
             req.wb_exact_headers = list(req_headers.items())
             sent_auth = req.get_header("Authorization", "")
             failed_token = sent_auth[7:] if sent_auth.startswith("Bearer ") else getattr(account, "access_token", "")
+            timeout = header_timeout
+            if deadline_at is not None:
+                remaining = deadline_at - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("upstream connection deadline exceeded")
+                timeout = min(timeout, remaining)
             try:
-                timeout = header_timeout
-                if deadline_at is not None:
-                    timeout = min(timeout, max(.01, deadline_at - time.monotonic()))
                 resp = wb_accounts.urlopen(req, timeout=timeout, proxy=account.proxy)
+                if deadline_at is not None and time.monotonic() >= deadline_at:
+                    raise TimeoutError("upstream connection deadline exceeded")
                 _apply_stream_idle_timeout(resp, idle_timeout)
                 account.note_success(model=model)
                 if egress_backoff and not defer_egress_success:
@@ -16296,6 +16351,8 @@ def open_upstream(payload, session_key=None, target_realm=None,
                     _close_upstream(resp)
                     resp = None
                 release_slot()
+                if deadline_at is not None and time.monotonic() >= deadline_at:
+                    raise TimeoutError("upstream connection deadline exceeded") from exc
                 if wb_accounts.is_tls_verify_error(exc):
                     # One attempt is enough: the chain is the same for every
                     # account, and retrying only multiplies the failed handshakes.
@@ -16924,6 +16981,73 @@ def aggregate_stream(raw_iter, model, resp_id, holder=None):
         return result
     finally:
         guarded.close()
+
+
+SSE_HEARTBEAT_SECONDS = 15.0
+
+
+class SSEHeartbeat:
+    """Write SSE comments while the request thread is blocked on the upstream.
+
+    A keepalive checked only before a blocking read cannot run during the very
+    silence it is meant to cover. This daemon thread owns the same lock as the
+    request's writes, so comments can never split a JSON/SSE frame.
+    """
+
+    def __init__(self, write, interval=SSE_HEARTBEAT_SECONDS):
+        self._write = write
+        self._interval = max(0.05, float(interval))
+        self._lock = threading.RLock()
+        self._last_write_at = time.monotonic()
+        self._stop = threading.Event()
+        self._closed = False
+        self._error = None
+        self._thread = threading.Thread(
+            target=self._run, name="wb-sse-heartbeat", daemon=True)
+        self._thread.start()
+
+    def write(self, data):
+        if not data:
+            return
+        with self._lock:
+            if self._error is not None:
+                raise self._error
+            if self._closed:
+                return
+            self._write(data)
+            self._last_write_at = time.monotonic()
+
+    def _run(self):
+        tick = min(0.1, self._interval / 4.0)
+        while not self._stop.wait(tick):
+            with self._lock:
+                if self._closed:
+                    return
+                idle = time.monotonic() - self._last_write_at
+                if idle < self._interval:
+                    continue
+                try:
+                    self._write(b": keepalive\n\n")
+                    self._last_write_at = time.monotonic()
+                except Exception as exc:
+                    self._error = exc
+                    self._closed = True
+                    self._stop.set()
+                    return
+
+    def close(self):
+        with self._lock:
+            self._closed = True
+        self._stop.set()
+        if threading.current_thread() is not self._thread:
+            self._thread.join(timeout=max(0.1, self._interval))
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+        return False
 
 
 def _aggregate_stream_impl(raw_iter, model, resp_id):
@@ -18963,30 +19087,69 @@ class _BufferedStreamWriter:
     """Flush a bounded batch before a blocking upstream read or a terminal."""
     LIMIT = 64 * 1024
 
-    def __init__(self, handler):
+    def __init__(self, handler, holder=None, upstream=None):
         self.handler = handler
+        self.holder = holder
+        self.observation = wb_observe.CURRENT.get()
         self.parts = []
         self.size = 0
+        if holder is not None:
+            holder["ops_heartbeat_upstream"] = upstream
+            holder["billed_model"] = getattr(upstream, "_wb_billed_model", None) or holder.get("billed_model")
+        self.heartbeat = (SSEHeartbeat(self._emit, interval=SSE_HEARTBEAT_SECONDS)
+                          if holder is not None else None)
+
+    def _emit(self, frame):
+        if self.holder is not None and self.holder.get("ops_client_closed"):
+            raise _ClientStreamClosed()
+        try:
+            _write_stream_frame(self.handler, frame)
+        except (OSError, _ClientStreamClosed) as exc:
+            if self.observation is not None:
+                self.observation.client_aborted = True
+            if self.holder is not None:
+                self.holder["ops_client_closed"] = True
+                active = self.holder.get("ops_active_stream")
+                source = active.upstream if active is not None and not active.closed else self.holder.get("ops_heartbeat_upstream")
+                if source is not None:
+                    _interrupt_upstream(source)
+            raise _ClientStreamClosed() from exc
+
+    def _send(self, frame):
+        if self.heartbeat is not None:
+            self.heartbeat.write(frame)
+        else:
+            self._emit(frame)
+
+    def stop_heartbeat(self):
+        heartbeat, self.heartbeat = self.heartbeat, None
+        if heartbeat is not None:
+            heartbeat.close()
 
     def write(self, frame):
+        if self.holder is not None and self.holder.get("ops_client_closed"):
+            raise _ClientStreamClosed()
         if not frame:
             return
         if self.size + len(frame) > self.LIMIT:
             self.flush()
         if len(frame) >= self.LIMIT:
-            _write_stream_frame(self.handler, frame)
+            self._send(frame)
             return
         self.parts.append(frame)
         self.size += len(frame)
 
     def flush(self):
+        if self.holder is not None and self.holder.get("ops_client_closed"):
+            raise _ClientStreamClosed()
         if self.parts:
             frame = b"".join(self.parts)
             self.parts.clear()
             self.size = 0
-            _write_stream_frame(self.handler, frame)
+            self._send(frame)
 
     def discard(self):
+        self.stop_heartbeat()
         self.parts.clear()
         self.size = 0
 
@@ -19254,7 +19417,7 @@ def _stream_chat_events(upstream, model, holder):
 
 
 def _start_empty_continuation(holder, kind="thinking_only"):
-    if ((holder.get("base_body") or {}).get("n", 1) != 1 or
+    if (holder.get("ops_client_closed") or (holder.get("base_body") or {}).get("n", 1) != 1 or
             holder.get("ops_output_seen") or holder.get("ops_tool_seen") or
             holder.get("client_content_seen") or holder.get("client_tool_calls_seen") or
             holder.get("client_refusal_seen")):
@@ -20188,7 +20351,7 @@ class Handler(BaseHTTPRequestHandler):
             super().finish()
         except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
             pass
-    server_version = "wb-proxy/1.7.30"
+    server_version = "wb-proxy/1.7.32"
     def log_message(self, fmt, *args):
         # 静默过滤前端看板高频定时心跳的正常 200 GET 请求（/logs、/usage、/accounts 轮询等）
         # 避免自增死循环刷屏与日志污染。遇 4xx/5xx 异常或所有非 GET 业务操作依然如实记录。
@@ -23862,18 +24025,6 @@ class Handler(BaseHTTPRequestHandler):
     def _responses_stream_response(self, upstream, model, custom_names, request_meta, fp, account, t_start, namespace_map=None, base_body=None, session_key=None, realm=None, effort=None):
         retry_call = (_make_retry_call(base_body, session_key, realm,
                                        _key_allowed_accounts_for(self)) if base_body else None)
-        try:
-            upstream, replacement = probe_first_frame(upstream, retry_call=retry_call,
-                                                      tried=[account.uid])
-            account = replacement or account
-            if upstream is None:
-                return self._error(502, "upstream first-frame probe failed")
-        except Exception as exc:
-            _close_upstream(upstream)
-            _record_billed_error({"billed_model": getattr(upstream, "_wb_billed_model", None)}, model, 502, "first-frame probe failed: %s" % type(exc).__name__,
-                         elapsed_ms=int((time.time() - t_start) * 1000), account=account.uid,
-                         key=self._key_id(), effort=effort)
-            return self._error(502, "upstream first-frame probe failed")
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
@@ -23894,12 +24045,19 @@ class Handler(BaseHTTPRequestHandler):
                   "account_usage": {}}
         holder.update(key_id=self._key_id(), effort=effort)
         holder["record_attempt"] = _attempt_recorder(holder, model, fp, t_start)
-        writer = _BufferedStreamWriter(self)
+        writer = _BufferedStreamWriter(self, holder, upstream)
         holder["before_upstream_read"] = writer.flush
         first_ms = None
         wall = None
         outcome = None
         try:
+            # Headers precede the probe so a silent first frame also receives
+            # native comment heartbeats. Stream failures use SSE error frames.
+            upstream, replacement = probe_first_frame(upstream, retry_call=retry_call,
+                                                      tried=[account.uid], cancel_holder=holder)
+            account = replacement or account
+            if upstream is None:
+                raise RuntimeError("upstream first-frame probe failed")
             # 一轮跑完如果模型要的是 web_search / web_fetch，就由反代
             # 执行、把结果喂回去再跑一轮。客户端从头到尾只看到一则连续的回应。
             rounds = 0
@@ -23963,9 +24121,9 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 writer.flush()
                 if not holder.get("terminal_sent"):
-                    self.wfile.write(responses_stream_error_frame(
+                    writer.write(responses_stream_error_frame(
                         "upstream stream aborted: %s" % exc))
-                self.wfile.flush()
+                writer.flush()
             except Exception:
                 pass
         finally:
@@ -24232,7 +24390,7 @@ class Handler(BaseHTTPRequestHandler):
         holder["record_attempt"] = _attempt_recorder(holder, model, fp, t_start,
                                                     usage_field="usage_this_round")
         protected = _stream_chat_events(upstream, model, holder)
-        writer = _BufferedStreamWriter(self)
+        writer = _BufferedStreamWriter(self, holder, upstream)
         holder["before_upstream_read"] = writer.flush
         first_ms = None
         try:
@@ -24241,7 +24399,7 @@ class Handler(BaseHTTPRequestHandler):
                     first_ms = int((time.time() - t_start) * 1000)
                 writer.write(frame)
             writer.flush()
-        except (_ClientStreamClosed, BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+        except _ClientStreamClosed:
             wall = int((time.time() - t_start) * 1000)
             account = holder.get("account") or account
             _record_billed_usage(holder, model, None if holder.get("usage_recorded") else _saved_attempt_usage(holder, "usage_this_round"), stream=True, elapsed_ms=wall,
@@ -24260,9 +24418,9 @@ class Handler(BaseHTTPRequestHandler):
                          key=self._key_id(), effort=effort)
             try:
                 writer.flush()
-                self.wfile.write(anthropic_sse_frame("error", {
+                writer.write(anthropic_sse_frame("error", {
                     "error": {"type": "api_error", "message": str(exc)}}))
-                self.wfile.flush()
+                writer.flush()
             except Exception:
                 pass
             return
@@ -24448,6 +24606,11 @@ class Handler(BaseHTTPRequestHandler):
                          "invalid_request_error")
         if is_account_route:
             return self._handle_accounts(path, payload)
+        try:
+            aliases = wb_settings.model_aliases(ACCOUNTS_DIR)
+        except Exception:
+            aliases = {}
+        _apply_model_aliases(payload, aliases)
         _apply_background_model_alias(payload)
         # Check per-key concurrency limit (#359)
         key_entry = getattr(self, "key_entry", None)
@@ -24628,18 +24791,6 @@ class Handler(BaseHTTPRequestHandler):
         callback = (_make_retry_call(base_body, session_key, realm,
                                      _key_allowed_accounts_for(self)) if base_body else None)
         if not headers_sent:
-            try:
-                upstream, replacement = probe_first_frame(upstream, retry_call=callback,
-                                                          tried=[account.uid])
-                account = replacement or account
-                if upstream is None:
-                    return self._error(502, "upstream first-frame probe failed")
-            except Exception as exc:
-                _close_upstream(upstream)
-                _record_billed_error({"billed_model": getattr(upstream, "_wb_billed_model", None)}, model, 502, "first-frame probe failed: %s" % type(exc).__name__,
-                             elapsed_ms=int((time.time() - t_start) * 1000), account=account.uid,
-                             key=self._key_id(), effort=effort)
-                return self._error(502, "upstream first-frame probe failed")
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
             self.send_header("Cache-Control", "no-cache")
@@ -24658,12 +24809,21 @@ class Handler(BaseHTTPRequestHandler):
         holder.update(key_id=self._key_id(), effort=effort)
         holder["record_attempt"] = _attempt_recorder(
             holder, model, fp, t_start, usage_field="usage_this_round")
-        writer = _BufferedStreamWriter(self)
+        writer = _BufferedStreamWriter(self, holder, upstream)
         holder["before_upstream_read"] = writer.flush
         first_ms = None
         outcome = None
         emitted = False
+        probing = not headers_sent
         try:
+            if probing:
+                upstream, replacement = probe_first_frame(upstream, retry_call=callback,
+                                                          tried=[account.uid], cancel_holder=holder)
+                account = replacement or account
+                holder["account"] = account
+                if upstream is None:
+                    raise RuntimeError("upstream first-frame probe failed")
+                probing = False
             for frame in _stream_chat_events(upstream, model, holder):
                 if first_ms is None:
                     first_ms = int((time.time() - t_start) * 1000)
@@ -24673,9 +24833,10 @@ class Handler(BaseHTTPRequestHandler):
         except _ClientStreamClosed:
             outcome = "client_aborted"
         except Exception:
-            if not emitted and reopen is not None and not holder.get("usage_recorded"):
+            if not probing and not emitted and reopen is not None and not holder.get("usage_recorded"):
                 # Nothing reached the client yet, so reconnecting on the same
                 # account/egress is indistinguishable from a fresh TCP connect.
+                writer.stop_heartbeat()
                 try:
                     _close_upstream(upstream)
                 except Exception:
