@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.7.33-ops.20261023.1 — 2026-10-23
+
+- 升级官方v1.7.33 / `47775c5e4aceb9f977bdebf5dd20175b44b5a78b`，保留成功请求解除凭据过期、原生工具首段参数增量、每日活跃预算/候选/时段/启动补跑与模型冷却恢复；原生功能由基线提供。
+- 参考外部r3，Windows心跳断连关闭所属socket句柄唤醒timed select，保留已释放池租约隔离。恢复开始/连接返回/首帧探测检查取消，及时关闭新响应，不再读、重试或归因账号失败。
+- 新增6项合成回归，旧实现复现三协议读取延迟与两项取消合同失败。完整210 Python（44补丁＋166官方）和61 Node通过；保留首帧心跳、原期限、压缩、防循环、历史/图片、401、白名单、用量及名额保护。
+- Upstream announced stricter unofficial-client detection and reduced maintenance. Live successful generation remains unverified; this release does not remove upstream account restrictions. The installer preserves credentials and settings.
+
 ## v1.7.32-ops.20261023.1 — 2026-10-23
 
 - 结合实际建连超时现象补齐3项期限反例：准备耗尽后不发包，迟到响应关闭且不记成功，超期异常不惩罚账号或重试；原连接/生成预算与模型选择保持。

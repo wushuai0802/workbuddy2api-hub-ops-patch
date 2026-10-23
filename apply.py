@@ -29,8 +29,8 @@ DEPENDENCIES = {
     "wb_updates.py", "wb_webagent.py", "wb_quota_scan.py", "wb_window_probe.py", "wb_update_request.py",
     "wb_tiers.py", "wb_update_apply.py", "wb_update_external.py", "wb_update_portable.py", "wb_webprompts.py",
 }
-BASE_TAG = "v1.7.32"
-UPSTREAM_COMMIT = "477ba36ceea78ec4252c47a68e94a5a1612bab0b"
+BASE_TAG = "v1.7.33"
+UPSTREAM_COMMIT = "47775c5e4aceb9f977bdebf5dd20175b44b5a78b"
 
 
 def digest(data):

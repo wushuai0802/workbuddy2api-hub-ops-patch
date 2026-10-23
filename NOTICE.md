@@ -2,7 +2,9 @@
 
 This unofficial bundle derives from [WorkBuddy2API-Hub](https://github.com/ardeyouxipianyi/workbuddy2api-hub), distributed under MIT. Original notice is preserved in [LICENSE](LICENSE).
 
-Supported upstream: v1.7.30, commit `84dbc99b1a34182130ee9035f9d80b69a0fc2e8b`.
+Supported upstream: v1.7.33, commit `47775c5e4aceb9f977bdebf5dd20175b44b5a78b`.
+
+The user-supplied v1.7.33-r3 reference (SHA256 `25a5e39264eb1be3aac512a541c32734c787944ab3de402ca0a36ce5748832af`) informed Windows timed-read interruption and cancellation during recovery. We adapted these boundaries to our existing pooled-lease ownership, initial heartbeat and deadline safeguards, with independent synthetic regressions. Reference installers and private verification data were not executed or republished.
 
 The reviewed v1.7.10 reference (SHA256 `8b82cc3c0faed4a46ea541692dceec2b4cc3a34e041847c0fb80095728fc6a74`) informed the r2 read-interface boundary and fragmentation/real-ledger regression coverage. Its installer and payload were not applied wholesale.
 

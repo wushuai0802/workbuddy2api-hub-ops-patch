@@ -2,25 +2,27 @@
 
 完整离线/合成验证通过，真实上游成功验收仍待完成。先在隔离环境验证自己的调用链，并准备回滚后再替换生产。
 
-本包 `v1.7.32-ops.20261023.1` 只支持官方v1.7.32 / `477ba36ceea78ec4252c47a68e94a5a1612bab0b`。以下路径、Compose参数和服务名需要按自己的部署填写。Python3.11+，Linux/macOS示例；Windows使用同一安装器参数及完整路径。
+本包 `v1.7.33-ops.20261023.1` 只支持官方v1.7.33 / `47775c5e4aceb9f977bdebf5dd20175b44b5a78b`。以下路径、Compose参数和服务名需要按自己的部署填写。Python3.11+，Linux/macOS示例；Windows使用同一安装器参数及完整路径。
+
+v1.7.33每日活跃改为总预算（默认600秒）、有序候选、留空时两个随机时段，以及默认开启的启动补跑。更新前核对原任务策略；已有明确时段优先，旧模型设置按原含义读取。需要沿用旧版重启不补跑行为时，将面板启动补跑开关关闭（`daily_chat_startup_catchup=false`）。公开安装器不改业务设置，也不能解除上游风控。
 
 ## 核对输入
 
-[Release下载](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.7.32-ops.20261023.1)含ZIP和SHA256SUMS.txt；ZIP顶层目录为`workbuddy2api-hub-ops-patch/`。
+[Release下载](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.7.33-ops.20261023.1)含ZIP和SHA256SUMS.txt；ZIP顶层目录为`workbuddy2api-hub-ops-patch/`。
 
 ~~~sh
 sha256sum -c SHA256SUMS.txt
-git clone --depth 1 --branch v1.7.32 https://github.com/ardeyouxipianyi/workbuddy2api-hub.git workbuddy2api-hub-v1.7.32
-git -C workbuddy2api-hub-v1.7.32 rev-parse HEAD
+git clone --depth 1 --branch v1.7.33 https://github.com/ardeyouxipianyi/workbuddy2api-hub.git workbuddy2api-hub-v1.7.33
+git -C workbuddy2api-hub-v1.7.33 rev-parse HEAD
 PATCH_DIR='/absolute/path/to/workbuddy2api-hub-ops-patch'
-TARGET_DIR='/absolute/path/to/workbuddy2api-hub-v1.7.32'
+TARGET_DIR='/absolute/path/to/workbuddy2api-hub-v1.7.33'
 python3 -B "$PATCH_DIR/apply.py" --verify-package
 python3 -B "$PATCH_DIR/apply.py" --target "$TARGET_DIR" --dry-run
 ~~~
 
 SHA必须匹配上述完整提交；预检通过只代表可以应用，尚未部署。已有旧补丁或未知改动时，另建准确干净源码，保留旧部署。不删除状态/备份或重写校验绕过拒绝。回滚旧源码补丁使用其原版本安装器；当前安装器不能卸载旧包。
 
-这也适用于旧补丁→v1.7.32：在新基线整体安装，不直接覆盖旧已安装树。运行时独立`usage/ops-observations.jsonl`不属于安装器修改范围；它有界轮换且可用`WB_OPS_OBSERVE=0`关闭，不改写原usage历史。
+这也适用于旧补丁→v1.7.33：在新基线整体安装，不直接覆盖旧已安装树。运行时独立`usage/ops-observations.jsonl`不属于安装器修改范围；它有界轮换且可用`WB_OPS_OBSERVE=0`关闭，不改写原usage历史。
 
 ## 保存部署与数据
 
@@ -91,7 +93,7 @@ python3 -B "$PATCH_DIR/apply.py" --target "$TARGET_DIR" --rollback --dry-run
 python3 -B "$PATCH_DIR/apply.py" --target "$TARGET_DIR" --rollback
 ~~~
 
-恢复安装前的官方v1.7.32字节，不恢复更旧版本或业务数据；代码被再次修改时拒绝覆盖，需先检查。
+恢复安装前的官方v1.7.33字节，不恢复更旧版本或业务数据；代码被再次修改时拒绝覆盖，需先检查。
 
 Docker用户暂停请求，将image改回旧ROLLBACK_IMAGE，沿原参数定向启动。镜像缺失时从私有rollback-image.tar加载；当前账号/usage继续沿用，不自动用旧数据覆盖。恢复数据会丢失备份点之后新增内容，须另行保留当前数据并核对。
 

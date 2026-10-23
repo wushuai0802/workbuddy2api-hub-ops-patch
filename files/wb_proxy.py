@@ -10182,7 +10182,11 @@ def runtime_settings_view():
         "credits_refresh_hours": wb_settings.credits_refresh_hours(ACCOUNTS_DIR),
         "section_max_height": wb_settings.section_max_height(ACCOUNTS_DIR),
         "schedule": dict(wb_settings.schedule_hours(ACCOUNTS_DIR),
-                         daily_chat=wb_settings.daily_chat_times(ACCOUNTS_DIR)),
+                         daily_chat=wb_settings.daily_chat_times(ACCOUNTS_DIR),
+                         daily_chat_effective=wb_settings.daily_chat_effective_times(
+                             ACCOUNTS_DIR),
+                         daily_chat_random=not bool(
+                             wb_settings.daily_chat_times(ACCOUNTS_DIR))),
         "ui_language": wb_settings.ui_language(ACCOUNTS_DIR),
         "pricing_variant_inherit": wb_settings.pricing_variant_inherit(ACCOUNTS_DIR),
         "pricing_enabled": wb_settings.pricing_enabled(ACCOUNTS_DIR),
@@ -10196,12 +10200,6 @@ def runtime_settings_view():
         "identity": wb_settings.identity_config(ACCOUNTS_DIR),
         "identity_version_defaults": wb_identity.default_versions(),
         "daily_chat_web": wb_settings.daily_chat_web(ACCOUNTS_DIR),
-        "daily_chat_web_retry": wb_settings.daily_chat_web_retry(ACCOUNTS_DIR),
-        "daily_chat_web_attempts":
-            wb_settings.daily_chat_web_attempts(ACCOUNTS_DIR,
-                                                default=wb_accounts.WEB_TURN_ATTEMPTS),
-        "daily_chat_web_attempts_default": wb_accounts.WEB_TURN_ATTEMPTS,
-        "daily_chat_web_attempts_max": wb_settings.DAILY_CHAT_WEB_ATTEMPTS_MAX,
         "daily_chat_web_timeout":
             wb_settings.daily_chat_web_timeout(ACCOUNTS_DIR,
                                                default=wb_accounts.WEB_TURN_TIMEOUT),
@@ -10213,18 +10211,22 @@ def runtime_settings_view():
         "daily_chat_web_retry_backoff_default": wb_accounts.WEB_RETRY_BACKOFF,
         "daily_chat_web_retry_backoff_max":
             wb_settings.DAILY_CHAT_WEB_RETRY_BACKOFF_MAX,
-        "daily_chat_web_fallback": wb_settings.daily_chat_web_fallback(ACCOUNTS_DIR),
-        "daily_chat_web_fallback_models":
-            wb_settings.daily_chat_web_fallback_models(ACCOUNTS_DIR),
-        "daily_chat_web_fallback_models_max":
-            wb_settings.DAILY_CHAT_WEB_FALLBACK_MAX_MODELS,
         "daily_chat_web_random_prompt":
             wb_settings.daily_chat_web_random_prompt(ACCOUNTS_DIR),
         "daily_chat_web_prompts": wb_settings.daily_chat_web_prompts(ACCOUNTS_DIR),
         "daily_chat_web_builtin_prompts": wb_webprompts.builtin_prompts(),
         "daily_chat_web_prompts_max": wb_settings.DAILY_CHAT_WEB_PROMPTS_MAX,
-        "daily_chat_model": wb_settings.daily_chat_model(ACCOUNTS_DIR),
-        "daily_chat_model_default": wb_accounts.DAILY_CHAT_MODEL,
+        # 预算模型的三个入口：有序候选序列、单账号总预算、启动补跑。
+        # 旧的「最多尝试次数 / 失败重试 / 回退开关 / 回退组合」不再出现在面板上
+        # （它们的值仍然被读取，用于把老部署的配置换算成预算与候选序列）。
+        "daily_chat_models": wb_settings.daily_chat_models(ACCOUNTS_DIR),
+        "daily_chat_models_max": wb_settings.DAILY_CHAT_MODELS_MAX,
+        "daily_chat_budget": wb_settings.daily_chat_budget(
+            ACCOUNTS_DIR, default=wb_accounts.WEB_BUDGET_DEFAULT),
+        "daily_chat_budget_default": wb_accounts.WEB_BUDGET_DEFAULT,
+        "daily_chat_budget_max": wb_settings.DAILY_CHAT_BUDGET_MAX,
+        "daily_chat_startup_catchup":
+            wb_settings.daily_chat_startup_catchup(ACCOUNTS_DIR),
         "local_web_tools": wb_settings.local_web_tools(ACCOUNTS_DIR),
         "remaining_priority_enabled":
             wb_settings.remaining_priority_enabled(ACCOUNTS_DIR),
@@ -10260,7 +10262,7 @@ def runtime_settings_view():
         "accounts_dir": ACCOUNTS_DIR,
         "usage_dir": USAGE_DIR,
         "settings_file": wb_settings.settings_path(ACCOUNTS_DIR),
-        "version": "1.7.32",
+        "version": "1.7.33",
     }
 def current_account():
     """Account used for display purposes (health / usage summaries)."""
@@ -11605,7 +11607,7 @@ def _patch_payload_fingerprint():
     return hashlib.sha256(''.join(records).encode('ascii')).hexdigest()
 
 _OPS_PATCH_FINGERPRINT = _patch_payload_fingerprint()
-_OPS_PATCH_ID = "v1.7.32-ops.20261023.1"
+_OPS_PATCH_ID = "v1.7.33-ops.20261023.1"
 _OBSERVATION_STORE = None
 _OBSERVATION_STORE_LOCK = threading.Lock()
 
@@ -11844,6 +11846,16 @@ def _interrupt_upstream(upstream):
             sock.shutdown(socket.SHUT_RDWR)
         except OSError:
             pass
+        if IS_WINDOWS:
+            # Winsock shutdown does not reliably wake CPython's timed select.
+            # Close the owned handle without waiting for the reader's lock or
+            # socket.makefile reference count; the pool lease above is retired.
+            close_socket = getattr(sock, "_real_close", None)
+            if callable(close_socket):
+                try:
+                    close_socket()
+                except OSError:
+                    pass
     else:
         try:
             response.close()
@@ -12293,12 +12305,14 @@ class _GuardedStream:
             iterator = iter_sse_lines(self.upstream, before_read=before_read,
                                       on_usage=self._observe_prefetched_usage)
         while True:
+            _check_stream_client(self.holder)
             if self._timed_out():
                 yield self._failure("generation_timeout")
                 return
             try:
                 raw = next(iterator)
             except StopIteration:
+                _check_stream_client(self.holder)
                 self._observe_stall(final=True)
                 if self._timed_out():
                     yield self._failure("generation_timeout")
@@ -12316,6 +12330,7 @@ class _GuardedStream:
                         yield self._failure("reasoning_loop_detected")
                 return
             except Exception as exc:
+                _check_stream_client(self.holder)
                 # Windows clocks/socket timers can disagree by one tick. If
                 # the socket was explicitly limited by this absolute budget,
                 # its TimeoutError is the deadline firing, even just before
@@ -12327,6 +12342,7 @@ class _GuardedStream:
                     yield self._failure("upstream_sse_limit")
                     return
                 raise
+            _check_stream_client(self.holder)
             if self._timed_out():
                 yield self._failure("generation_timeout")
                 return
@@ -19072,6 +19088,11 @@ class _ClientStreamClosed(Exception):
     pass
 
 
+def _check_stream_client(holder):
+    if holder.get("ops_client_closed"):
+        raise _ClientStreamClosed()
+
+
 def _write_stream_frame(handler, frame):
     try:
         handler.wfile.write(frame)
@@ -19417,7 +19438,8 @@ def _stream_chat_events(upstream, model, holder):
 
 
 def _start_empty_continuation(holder, kind="thinking_only"):
-    if (holder.get("ops_client_closed") or (holder.get("base_body") or {}).get("n", 1) != 1 or
+    _check_stream_client(holder)
+    if ((holder.get("base_body") or {}).get("n", 1) != 1 or
             holder.get("ops_output_seen") or holder.get("ops_tool_seen") or
             holder.get("client_content_seen") or holder.get("client_tool_calls_seen") or
             holder.get("client_refusal_seen")):
@@ -19448,6 +19470,7 @@ def _start_empty_continuation(holder, kind="thinking_only"):
             # still enforces quota, region, cooldown and identity policies.
             if POOL.count_ready(realm, model=model) <= 1:
                 excluded = []
+        _check_stream_client(holder)
         if getattr(callback, "_ops_deadline", False):
             options = {"deadline_at": deadline_at}
             if (kind == "reasoning_loop" and getattr(callback, "_ops_recovery_hint", False) and
@@ -19458,17 +19481,25 @@ def _start_empty_continuation(holder, kind="thinking_only"):
             upstream, account = callback(excluded)
         if upstream is None:
             raise RuntimeError("no upstream for the empty-turn retry")
+        holder["ops_heartbeat_upstream"] = upstream
+        _check_stream_client(holder)
         probing = True
         probed, replacement = probe_first_frame(
             upstream, retry_call=None if kind == "reasoning_loop" else callback, tried=[getattr(account, "uid", "")],
-            deadline_at=_phase_deadline(generation_end, FIRST_FRAME_DEADLINE), require_frame=(kind == "reasoning_loop"))
+            deadline_at=_phase_deadline(generation_end, FIRST_FRAME_DEADLINE), require_frame=(kind == "reasoning_loop"),
+            cancel_holder=holder)
         if probed is None:
             holder["continuation_failure_code"] = "continuation_probe_failed"
             raise RuntimeError("empty-turn retry failed its first-frame probe")
+        _check_stream_client(holder)
         holder["continue_upstream"] = probed
         holder["continue_account"] = replacement or account
         holder["will_continue"] = True
         return True
+    except _ClientStreamClosed:
+        if upstream is not None:
+            _close_upstream(upstream)
+        raise
     except Exception as exc:
         if upstream is not None:
             _close_upstream(upstream)
@@ -20070,20 +20101,24 @@ def _stream_responses_impl(upstream, model, holder):
                             entry["custom"] = True
                     if fn_args:
                         entry["arguments"] += fn_args
-                        if entry.get("custom"):
-                            yield ev("response.custom_tool_call_input.delta", {
-                                "output_index": entry["output_index"],
-                                "item_id": entry["item_id"],
-                                "call_id": entry["id"],
-                                "delta": fn_args,
-                            })
-                        else:
-                            yield ev("response.function_call_arguments.delta", {
-                                "output_index": entry["output_index"],
-                                "item_id": entry["item_id"],
-                                "call_id": entry["id"],
-                                "delta": fn_args,
-                            })
+                # The first chunk may already carry arguments. Emit it after
+                # output_item.added, just like subsequent chunks, without
+                # adding it to the accumulated arguments a second time.
+                if fn_args:
+                    if entry.get("custom"):
+                        yield ev("response.custom_tool_call_input.delta", {
+                            "output_index": entry["output_index"],
+                            "item_id": entry["item_id"],
+                            "call_id": entry["id"],
+                            "delta": fn_args,
+                        })
+                    else:
+                        yield ev("response.function_call_arguments.delta", {
+                            "output_index": entry["output_index"],
+                            "item_id": entry["item_id"],
+                            "call_id": entry["id"],
+                            "delta": fn_args,
+                        })
             piece = delta.get("content")
             if piece:
                 yield from emit_reason(scrubber.feed(final=True))
@@ -20351,7 +20386,7 @@ class Handler(BaseHTTPRequestHandler):
             super().finish()
         except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
             pass
-    server_version = "wb-proxy/1.7.32"
+    server_version = "wb-proxy/1.7.33"
     def log_message(self, fmt, *args):
         # 静默过滤前端看板高频定时心跳的正常 200 GET 请求（/logs、/usage、/accounts 轮询等）
         # 避免自增死循环刷屏与日志污染。遇 4xx/5xx 异常或所有非 GET 业务操作依然如实记录。
@@ -22105,25 +22140,6 @@ class Handler(BaseHTTPRequestHandler):
                                    "invalid_request_error")
             wb_settings.set_daily_chat_web(ACCOUNTS_DIR, raw)
             reply["daily_chat_web"] = raw
-        if "daily_chat_web_retry" in payload:
-            # Strictly a JSON boolean, like the other switches: "false" as a
-            # string would be truthy and silently keep retrying.
-            raw = payload.get("daily_chat_web_retry")
-            if not isinstance(raw, bool):
-                return self._error(400, "daily_chat_web_retry must be true or false",
-                                   "invalid_request_error")
-            wb_settings.set_daily_chat_web_retry(ACCOUNTS_DIR, raw)
-            reply["daily_chat_web_retry"] = raw
-        if "daily_chat_web_attempts" in payload:
-            # Whole number of tries, first one included. The wait doubles each
-            # time, so a stray extra digit is hours on one account - wb_settings
-            # owns both checks and the message.
-            raw = payload.get("daily_chat_web_attempts")
-            try:
-                wb_settings.set_daily_chat_web_attempts(ACCOUNTS_DIR, raw)
-            except ValueError as exc:
-                return self._error(400, str(exc), "invalid_request_error")
-            reply["daily_chat_web_attempts"] = raw
         if "daily_chat_web_timeout" in payload:
             # Whole seconds only, and bounded: the retry doubles this, so a
             # stray extra digit would park the scheduler on one account for
@@ -22144,21 +22160,6 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError as exc:
                 return self._error(400, str(exc), "invalid_request_error")
             reply["daily_chat_web_retry_backoff"] = raw
-        if "daily_chat_web_fallback" in payload:
-            raw = payload.get("daily_chat_web_fallback")
-            if not isinstance(raw, bool):
-                return self._error(400, "daily_chat_web_fallback must be true or false",
-                                   "invalid_request_error")
-            wb_settings.set_daily_chat_web_fallback(ACCOUNTS_DIR, raw)
-            reply["daily_chat_web_fallback"] = raw
-        if "daily_chat_web_fallback_models" in payload:
-            raw = payload.get("daily_chat_web_fallback_models")
-            if not isinstance(raw, (list, tuple, str)):
-                return self._error(
-                    400, "daily_chat_web_fallback_models must be a list or comma string",
-                    "invalid_request_error")
-            stored = wb_settings.set_daily_chat_web_fallback_models(ACCOUNTS_DIR, raw)
-            reply["daily_chat_web_fallback_models"] = stored
         if "daily_chat_web_random_prompt" in payload:
             raw = payload.get("daily_chat_web_random_prompt")
             if not isinstance(raw, bool):
@@ -22181,17 +22182,49 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError as exc:
                 return self._error(400, str(exc), "invalid_request_error")
             reply["daily_chat_web_concurrency"] = raw
-        if "daily_chat_model" in payload:
-            raw = payload.get("daily_chat_model") or ""
-            # Empty clears the override back to the built-in id. Anything else
-            # has to look like a model id; a stray value here would be sent
+        if "daily_chat_models" in payload:
+            # Ordered candidate list: first entry runs first, the rest are the
+            # fallback combination. An empty list means "automatic". Every id
+            # has to look like a model id - a stray value here would be sent
             # upstream on every daily run.
-            if not isinstance(raw, str) or len(raw) > 64 or \
-                    (raw and not re.match(r"^[A-Za-z0-9._:-]+$", raw)):
-                return self._error(400, "daily_chat_model must be a model id or empty",
-                                   "invalid_request_error")
-            wb_settings.set_daily_chat_model(ACCOUNTS_DIR, raw)
-            reply["daily_chat_model"] = raw
+            raw = payload.get("daily_chat_models")
+            if isinstance(raw, str):
+                raw = [part for part in re.split(r"[,\n]", raw) if part.strip()]
+            if not isinstance(raw, (list, tuple)):
+                return self._error(
+                    400, "daily_chat_models must be a list or comma string",
+                    "invalid_request_error")
+            for item in raw:
+                if not isinstance(item, str) or len(item) > 64 or \
+                        (item and not re.match(r"^[A-Za-z0-9._:-]+$", item)):
+                    return self._error(
+                        400, "daily_chat_models entries must be model ids",
+                        "invalid_request_error")
+            if len(raw) > wb_settings.DAILY_CHAT_MODELS_MAX:
+                return self._error(
+                    400, "daily_chat_models cannot hold more than %d models"
+                         % wb_settings.DAILY_CHAT_MODELS_MAX,
+                    "invalid_request_error")
+            reply["daily_chat_models"] = \
+                wb_settings.set_daily_chat_models(ACCOUNTS_DIR, raw)
+        if "daily_chat_budget" in payload:
+            # Whole seconds, 0 = no budget. This is the only time bound of the
+            # whole web activity, so wb_settings owns the range check and the
+            # message; a stray extra digit would park the scheduler.
+            raw = payload.get("daily_chat_budget")
+            try:
+                wb_settings.set_daily_chat_budget(ACCOUNTS_DIR, raw)
+            except ValueError as exc:
+                return self._error(400, str(exc), "invalid_request_error")
+            reply["daily_chat_budget"] = raw
+        if "daily_chat_startup_catchup" in payload:
+            raw = payload.get("daily_chat_startup_catchup")
+            if not isinstance(raw, bool):
+                return self._error(
+                    400, "daily_chat_startup_catchup must be true or false",
+                    "invalid_request_error")
+            wb_settings.set_daily_chat_startup_catchup(ACCOUNTS_DIR, raw)
+            reply["daily_chat_startup_catchup"] = raw
         if "local_web_tools" in payload:
             raw = payload.get("local_web_tools")
             if not isinstance(raw, bool):
