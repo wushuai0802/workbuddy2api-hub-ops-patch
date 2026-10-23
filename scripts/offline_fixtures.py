@@ -32,6 +32,17 @@ def prepare_refresh_fixtures(gateway):
 
 def prepare_test_fixtures(gateway):
     prepare_refresh_fixtures(gateway)
+    # The native compaction stub suppresses the unguarded accounting helper.
+    # Our adapter uses the same lower-level ledger as the other six adapters.
+    path = gateway / 'tests/_test_remote_compaction.py'
+    source = path.read_text(encoding='utf8')
+    source = source.replace('self._record_upstream_usage = proxy.record_upstream_usage',
+                            'self._record_upstream_usage = proxy.record_usage')
+    source = source.replace('proxy.record_upstream_usage = lambda *a, **k: None',
+                            'proxy.record_usage = lambda *a, **k: None')
+    source = source.replace('proxy.record_upstream_usage = self._record_upstream_usage',
+                            'proxy.record_usage = self._record_upstream_usage')
+    path.write_text(source, encoding='utf8')
     path = gateway / 'tests/_test_local_web_tools.py'
     source = path.read_text(encoding='utf8')
     for name in ('fake_open_upstream', 'always_tool_body', 'capture_open', 'passthrough_open'):

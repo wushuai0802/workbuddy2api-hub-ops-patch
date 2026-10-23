@@ -1,10 +1,12 @@
-吸收外部v1.7.28补丁包的跨出口回退边界，补齐隐式期限、风控暂停与候选检查超时三处遗漏，并推送更新。
+升级官方v1.7.30，继承签到/保活/调度器、网页会话清理、501、单流ID、静态Key、远程压缩v2及Key策略落盘等修复，保留既有运维保护。
 
-- 补丁：`v1.7.28-ops.20261022.2`；固定官方提交：`c22109def2793234236e0c3ab1d2c11f02a05c39`。
-- 修复：回退helper未显式给期限时，按面板响应头预算为两次连接共享一个deadline；国内出口处于风控暂停时不进入回退；候选可用性检查耗尽剩余期限后不再连接第二个出口。保留r1的读取异常原文回放、六路径过滤不转工具、白名单冻结与期限/定址边界。
-- 验证：195组Python（39补丁＋156官方）、55组Node（2补丁＋53官方）；新增8项跨出口专项回归，覆盖六接口实际出口/账号/计费用量归属及首帧同号重开期限。
-- 下载：`workbuddy2api-hub-v1.7.28-wushuai0802-ops-20261022-r2.zip` 和 `SHA256SUMS.txt`。
+- 补丁：`v1.7.30-ops.20261023.1`；固定官方提交：`84dbc99b1a34182130ee9035f9d80b69a0fc2e8b`。
+- 新版压缩仅接受完整正常摘要；截断/过滤/报错/拒答/工具调用时明确失败，不能生成成功compaction替代原历史。接入原生成期限、原始provider用量、实际模型和Key/effort计账，不增加自动重试。
+- 账号并发名额在错误、超时及异常退出时归还；刷新后重新校验ready与排除规则，避免重复占槽；并发等待受原期限约束。
+- 沿用官方单一网关chunk id、面板body集中排空、目录tier和新调度功能；移除弃用的entitlements依赖。跨出口/积分回退、账号并发和稳定粘滞沿用既有设置及默认关闭。
+- 验证清单：205组Python（40补丁＋165官方）、59组Node（2补丁＋57官方）；新增8项压缩/槽位/静态Key回归。
+- 下载：`workbuddy2api-hub-v1.7.30-wushuai0802-ops-20261023-r1.zip` 和 `SHA256SUMS.txt`。
 
-Absorbs the external v1.7.28 package's cross-exit boundaries: one shared panel-configured header deadline when a helper call omits it, no fallback into a domestic exit under a restriction hold, and no second upstream connection when the backup eligibility check exhausts the remaining budget. Retains the r1 read-error text replay, six-adapter filtered-terminal protection and frozen allowlists.
+Rebased onto upstream v1.7.30. Hardened remote compaction termination, original usage and billed-model/key/effort attribution, and account-slot ownership on every exit. Incomplete or rejected summaries never replace retained history. Existing loop, auth, history/image, SSE and deadline safeguards remain; no extra compaction generation retries are introduced.
 
-Validation: 195 Python (39 patch + 156 official) and 55 Node (2 patch + 53 official) suites, including eight new cross-exit regressions on the real six adapter paths. Synthetic data and loopback upstreams only; this does not establish long-session model quality. Python 3.11+ is required. Install onto the exact clean baseline, rebuild only the intended service, and keep image/source/configuration/data backups. The installer never changes accounts, keys, settings or history. Older tags and releases remain available. MIT; upstream and reference attribution retained.
+Tests use synthetic inputs and loopback upstreams; they do not establish long-session model quality. Python 3.11+ is required. Use the exact clean baseline, back up the image/source/configuration/data and recreate only the intended service. Startup update checks may rewrite their update_check cache. The installer never changes credentials, keys, settings or history. Older releases and tags remain available. MIT with upstream/reference attribution.

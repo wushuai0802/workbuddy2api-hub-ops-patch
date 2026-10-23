@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.7.30-ops.20261023.1 — 2026-10-23
+
+- 重基官方v1.7.30 / `84dbc99b1a34182130ee9035f9d80b69a0fc2e8b`，继承签到/保活/任务选号/调度器、501、单流ID、网页会话清理/退避、静态Key、目录tier、自绘下拉框、远程压缩v2与Key策略落盘等功能，不重复实现官方能力。
+- 压缩结果仅接受完整正常摘要，失败/截断/过滤/拒答/工具调用不生成成功compaction；保留生成期限、原始provider用量、实际模型和Key/effort计账，不增加自动重试。
+- 并发名额通过finally覆盖异常退出，等待受原期限约束；刷新后候选保留ready与排除校验，避免重复占槽。弃用的entitlements模块不再随候选镜像保留。增加8项专项回归，完整清单205 Python＋59 Node。
+- Rebased onto v1.7.30 while retaining prior loop/stream/history/auth safeguards. Hardened compaction termination/accounting and account-slot lifetime. Defaults, routing, credentials and persisted history remain under operator control.
+
 ## v1.7.28-ops.20261022.2 — 2026-10-22
 
 - 吸收外部v1.7.28补丁包的跨出口边界：回退helper未显式给期限时按面板响应头预算共享一个deadline；国内出口风控暂停时不进入回退；候选可用性检查耗尽剩余期限后不再连接第二个出口。新增8项专项回归，覆盖六接口实际出口/账号/计费用量归属及首帧同号重开期限。

@@ -4,6 +4,25 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>WorkBuddy 用量看板</title>
+<!-- 首帧判定：必须留在 <head>、在任何页面内容之前同步执行。
+     没有面板会话令牌（无痕 / 首次访问 / 已登出）→ 不动 markup 上的 display:flex，
+     登录闸门随首帧一起出现，看板骨架不会被先画出来再盖住。
+     有令牌 → 先隐藏闸门，交给 bootPanel() 用 /panel/status 复核；令牌过期或网关
+     重启导致复核失败时，panelNeedsLogin() 会摘掉这个类把闸门放回屏幕上。
+     这里必须 !important：闸门的可见性写在它自己的内联 style 上，普通规则压不住。 -->
+<style>html.wb-panel-session #panelGate{display:none!important}</style>
+<script>
+/* 面板会话令牌的存储键。全页只在这里定义一次：首帧判定要用它，所以必须先于
+   任何页面内容；后面的脚本直接复用这个绑定，不要再写一遍字面量。 */
+const PANEL_STORE = 'wb-proxy-panel-token';
+(function(){
+  try{
+    if(sessionStorage.getItem(PANEL_STORE)){
+      document.documentElement.classList.add('wb-panel-session');
+    }
+  }catch(e){}
+})();
+</script>
 <style>
 :root{
   /* 对比度增强 v2（2026-10-15）：信号元素进一步推强。
@@ -138,7 +157,7 @@ table{width:100%;border-collapse:collapse;font-size:13px}
    单元格 nowrap 防止长模型 ID / 思考档位换行，超长用省略号兜底。 */
 #modelsTable{table-layout:fixed}
 #modelsTable th,#modelsTable td{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-/* 消费倍率列可能同时放「倍率」和「免费账号不可用」两枚胶囊；固定列宽下
+/* 消费倍率列可能同时放「倍率」和「Pro Only」两枚胶囊；固定列宽下
    nowrap 会把第二枚裁掉，允许换行只让这一类行变高（#527）。 */
 #modelsTable td.rate-cell{white-space:normal;line-height:1.8}
 #modelsTable td[data-label="思考档位"]{white-space:nowrap}
@@ -398,6 +417,21 @@ table.account-cards tr.cool-row .cool-pill{display:inline-block;width:auto;max-w
   color:var(--accent);text-decoration:none;font-size:12px}
 .login-link:hover{border-color:var(--accent);background:var(--panel)}
 .hint{color:var(--dim);font-size:12px;margin:8px 0}
+/* 标题旁的「!」帮助标记：默认只是一个低调的圆圈，悬停/聚焦/展开时变亮。
+   说明文本放在旁边的 .help-detail 里，点它才展开（默认 hidden），所以不占
+   版面高度。只做点击展开，不再挂悬停气泡——点了就能看到说明，两个入口
+   同时出现反而挡视线。 */
+.help-mark{display:inline-flex;align-items:center;justify-content:center;
+  width:15px;height:15px;border-radius:50%;border:1px solid var(--line2);
+  color:var(--dim);font-size:10px;font-weight:700;line-height:1;cursor:pointer;
+  vertical-align:1px;margin-left:4px;user-select:none;transition:all .15s ease}
+.help-mark:hover,.help-mark:focus-visible{color:var(--accent);border-color:var(--accent);
+  background:var(--accent-soft);outline:none}
+.help-mark.open{color:var(--accent);border-color:var(--accent);background:var(--accent-soft)}
+.help-detail{font-size:12px;line-height:1.6;color:var(--dim);margin-top:6px;
+  padding:8px 10px;border-left:2px solid var(--accent);background:var(--panel2);
+  border-radius:0 8px 8px 0;max-width:760px}
+.help-detail[hidden]{display:none}
 .step{display:flex;gap:10px;align-items:flex-start;margin:10px 0}
 .step .n{flex:0 0 20px;height:20px;border-radius:50%;background:var(--panel2);
   border:1px solid var(--line);color:var(--dim);font-size:11px;display:flex;
@@ -734,18 +768,34 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
      改成标签与徽章同排一行；国内版双徽章摆不下时靠 flex-wrap 自动换行。 */
   table.account-cards td:nth-child(4){order:4;grid-column:span 6;justify-content:flex-start;flex-wrap:wrap;gap:4px 6px}
   table.account-cards td:nth-child(4)::before{font-size:10px}
-  table.account-cards td:nth-child(5){order:5;grid-column:span 6}
-  table.account-cards td:nth-child(6),
+  /* 出口（第 5 列）与权重（第 6 列）并成一行：出口下拉在前、权重在后，
+     两者都是「标签：控件」的行内形态（权重显示成「权重：1」）。
+     两列高度必须一致，否则出口的 34px 下拉会比权重的 22px 下拉高出一截，
+     同一行看起来参差不齐。这里把两个 select 统一到 34px、并让两格
+     align-items:center，标签与控件在中线上对齐。 */
+  table.account-cards td:nth-child(5),
+  table.account-cards td:nth-child(6){order:5;flex-direction:row;align-items:center;
+    justify-content:flex-start;gap:4px;min-width:0;min-height:36px}
+  table.account-cards td:nth-child(5){grid-column:span 3}
+  table.account-cards td:nth-child(6){grid-column:span 3}
+  table.account-cards td:nth-child(6)::before{content:'权重：'}
+  table.account-cards td:nth-child(5) .slot-select{width:auto;max-width:none;min-height:34px;height:34px;flex:1 1 auto;min-width:0}
+  table.account-cards td:nth-child(6) .mini-select{min-height:34px;height:34px;padding:0 6px;align-self:center}
+  /* 积分（第 7 列）与请求（第 8 列）：各占一半、铺满整行，左右边缘分别与上一行
+     的「出口」「权重」对齐；两格等高、内容水平垂直居中。以前各占 1/3 宽，右边
+     留空一截，看着像没铺满。 */
   table.account-cards td:nth-child(7),
-  table.account-cards td:nth-child(8){order:6;grid-column:span 2;flex-direction:column-reverse;
-    align-items:center;justify-content:center;gap:0;padding:4px 0;
-    background:var(--panel2);border-radius:8px}
+  table.account-cards td:nth-child(8){order:6;grid-column:span 3;
+    flex-direction:column;align-items:center;justify-content:center;gap:2px;
+    padding:6px 4px;min-height:48px;
+    background:var(--panel2);border-radius:8px;text-align:center}
+  table.account-cards td:nth-child(7) .credit-stack{width:100%;align-items:center}
+  table.account-cards td:nth-child(7) .credit-main,
+  table.account-cards td:nth-child(7) .credit-meta{justify-content:center}
   /* 积分格（第 7 列）：column-reverse 会把 ::before 的「积分」列标签排到最底部，
-     与「明细」按钮错行。隐藏列标签，把「积分」并进明细同一行。 */
+     与「明细」按钮错行。隐藏列标签——PC 版这一格本来就只有数值和「明细」，
+     手机上也保持一致，不再额外加一个「积分」字样去挤那一行。 */
   table.account-cards td:nth-child(7)::before{content:none}
-  table.account-cards td:nth-child(7) .credit-meta::before{content:'积分';font-size:10px;color:var(--dim);font-weight:600}
-  table.account-cards td:nth-child(6)::before,
-  table.account-cards td:nth-child(7)::before,
   table.account-cards td:nth-child(8)::before{font-size:10px}
   table.account-cards td.acct-actions{order:7;grid-column:span 6;justify-content:flex-start}
   table.account-cards td.acct-actions::before{content:none}
@@ -796,6 +846,17 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
   #cards .card .v{font-size:16px}
   table.data-cards tr{padding:10px}
   .log-ts{font-size:11px}
+}
+@media (max-width: 860px){
+  /* 窄屏统计条：把「积分消耗」与「请求成功率」对调，让积分消耗落在最后、
+     独占一整行。积分卡的副行是「估算价值: ¥49.57 / $6.68」这类长文本，
+     和别的卡挤成半宽时会被 nowrap + ellipsis 截成「$6...」；独占一行后
+     宽度够，再允许换行就能完整显示。
+     只改窄屏的排列顺序，PC 三列布局与卡片内容一字未动。 */
+  #cards .card:nth-child(2){order:3}
+  #cards .card:nth-child(3){order:2}
+  #cards .card:nth-child(2){grid-column:1/-1}
+  #cards .card:nth-child(2) .s{white-space:normal;overflow:visible;text-overflow:clip}
 }
 
 /* ==================================================================
@@ -904,6 +965,9 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
 #pageAnalytics .kpi .v small{font-size:10.5px;font-weight:500;color:var(--dim);margin-left:2px;letter-spacing:0}
 #pageAnalytics .kpi .s{font-size:10.5px;color:var(--dim);margin-top:2px;font-variant-numeric:tabular-nums;line-height:1.4}
 #pageAnalytics .kpi .s b{color:var(--fg2);font-weight:600}
+/* 副行按行分组（.kline）。桌面端就是原来的两行：.kline 独占一行、项间显示
+   「 · 」；窄屏才把每项拆成独立一行，规则见 ≤640px 媒体块。 */
+#pageAnalytics .kpi .s .kline{display:block}
 #pageAnalytics .kpi .accentbar{position:absolute;left:0;top:0;bottom:0;width:2.5px;background:var(--accent);opacity:.9;border-radius:0 3px 3px 0}
 #pageAnalytics .tokflow{display:flex;height:3px;border-radius:3px;overflow:hidden;margin-top:5px;gap:2px}
 #pageAnalytics .tokflow i{display:block;height:100%;border-radius:2px}
@@ -935,6 +999,24 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
 #pageAnalytics .ring .hole span{font-size:9px;color:var(--dim)}
 
 
+@media (max-width:640px){
+  /* 窄屏（3 列，每卡约 80~100px）沿用桌面那两行时，「输入/输出/思考/缓存」
+     会被截断或长短不齐。这里只改「分行」：每项独占一行，分隔符「 · 」隐藏
+     （独占一行后它会孤零零落在行首）；字号、颜色、措辞一律不动。
+     请求数 2 项 → 2 行，生成速度 4 项 → 4 行。 */
+  #pageAnalytics .kpi .s .kline{display:contents}
+  #pageAnalytics .kpi .s .kvi{display:block}
+  #pageAnalytics .kpi .s .ksep{display:none}
+  /* 「峰值吞吐 179 tok/s」在 79px 卡内放不下一行，会从数字与单位之间断开
+     （179 / tok/s）。把数值+单位绑成不可断的整体，只在标签后换行。
+     只作用于第一行三张卡，第二行保持原样。 */
+  #pageAnalytics .kpi.big:nth-child(-n+3) .s .kvi b{white-space:nowrap}
+  /* 同一行三张卡被网格拉成同高，但副行行数不同、有的卡没有对比行、
+     「生成速度」也没有占比色条，sparkline 各自紧跟文字往下排，于是高低不齐。
+     改成纵向 flex 并让图吃掉剩余空间（贴底）：三张图等高 44px、顶底对齐。 */
+  #pageAnalytics .kpi.big:nth-child(-n+3){display:flex;flex-direction:column}
+  #pageAnalytics .kpi.big:nth-child(-n+3) .spark{margin-top:auto}
+}
 #pageAnalytics .recent-list{display:flex;flex-direction:column;max-height:260px;overflow-y:auto;padding-right:2px}
 #pageAnalytics .recent-item{
   display:grid;grid-template-columns:54px minmax(0,1fr) auto;gap:10px;align-items:baseline;
@@ -1135,6 +1217,58 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
 #pageAnalytics .skel{color:var(--dim2);font-size:12px;padding:22px 0;text-align:center}
 #pageAnalytics .foot-note{color:var(--dim2);font-size:11px;text-align:center;margin-top:20px}
 
+/* ── 自定义下拉（Custom Select）────────────────────────────────────
+   原生 <select> 的展开列表由浏览器绘制，CSS 无法美化：深色模式下
+   会出现突兀的直角白框/系统蓝高亮，与暖色主题割裂。
+   这里用渐进增强：原生 select 仍在（表单值、change 事件、无障碍不变），
+   仅视觉上被隐藏，由同尺寸的触发器 + 自绘面板接管。
+   无 JS 时原生 select 照常可用，不会退化。 */
+.cs-wrap{position:relative;display:inline-block;vertical-align:middle;max-width:100%}
+.cs-wrap.cs-block{display:block;width:100%}
+/* 原生控件保留在无障碍树里，只做视觉隐藏（不能用 display:none） */
+.cs-native{position:absolute!important;inset:0;width:100%;height:100%;
+  opacity:0;pointer-events:none;margin:0}
+.cs-trigger{display:flex;align-items:center;gap:8px;width:100%;
+  background:var(--panel2);border:1px solid var(--line);border-radius:var(--radius-control);
+  padding:5px 9px;color:var(--fg);font:inherit;font-size:12px;line-height:1.35;
+  text-align:left;cursor:pointer;transition:border-color .14s ease,background .14s ease,box-shadow .14s ease}
+.cs-trigger:hover{border-color:var(--line-hover);background:var(--panel3)}
+.cs-trigger:focus-visible{outline:none;border-color:var(--accent);
+  box-shadow:0 0 0 3px var(--accent-soft)}
+.cs-wrap.cs-open .cs-trigger{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+.cs-value{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cs-value.cs-placeholder{color:var(--dim-light)}
+.cs-arrow{flex:0 0 auto;width:9px;height:9px;margin-left:2px;opacity:.55;
+  border-right:1.6px solid currentColor;border-bottom:1.6px solid currentColor;
+  transform:translateY(-2px) rotate(45deg);transition:transform .18s ease,opacity .14s ease}
+.cs-trigger:hover .cs-arrow{opacity:.8}
+.cs-wrap.cs-open .cs-arrow{transform:translateY(1px) rotate(-135deg)}
+.cs-panel{position:absolute;z-index:80;top:calc(100% + 4px);left:0;min-width:100%;
+  max-width:min(320px,calc(100vw - 24px));max-height:min(320px,52vh);overflow:auto;
+  background:var(--panel);border:1px solid var(--line);border-radius:10px;
+  box-shadow:var(--shadow-md);padding:4px;
+  opacity:0;transform:translateY(-4px) scale(.985);pointer-events:none;
+  transition:opacity .13s ease,transform .13s ease;
+  scrollbar-width:thin}
+.cs-wrap.cs-open .cs-panel{opacity:1;transform:none;pointer-events:auto}
+.cs-wrap.cs-drop-up .cs-panel{top:auto;bottom:calc(100% + 4px);transform:translateY(4px) scale(.985)}
+.cs-wrap.cs-drop-up.cs-open .cs-panel{transform:none}
+.cs-opt{display:flex;align-items:center;gap:7px;padding:6px 9px;border-radius:7px;
+  font-size:12px;color:var(--fg);cursor:pointer;white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis;transition:background .1s ease}
+.cs-opt.cs-hover{background:var(--panel2)}
+.cs-opt.cs-selected{background:var(--accent-selected-bg);color:var(--accent);font-weight:600}
+.cs-opt.cs-selected.cs-hover{background:var(--accent-selected-bg)}
+.cs-opt.cs-disabled{color:var(--dim-light);cursor:not-allowed;opacity:.65}
+.cs-opt.cs-disabled.cs-hover{background:transparent}
+.cs-opt .cs-tick{flex:0 0 auto;width:11px;font-size:11px;opacity:0;color:var(--accent)}
+.cs-opt.cs-selected .cs-tick{opacity:1}
+.cs-empty{padding:10px 9px;font-size:11.5px;color:var(--dim-light);text-align:center}
+/* 深色主题下原生控件仍是系统配色，这里补一层兜底，避免未增强时闪白 */
+[data-theme="dark"] select{color-scheme:dark}
+@media (prefers-reduced-motion:reduce){
+  .cs-panel,.cs-arrow,.cs-trigger{transition:none}
+}
 </style>
 <script>
 /* Runs before <body> is parsed, so the page the user last had is the
@@ -1344,6 +1478,19 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     '当前部署不支持日志终端窗口': 'Log viewer windows are unavailable for this deployment',
     '请通过部署管理器停止服务': 'Stop this service through its deployment manager',
     '未确认服务已关闭': 'Service shutdown was not confirmed',
+    '添加 API Key 账号': 'Add an API Key account',
+    '粘贴 CodeBuddy API 管理页签发的静态 Key': 'Paste the static key issued by the CodeBuddy API console',
+    '前缀。': 'prefix.',
+    '它会先拿企业额度端点验一次，通过了才落盘——验不过就什么都不写。': 'It is first probed against the enterprise quota endpoint and only saved when that check passes; a failed probe writes nothing.',
+    '备注名（可选）': 'Label (optional)',
+    '例如：企微企业号': 'e.g. the enterprise WeCom account',
+    '验证并添加': 'Verify and add',
+    '验证中…': 'Verifying…',
+    '正在用企业额度端点验一次…': 'Probing the enterprise quota endpoint…',
+    '请先填入 API Key': 'Enter the API key first',
+    '前缀不对：应当以 ck_ 或 pt_ 开头': 'Wrong prefix: it must start with ck_ or pt_',
+    ' · 额度 ': ' · quota ',
+    '，本期已用 ': ', used this cycle ',
     '(不限)': '(unlimited)',
     '(仅桌面端对话)': '(desktop chats only)',
     '(低于': '(below',
@@ -1478,6 +1625,10 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     '任务福利': 'Task rewards',
     '任务说明': 'Task description',
     '会员类型:': 'Membership:',
+    '仅标记不可用，未标记不代表可用': 'only blocked models are labelled; an unlabelled model is not a promise',
+    '上游目录声明：该模型仅限 PRO 账号': 'Upstream catalogue: this model is PRO accounts only',
+    '目录刷新于': 'catalogue refreshed at',
+    '免费账号的请求会被本地拦下，不发往上游': 'free-account requests are refused locally and never sent upstream',
     '会话已失效，请重新输入密码': 'Session expired, please enter the password again',
     '住宅': 'Residential',
     '保存': 'Save',
@@ -1731,6 +1882,14 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     '网页通道一轮没跑完（会话还在 working）就再来一轮：最多尝试几次（含第一轮，可改），每轮等待时间在上一轮基础上增加一个首轮时长——默认 3 次、首轮 120 秒，也就是 120 / 240 / 360 秒。默认开启；会话只是慢的时候多等一轮通常就过了。': 'When a web-channel attempt does not finish (the session is still working), try again: up to N tries in total (the first one included, configurable), with each wait one more first-wait step than the previous one - 3 tries and a 120-second first wait by default, i.e. 120 / 240 / 360. On by default; a session that is merely slow usually finishes on the next attempt.',
     '注意：等待时间逐轮递增，「次数」与「首轮等待」调大都是线性累加的代价——一个始终跑不完的账号最坏能占住巡检 base×(1+2+…+次数) 秒（默认 120×(1+2+3) = 720 秒 = 12 分钟）。建议不超过客户端愿意空等的时长。': 'Note: the wait grows by one first-wait step each round, so raising either the try count or the first wait costs you on a linear scale - an account that never finishes can hold the sweep for base×(1+2+…+tries) seconds (120×(1+2+3) = 720 seconds, 12 minutes, by default). Keep it within how long a client is willing to wait.',
     '已启用：网页通道失败后会再试（等待时间递增）': 'On: the web channel tries again after a failure (wait doubles each time)',
+    '建会话失败退避': 'Backoff after a create failure',
+    '建会话（或取沙箱）就失败的那一轮只花几百毫秒，重试不消耗「首轮等待」的预算，所以这里单独退避：第 N 轮等 base×2^(N-1) 秒，单次上限取 30 秒与基数的较大者，默认 5 秒；填 0 = 不退避（旧行为：一秒内把所有候选打光）。跑过一轮会话的失败不受影响，它们已经用等待时间付过账。': 'A round that fails while creating the conversation (or fetching the sandbox) costs a few hundred milliseconds and never touches the first-wait budget, so it backs off on its own: round N waits base×2^(N-1) seconds, capped per wait at the larger of 30 seconds and the base, 5 seconds by default. 0 disables it, which is the old timing (every candidate burned inside one second). Rounds that did reach the turn are unaffected - they already paid with the wait time.',
+    '建会话失败后等 ': 'Waits ',
+    '不退避：建会话失败后立即重试': 'No backoff: a failed create is retried immediately',
+    '请输入不小于 0 的整数秒（0 = 不退避）': 'Enter a whole number of seconds, 0 or more (0 = no backoff)',
+    '已保存：建会话失败后先等 ': 'Saved: wait ',
+    ' 秒再重试': ' seconds before retrying a failed create',
+    '已关闭退避：建会话失败后立即重试': 'Backoff off: a failed create is retried immediately',
     '已关闭：网页通道只跑一轮': 'Off: the web channel runs a single attempt',
     '已保存：最多尝试 ': 'Saved: up to ',
     ' 次，首轮等待 ': ' tries, first wait ',
@@ -1927,6 +2086,21 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     '传输类失败与 502/503/504 改记在「出口」而不是账号上：同一个出口的账号共用一个计数器，退避是秒级（1 秒起、翻倍、封顶 15 秒、带抖动），任一次成功即清零；账号级熔断（30 分钟起、翻倍到 6 小时）不再被一次链路抖动触发。500 与 401/403/429 仍走原路径。默认关闭。': 'Transport failures and 502/503/504 are charged to the egress instead of the account: accounts sharing one egress share one counter, the backoff is seconds-scale (1s, doubling, capped at 15s, jittered) and any success clears it; the account breaker (30 minutes, doubling to 6h) is no longer tripped by a link hiccup. 500 and 401/403/429 keep their old paths. Off by default.',
     '已启用：出口级瞬时失败退避': 'On: egress-level transient backoff',
     '已关闭出口级瞬时失败退避': 'Egress-level transient backoff off',
+'账号级并发上限': 'Per-account concurrency cap',
+'一个上游账号同时最多接几个请求。0 = 不限（默认，跟没这个功能一样）；1 = 一个账号同时只接一个；N = 一个账号最多同时接 N 个。': 'How many requests one upstream account may serve at once. 0 = unlimited (the default, same as having no such feature); 1 = one request per account at a time; N = up to N at once per account.',
+'整个池子能同时接多少 = 账号数 × N（本机 24 个账号：1 → 24 个，3 → 72 个，10 → 240 个）。超出这个数的请求不排队，直接回「每个账号都在忙」，客户端自己重试。': 'Total capacity = accounts x N (24 accounts here: 1 -> 24, 3 -> 72, 10 -> 240 simultaneous requests). Requests beyond that are not queued: they are answered straight away with "every account is busy" and the client retries.',
+'它只防「同一瞬间两个请求压到同一个账号上」（上游按账号+分钟计 token，压一起会回 429、账号被停放）。它治不了「两个开场白相同的会话每轮互换账号」——那种情况每轮都丢缓存，要靠下面的「更稳的会话粘滞键」。': 'It only prevents two requests landing on the same account at the same instant (the upstream meters tokens per account per minute, and piling up there earns a 429 plus a parked account). It does not fix two conversations with the same opening line swapping accounts every turn - those lose their cache each turn and need the stable conversation key below.',
+'1 和 2–10 的实际区别：只有 1 能保证两个同开场白的会话不会同时撞进同一个号；2 以上只是把总容量放大，两个会话又能同时进同一个号（该撞还是撞）；10 在 24 个账号下基本等于「不限」，除非真的同时有 240 个以上请求。日常两三个会话用不到它，保持 0 即可。': 'What 1 versus 2-10 actually changes: only 1 guarantees two conversations with the same opening never share an account at the same time; 2 and above merely raise the total capacity and let those two conversations land on one account again (they still collide); 10 is effectively "unlimited" with 24 accounts unless you really have 240+ simultaneous requests. For two or three everyday conversations you do not need it - leave it at 0.',
+'为什么需要：上游按「账号 + 分钟」计 token，而一个大上下文会话单请求就带十几万 token。两个会话同时压在一个账号上，一分钟内很容易过百万 token，上游回 429；网关随即停放该账号并换号，新账号没有这段对话的前缀缓存，缓存命中率从 99% 掉到 0、首字从 1.5 秒涨到 5-6 秒。设成 1 时两个会话各走各的账号，各自保留缓存。': 'Why this exists: the upstream meters tokens per account per minute, and one large-context turn already carries over a hundred thousand tokens. Two conversations on one account easily pass a million tokens a minute, so the upstream answers 429; the gateway then parks that account and switches, and the new account holds none of the conversation prefix, so the cache hit rate drops from 99% to 0 and time-to-first-byte goes from 1.5s to 5-6s. At 1 each conversation keeps its own account and its own cache.',
+'个 / 账号': 'per account',
+'已保存：账号并发不限': 'Saved: per-account concurrency unlimited',
+'请输入 0 到 10 的整数（0 = 不限）': 'Enter a whole number from 0 to 10 (0 = unlimited)',
+'更稳的会话粘滞键': 'Stable conversation key',
+'会话粘滞（同一段对话每轮回到同一个账号）默认只用「system 提示 + 首条提问」算会话键。两个开场白相同的会话会算出同一个键、共享同一个绑定槽，于是每轮互相覆盖、轮流换账号，缓存每轮归零。开启后把「首条 assistant 回复」也算进键里，两个会话从第 2 轮起各走各的账号。默认关闭，关着时与上游逻辑一字不差。': 'Sticky sessions (every turn of a conversation returning to the same account) key off the system prompt plus the first user message by default. Two conversations that open the same way hash to the same key, share one binding slot, overwrite each other every turn and swap accounts each turn, so the prefix cache is dropped every time. Turning this on also hashes the first assistant reply, so from the second turn on the two conversations keep separate accounts. Off by default: with it off the behaviour is byte-identical to upstream.',
+'代价：前缀真的完全相同的会话仍会共用一个账号（那本来就是最优的缓存共享）；开启后前两条消息的哈希变成前三条，正在进行的对话会一次性重新绑定账号（那一轮缓存掉一次）。': 'The cost: conversations whose prefixes really are identical still share an account (that is the best possible cache sharing anyway); turning it on changes the hash from two messages to three, so conversations already in flight are re-bound once (one turn loses its cache).',
+'启用更稳的会话键': 'Enable stable key',
+'已启用：会话键包含首条回复': 'On: the key includes the first reply',
+'已关闭：会话键只用前两条消息': 'Off: the key uses the first two messages',
     '上游响应头超时': 'Upstream response-header timeout',
     '单次尝试等上游返回响应头的上限（秒）。拿到响应头之前网关不会向客户端发出任何字节，所以这个值就是客户端要空等的时长：设得比客户端的首字节预算还大时，客户端会先断开（表现为 499 / 首字节迟迟不返回），而网关仍会按这个上限继续换账号重试。默认 120。': 'How long one attempt may wait for the upstream to send response headers (seconds). Nothing is sent to the client before those headers arrive, so this is exactly how long the client can end up waiting: set it above the client\'s first-byte budget and the client disconnects first (seen as a 499, or a first byte that never comes) while the gateway keeps retrying on the next account under the same limit. Default 120.',
     '调小的代价：上游偶尔确实算得慢的正常请求会被提前判失败、换账号重试，多消耗一次额度。建议不高于客户端的首字节预算。': 'The cost of lowering it: a normal request the upstream genuinely takes a long time to compute is failed early and retried on another account, spending one more unit of quota. Prefer a value no higher than the client\'s first-byte budget.',
@@ -2056,6 +2230,7 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     '检查失败': 'Check failed',
     '尚未检查': 'Not checked yet',
     '读取失败': 'Could not read',
+    '读取于': 'read at',
     '本月': 'This month',
     '本月 (This Month)': 'This month',
     '本月消耗 Token': 'Tokens used this month',
@@ -2845,6 +3020,14 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     "网页通道一轮没跑完（会话还在 working）就再来一轮：最多尝试几次（含第一轮，可改），每轮等待时间在上一轮基础上增加一个首轮时长——默认 3 次、首轮 120 秒，也就是 120 / 240 / 360 秒。默认开启；会话只是慢的时候多等一轮通常就过了。": "網頁通道一輪沒跑完（會話還在 working）就再來一輪：最多嘗試幾次（含第一輪，可改），每輪等待時間在上一輪基礎上增加一個首輪時長——預設 3 次、首輪 120 秒，也就是 120 / 240 / 360 秒。預設開啟；會話只是慢的時候多等一輪通常就過了。",
     "注意：等待时间逐轮递增，「次数」与「首轮等待」调大都是线性累加的代价——一个始终跑不完的账号最坏能占住巡检 base×(1+2+…+次数) 秒（默认 120×(1+2+3) = 720 秒 = 12 分钟）。建议不超过客户端愿意空等的时长。": "注意：等待時間逐輪遞增，「次數」與「首輪等待」調大都是線性累加的代價——一個始終跑不完的帳號最壞能佔住巡檢 base×(1+2+…+次數) 秒（預設 120×(1+2+3) = 720 秒 = 12 分鐘）。建議不超過客戶端願意空等的時長。",
     "已启用：网页通道失败后会再试（等待时间递增）": "已啟用：網頁通道失敗後會再試（等待時間遞增）",
+    "建会话失败退避": "建會話失敗退避",
+    "建会话（或取沙箱）就失败的那一轮只花几百毫秒，重试不消耗「首轮等待」的预算，所以这里单独退避：第 N 轮等 base×2^(N-1) 秒，单次上限取 30 秒与基数的较大者，默认 5 秒；填 0 = 不退避（旧行为：一秒内把所有候选打光）。跑过一轮会话的失败不受影响，它们已经用等待时间付过账。": "建會話（或取沙箱）就失敗的那一輪只花幾百毫秒，重試不消耗「首輪等待」的預算，所以這裡單獨退避：第 N 輪等 base×2^(N-1) 秒，單次上限取 30 秒與基數的較大者，預設 5 秒；填 0 = 不退避（舊行為：一秒內把所有候選打光）。跑過一輪會話的失敗不受影響，它們已經用等待時間付過帳。",
+    "建会话失败后等 ": "建會話失敗後等 ",
+    "不退避：建会话失败后立即重试": "不退避：建會話失敗後立即重試",
+    "请输入不小于 0 的整数秒（0 = 不退避）": "請輸入不小於 0 的整數秒（0 = 不退避）",
+    "已保存：建会话失败后先等 ": "已儲存：建會話失敗後先等 ",
+    " 秒再重试": " 秒再重試",
+    "已关闭退避：建会话失败后立即重试": "已關閉退避：建會話失敗後立即重試",
     "已关闭：网页通道只跑一轮": "已關閉：網頁通道只跑一輪",
     "已保存：最多尝试 ": "已保存：最多嘗試 ",
     " 次，首轮等待 ": " 次，首輪等待 ",
@@ -3793,7 +3976,11 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
     </div>
   </div>
 </header>
-<div id="panelGate" style="position:fixed;inset:0;z-index:600;display:none;
+<!-- 面板闸门默认可见（fail-closed）。看板骨架是静态标记，闸门若初始 display:none，
+     首帧会先把整块看板画出来、等 /panel/status 回来才盖住：无痕窗口 / 首次访问每次
+     都能看到「登录后的界面」闪一下。有会话令牌时由 <head> 里那段首帧判定先隐藏
+     （html.wb-panel-session），复核失败再由 panelNeedsLogin() 显示。 -->
+<div id="panelGate" style="position:fixed;inset:0;z-index:600;display:flex;
      align-items:center;justify-content:center;padding:20px;background:var(--bg)">
   <div style="width:min(380px,100%);background:var(--panel);border:1px solid var(--line);
               border-radius:14px;padding:26px 24px;box-shadow:0 10px 30px rgba(15,23,42,.12)">
@@ -3994,8 +4181,11 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
       <div class="collapse-inner">
     <div class="toolbar">
     <button onclick="openLoginModal()">添加</button>
+    <!-- 静态 API Key 是另一条并行入口：CodeBuddy 的登录页不支持企业微信扫码，
+         企业号只能在 API 管理页手工建 Key 再粘进来。 -->
+    <button class="sec" onclick="openApiKeyModal()">+ API Key</button>
     <!-- 打卡按钮与「添加」同排：手机端靠右显示，不再单独占一行。 -->
-    <div class="tb-group">
+    <div class="tb-group tb-checkin">
     <button class="sec" id="btnCheckin" onclick="doCheckin(this)" style="display:none">Buddy 加油站签到</button>
     <button class="sec" id="btnDailyChat" onclick="doDailyChat(this)" style="display:none">每日活跃打卡 (国际版)</button>
     <!-- 网页通道打卡按钮不再上屏（2026-10-10 起）：网页通道那一步已经由设置里的
@@ -5014,6 +5204,16 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
           回退开启后，网页通道每失败一次就换下一个模型；组合按目录倍率自动排序（免费 → 低积分 → 高积分），先试免费的，再试便宜的，最后才是贵的。候选至少各试一次，配置的「最多尝试次数」更大时再从头跑第二轮。默认关闭。
         </div>
         <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px">
+          <label style="font-size:13px;color:var(--dim)">建会话失败退避</label>
+          <input id="setDailyChatWebRetryBackoff" type="number" min="0" step="1" style="width:70px">
+          <span style="font-size:12px;color:var(--dim)">秒</span>
+          <button onclick="saveDailyChatWebRetryBackoff(this)">保存</button>
+          <span id="setDailyChatWebRetryBackoffState" style="font-size:12px;color:var(--dim)"></span>
+        </div>
+        <div style="font-size:12px;color:var(--dim);margin-top:6px">
+          建会话（或取沙箱）就失败的那一轮只花几百毫秒，重试不消耗「首轮等待」的预算，所以这里单独退避：第 N 轮等 base×2^(N-1) 秒，单次上限取 30 秒与基数的较大者，默认 5 秒；填 0 = 不退避（旧行为：一秒内把所有候选打光）。跑过一轮会话的失败不受影响，它们已经用等待时间付过账。
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px">
           <label class="switch">
             <input id="setDailyChatRandomPrompt" type="checkbox" onchange="saveDailyChatRandomPrompt()">
             <span class="switch-track"></span>
@@ -5233,6 +5433,74 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
           </div>
         </div>
       </section>
+      <section>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+          <div>
+            <h2 style="margin:0">上游响应头超时 <em id="setHeaderTimeoutState"></em></h2>
+            <div style="font-size:12px;color:var(--dim);margin-top:4px">
+              单次尝试等上游返回响应头的上限（秒）。拿到响应头之前网关不会向客户端发出任何字节，所以这个值就是客户端要空等的时长：设得比客户端的首字节预算还大时，客户端会先断开（表现为 499 / 首字节迟迟不返回），而网关仍会按这个上限继续换账号重试。默认 120。
+            </div>
+            <div style="font-size:12px;color:var(--warn);margin-top:4px">
+              调小的代价：上游偶尔确实算得慢的正常请求会被提前判失败、换账号重试，多消耗一次额度。建议不高于客户端的首字节预算。
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+            <label style="display:flex;align-items:center;gap:6px;font-size:13px;min-height:40px">
+              <input id="setHeaderTimeout" type="number" min="1" step="1" style="width:90px">
+              秒
+            </label>
+            <button onclick="saveHeaderTimeout(this)">保存</button>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+          <div>
+            <h2 style="margin:0">账号级并发上限 <em id="setAccountConcurrentState"></em></h2>
+            <div style="font-size:12px;color:var(--dim);margin-top:4px">
+              一个上游账号同时最多接几个请求。0 = 不限（默认，跟没这个功能一样）；1 = 一个账号同时只接一个；N = 一个账号最多同时接 N 个。
+            </div>
+            <div style="font-size:12px;color:var(--dim);margin-top:4px">
+              整个池子能同时接多少 = 账号数 × N（本机 24 个账号：1 → 24 个，3 → 72 个，10 → 240 个）。超出这个数的请求不排队，直接回「每个账号都在忙」，客户端自己重试。
+            </div>
+            <div style="font-size:12px;color:var(--warn);margin-top:4px">
+              它只防「同一瞬间两个请求压到同一个账号上」（上游按账号+分钟计 token，压一起会回 429、账号被停放）。它治不了「两个开场白相同的会话每轮互换账号」——那种情况每轮都丢缓存，要靠下面的「更稳的会话粘滞键」。
+            </div>
+            <div style="font-size:12px;color:var(--dim);margin-top:4px">
+              1 和 2–10 的实际区别：只有 1 能保证两个同开场白的会话不会同时撞进同一个号；2 以上只是把总容量放大，两个会话又能同时进同一个号（该撞还是撞）；10 在 24 个账号下基本等于「不限」，除非真的同时有 240 个以上请求。日常两三个会话用不到它，保持 0 即可。
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+            <label style="display:flex;align-items:center;gap:6px;font-size:13px;min-height:40px">
+              <input id="setAccountConcurrent" type="number" min="0" max="10" step="1" style="width:90px">
+              个 / 账号
+            </label>
+            <button onclick="saveAccountConcurrent(this)">保存</button>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
+          <div>
+            <h2 style="margin:0">更稳的会话粘滞键 <span class="help-mark" role="button" tabindex="0" aria-label="功能说明" onclick="toggleHelpDetail('affinityStableKeyHelp', event)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleHelpDetail('affinityStableKeyHelp', event);}">!</span> <em id="setAffinityStableKeyState"></em></h2>
+            <div class="help-detail" id="affinityStableKeyHelp" hidden>
+              会话粘滞（同一段对话每轮回到同一个账号）默认只用「system 提示 + 首条提问」算会话键。两个开场白相同的会话会算出同一个键、共享同一个绑定槽，于是每轮互相覆盖、轮流换账号，缓存每轮归零。开启后把「首条 assistant 回复」也算进键里，两个会话从第 2 轮起各走各的账号。默认关闭，关着时与上游逻辑一字不差。
+              <br><br>
+              代价：前缀真的完全相同的会话仍会共用一个账号（那本来就是最优的缓存共享）；开启后前两条消息的哈希变成前三条，正在进行的对话会一次性重新绑定账号（那一轮缓存掉一次）。
+            </div>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+            <label style="display:flex;align-items:center;gap:6px;font-size:13px;min-height:40px">
+              <input id="setAffinityStableKey" type="checkbox" style="width:16px;height:16px">
+              启用更稳的会话键
+            </label>
+            <button onclick="saveAffinityStableKey(this)">保存</button>
+          </div>
+        </div>
+      </section>
+
       <section>
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:10px">
           <div>
@@ -5603,6 +5871,37 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
       <span style="flex:1"></span>
       <button class="sec" onclick="closeImport()">取消</button>
       <button id="btnImportCommit" class="primary" onclick="commitImport(this)" disabled>确认导入</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-mask" id="apiKeyModal">
+  <div class="modal" role="dialog" aria-modal="true" style="width:min(560px,100%)">
+    <div class="modal-hd">
+      <h2>添加 API Key 账号</h2>
+      <button class="modal-x" onclick="closeApiKeyModal()" aria-label="关闭">×</button>
+    </div>
+    <div class="modal-bd">
+      <p class="hint" style="margin-top:0">
+        粘贴 CodeBuddy API 管理页签发的静态 Key（<code>ck_</code> / <code>pt_</code> 前缀）。
+        它会先拿企业额度端点验一次，通过了才落盘——验不过就什么都不写。
+      </p>
+      <div class="field" style="margin-top:12px">
+        <label for="apiKeyInput">API Key</label>
+        <input id="apiKeyInput" type="password" autocomplete="off" spellcheck="false"
+               placeholder="ck_xxxxxxxx.yyyyyyyy" style="width:100%">
+      </div>
+      <div class="field" style="margin-top:12px">
+        <label for="apiKeyNickname">备注名（可选）</label>
+        <input id="apiKeyNickname" type="text" autocomplete="off" maxlength="64"
+               placeholder="例如：企微企业号" style="width:100%">
+      </div>
+      <p class="hint" id="apiKeyModalMsg" style="margin-bottom:0"></p>
+    </div>
+    <div class="modal-ft">
+      <span style="flex:1"></span>
+      <button class="sec" onclick="closeApiKeyModal()">取消</button>
+      <button class="primary" id="btnApiKeyCommit" onclick="commitApiKey(this)">验证并添加</button>
     </div>
   </div>
 </div>
@@ -6354,15 +6653,21 @@ function renderAvailableModels(){
         ? ' <span style="font-size:10px;color:var(--accent)">(夜间0.5x)</span>' : '';
       credBadge = '<span class="badge s">' + esc(raw) + night + '</span>';
     }
-    // #505: 只标「免费账号不可用」，不标「可用」。没有 entitlement 就什么都不显示。
+    // #505: 只标「Pro Only」（与上游徽章同名），不标「可用」。没有 entitlement 就什么都不显示。
+    // 标注由 /v1/models 给出：source=catalog 是上游目录 modelTiers 的声明（与
+    // 调度器拦人用的是同一份数据），source=runtime 是历史上真撞到过 11158。
     const ent = m.entitlement;
-    if(ent && Number(ent.code) === 11158){
-      const who = ent.userType ? ('user type ' + ent.userType) : '免费账号';
-      const when = ent.checked_at ? new Date(Number(ent.checked_at) * 1000).toLocaleString() : '';
-      const tip = '上游 ' + ent.code + ' · ' + who + (when ? (' · ' + when) : '')
-        + ' · 仅标记不可用，未标记不代表可用';
+    if(ent){
+      const stamp = ent.checked_at || ent.at;
+      const when = stamp ? new Date(Number(stamp) * 1000).toLocaleString() : '';
+      const tip = (ent.source === 'catalog')
+        ? ('上游目录声明：该模型仅限 PRO 账号（requiredUserType=standard）'
+           + (when ? (' · 目录刷新于 ' + when) : '')
+           + ' · 免费账号的请求会被本地拦下，不发往上游 · 仅标记不可用，未标记不代表可用')
+        : ('上游 ' + ent.code + ' · ' + (ent.userType ? ('user type ' + ent.userType) : '免费账号')
+           + (when ? (' · ' + when) : '') + ' · 仅标记不可用，未标记不代表可用');
       credBadge += ' <span class="badge warn" style="font-size:11px;background:var(--warn-soft);color:var(--warn);border-color:rgba(183,121,31,.35)" title="'
-        + esc(tip) + '">免费账号不可用</span>';
+        + esc(tip) + '">Pro Only</span>';
     }
 
     // 2. 模型能力 (Vision, Tool calls)
@@ -7506,7 +7811,7 @@ function card(k, v, sub, cls){
 
 /* ---- api key handling ---- */
 const KEY_STORE = 'wb-proxy-api-key';
-const PANEL_STORE = 'wb-proxy-panel-token';
+// PANEL_STORE 在 <head> 里定义（首帧判定要用它），这里不再重复声明。
 let API_KEY = '';
 let PANEL_TOKEN = '';
 try { PANEL_TOKEN = sessionStorage.getItem(PANEL_STORE) || ''; } catch(e) { PANEL_TOKEN = ''; }
@@ -8148,6 +8453,25 @@ function accountRow(a){
       expBadge = '<span class="badge mini warn" style="font-size:10px;padding:1px 4px" title="最近套餐包将于 ' + esc(expEnd.slice(5,10)) + ' 到期 (剩' + Math.ceil(d) + '天)">7天内到期</span>';
     }
   }
+  // 账号档位（#505）读自上游计费摘要，包名原样显示（国际版 Free、国内版体验版），
+  // 与 workbuddy 官方叫法一致，不自造「免费 / 付费」标签。tier 为空 = 还没读过，
+  // 那是「未知」而不是免费，所以不画任何胶囊（企业号与被风控限制的号也是空）。
+  //
+  // 位置放在「版本」格里、区域徽章的正下方：这一格只有一枚区域徽章（实测 76px
+  // 宽、内容约 52px），是全表唯一还有余量又不会被别的元素挤到的地方。积分格
+  // 实测只有 120px，加了「临期 / 明细」就顶满；账号格里的次要信息行是 10px 的
+  // 可点击链接，胶囊挤在旁边既会被长名单推走、又容易被当成链接的一部分。
+  // 行高不受影响：账号格本来就比这一格高。
+  const tier = a.tier && typeof a.tier === 'object' ? a.tier : null;
+  const tierPkg = tier && tier.package ? String(tier.package) : '';
+  let tierBadge = '';
+  if(tierPkg){
+    const at = tier.checked_at ? new Date(tier.checked_at * 1000).toLocaleString() : '';
+    tierBadge = '<span class="badge mini' + (tier.paid === true ? ' ok' : '') + '"'
+      + ' title="会员类型: ' + esc(tierPkg) + (at ? ' · 读取于 ' + esc(at) : '') + '">'
+      + esc(tierPkg) + '</span>';
+  }
+  const tierBadgeBlock = tierBadge ? '<div style="margin-top:2px">' + tierBadge + '</div>' : '';
   const credText = cred
     ? ('<div class="credit-stack">'
        + '<div class="credit-main"><b>' + fmt(cred.remain) + '</b>'
@@ -8175,17 +8499,27 @@ function accountRow(a){
   // 有续行时给账号行打 has-alert：两行是同一块内容，中间不该有分割线（见 CSS）。
   const alertRows = coolRow(a) + limitRow(a);
   return '<tr' + (alertRows ? ' class="has-alert"' : '') + '>'
-    + '<td style="text-align:center;white-space:nowrap" data-label="版本">' + realmBadge + '</td>'
+    + '<td style="text-align:center;white-space:nowrap" data-label="版本">' + realmBadge + tierBadgeBlock + '</td>'
     + '<td style="text-align:left" data-label="账号">'
     // 账号名（大一号）+ 备注 chip 同一行；备注从独立一行收进账号后面。
     +   '<div class="acct-name-row">'
     +     '<span class="acct-name" title="' + esc(a.nickname) + '">' + esc(a.nickname) + '</span>'
+    // 静态 API Key 账号：没有登录身份，也没有签到/成长体系，标出来省得当成
+    // 普通 OAuth 号去点「重新登录」。悬停给出脱敏后的凭证，方便对上是哪一把。
+    +     (a.apiKey
+          ? '<span class="badge mini" style="background:var(--panel2);color:var(--dim)"'
+            + ' title="静态 API Key 账号（' + esc(a.credentialMask || 'ck_***') + '）：不参与刷新 / 签到 / 成长任务，额度走企业口径"'
+            + '>API Key</span>'
+          : '')
     +     (a.note
           ? '<span class="note-chip has" title="点击编辑备注" onclick="editAccountNote(&quot;' + uidAttr + '&quot;)">' + esc(a.note) + '</span>'
           : '<span class="note-chip" title="点击添加备注，比如「批量」/「自用」" onclick="editAccountNote(&quot;' + uidAttr + '&quot;)">+ 备注</span>')
-    +     '<span class="badge mini ' + (a.tasksEnabled ? 'ok' : 'off') + '" style="cursor:pointer;margin-left:6px" title="参与签到 / 成长任务 / 连登管家 / 猫猫旅行 / 国际版活跃；与 API 取号无关，点一下切换" onclick="toggleAccountTasks(&quot;' + uidAttr + '&quot;,' + (!a.tasksEnabled) + ')">任务' + (a.tasksEnabled ? '开' : '关') + '</span>'
+    // API Key 账号没有个人成长体系，签到/任务开关对它没有意义：上游一律拒绝，
+    // 画出来只会让人以为点了能开。
+    +     (a.apiKey ? ''
+          : '<span class="badge mini ' + (a.tasksEnabled ? 'ok' : 'off') + '" style="cursor:pointer;margin-left:6px" title="参与签到 / 成长任务 / 连登管家 / 猫猫旅行 / 国际版活跃；与 API 取号无关，点一下切换" onclick="toggleAccountTasks(&quot;' + uidAttr + '&quot;,' + (!a.tasksEnabled) + ')">任务' + (a.tasksEnabled ? '开' : '关') + '</span>')
     // 移动端专用：版本 + 状态徽章靠右同行（桌面隐藏，用表格自己的两列）。
-    +     '<span class="acct-mobile-badges">' + realmBadgeMobile + state + '</span>'
+    +     '<span class="acct-mobile-badges">' + realmBadgeMobile + state + tierBadge + '</span>'
     +   '</div>'
     // 次要信息收成一行：值截断到几个字符，完整值走悬浮气泡（data-tip）。
     +   '<div class="acct-meta mono">'
@@ -8231,6 +8565,18 @@ function accountRow(a){
     + '</div>'
     + '</td></tr>'
     + alertRows;
+}
+
+// 「!」帮助标记的展开/收起：说明文本只写一份（在 .help-detail 里），
+// 点击标记才显示，再点一次收起。
+function toggleHelpDetail(id, evt){
+  if(evt && evt.stopPropagation) evt.stopPropagation();
+  const box = document.getElementById(id);
+  if(!box) return;
+  const willOpen = box.hasAttribute('hidden');
+  if(willOpen) box.removeAttribute('hidden'); else box.setAttribute('hidden', '');
+  const mark = document.querySelector('.help-mark[onclick*="' + id + '"]');
+  if(mark) mark.classList.toggle('open', willOpen);
 }
 
 // 悬停气泡（全局单例）。用自定义 DOM 而不是原生 title：原生 tooltip 由浏览器
@@ -9086,6 +9432,64 @@ function openImport(){
     readImportFile(f);
   };
   picker.click();
+}
+
+function openApiKeyModal(){
+  const m = document.getElementById('apiKeyModal');
+  const input = document.getElementById('apiKeyInput');
+  const name = document.getElementById('apiKeyNickname');
+  const msg = document.getElementById('apiKeyModalMsg');
+  const btn = document.getElementById('btnApiKeyCommit');
+  if(input) input.value = '';
+  if(name) name.value = '';
+  if(msg) msg.textContent = '';
+  if(btn){ btn.disabled = false; btn.textContent = '验证并添加'; }
+  if(m) m.classList.add('show');
+  if(input) setTimeout(() => input.focus(), 50);
+}
+
+function closeApiKeyModal(){
+  const m = document.getElementById('apiKeyModal');
+  if(m) m.classList.remove('show');
+  const input = document.getElementById('apiKeyInput');
+  // 关掉就抹掉：这串东西等同于账号本身，留在 DOM 里没有任何好处。
+  if(input) input.value = '';
+}
+
+async function commitApiKey(btn){
+  const input = document.getElementById('apiKeyInput');
+  const name = document.getElementById('apiKeyNickname');
+  const msg = document.getElementById('apiKeyModalMsg');
+  const key = (input && input.value || '').trim();
+  if(!key){
+    if(msg){ msg.style.color = 'var(--warn)'; msg.textContent = '请先填入 API Key'; }
+    return;
+  }
+  if(!/^(ck_|pt_)/.test(key)){
+    if(msg){ msg.style.color = 'var(--warn)'; msg.textContent = '前缀不对：应当以 ck_ 或 pt_ 开头'; }
+    return;
+  }
+  if(btn){ btn.disabled = true; btn.textContent = '验证中…'; }
+  if(msg){ msg.style.color = 'var(--dim)'; msg.textContent = '正在用企业额度端点验一次…'; }
+  try{
+    const r = await postJSON('/accounts/add-api-key', {
+      key: key,
+      nickname: (name && name.value || '').trim(),
+    });
+    const probe = r.probe || {};
+    let msg = (r.updated ? '已更新 ' : '已添加 ') + (r.nickname || r.uid || 'API Key 账号');
+    if(probe.limit !== undefined && probe.limit !== null){
+      msg += ' · 额度 ' + probe.limit
+           + (probe.used !== undefined && probe.used !== null ? '，本期已用 ' + probe.used : '');
+    }
+    toast(msg);
+    closeApiKeyModal();
+    // 与导入一致：只重拉账号列表，不整页刷新（会打断正在看的其他面板）。
+    await loadAccounts();
+  }catch(e){
+    if(msg){ msg.style.color = 'var(--warn)'; msg.textContent = '添加失败: ' + e.message; }
+    if(btn){ btn.disabled = false; btn.textContent = '验证并添加'; }
+  }
 }
 
 function closeImport(){
@@ -10210,6 +10614,10 @@ function isAuthError(err){
 }
 
 function panelNeedsLogin(){
+  // 闸门的可见性有两处来源：markup 上的 display:flex，和 <head> 首帧判定加的
+  // html.wb-panel-session（!important）。必须先摘掉那个类，否则闸门永远出不来
+  // ——会话过期、登录失败都靠这个函数把登录框放回屏幕。
+  document.documentElement.classList.remove('wb-panel-session');
   const gate = document.getElementById('panelGate');
   if(gate) gate.style.display = 'flex';
   const input = document.getElementById('panelPwdInput');
@@ -10238,6 +10646,9 @@ function panelSessionLost(){
 }
 
 function panelHideGate(){
+  // 首帧判定的类只在「复核还没回来」时有用；一旦确认已登录就清掉，
+  // 让「有类 ⇔ 闸门被首帧判定隐藏」这条不变式只作用于启动阶段。
+  document.documentElement.classList.remove('wb-panel-session');
   const gate = document.getElementById('panelGate');
   if(gate) gate.style.display = 'none';
 }
@@ -10257,6 +10668,10 @@ async function submitPanelLogin(){
     const data = await r.json().catch(() => ({}));
     if(!r.ok){
       if(msg) msg.textContent = (data.error && data.error.message) || '密码错误';
+      // 登录失败必须保证闸门在屏幕上：带 ?pwd= 自动登录时页面不会走 bootPanel 的
+      // 未认证分支，闸门若停在首帧判定的隐藏态，用户看到的是「看着已登录、其实
+      // 进不去」的空看板，连重输的框都没有。
+      panelNeedsLogin();
       return;
     }
     PANEL_TOKEN = data.token || '';
@@ -10270,6 +10685,8 @@ async function submitPanelLogin(){
     await startDashboard();
   } catch(e) {
     if(msg) msg.textContent = '登录失败: ' + e.message;
+    // 网络层失败（网关没起来、反代 502）同样要把闸门留在屏幕上。
+    panelNeedsLogin();
   }
 }
 
@@ -11233,6 +11650,33 @@ async function loadSettings(showToast){
       const dailyWebFallback = data.daily_chat_web_fallback === true;
       const dailyWebFallbackInput = document.getElementById('setDailyChatWebFallback');
       if(dailyWebFallbackInput) dailyWebFallbackInput.checked = dailyWebFallback;
+      // 建会话阶段失败的退避：没配过时后端给的是内置默认（吃 WB_WEB_RETRY_BACKOFF），
+      // 0 表示不退避，所以这里不能用 || 兜底，得认 0。
+      const dailyWebRetryBackoffDefault = Number(
+        data.daily_chat_web_retry_backoff_default != null
+          ? data.daily_chat_web_retry_backoff_default : 5);
+      const dailyWebRetryBackoff = Number(
+        data.daily_chat_web_retry_backoff != null
+          ? data.daily_chat_web_retry_backoff : dailyWebRetryBackoffDefault);
+      const dailyWebRetryBackoffMax = Number(data.daily_chat_web_retry_backoff_max || 60);
+      const dailyWebRetryBackoffInput = document.getElementById('setDailyChatWebRetryBackoff');
+      if(dailyWebRetryBackoffInput){
+        dailyWebRetryBackoffInput.value = String(dailyWebRetryBackoff);
+        dailyWebRetryBackoffInput.max = String(dailyWebRetryBackoffMax);
+      }
+      const dailyWebRetryBackoffState = document.getElementById('setDailyChatWebRetryBackoffState');
+      if(dailyWebRetryBackoffState){
+        const cap = Math.max(30, dailyWebRetryBackoff);
+        const backoffWaits = [];
+        const backoffRounds = dailyWebRetry ? dailyWebAttempts : 1;
+        for(let i = 0; i < backoffRounds; i++){
+          backoffWaits.push(Math.min(dailyWebRetryBackoff * Math.pow(2, i), cap));
+        }
+        dailyWebRetryBackoffState.textContent = dailyWebRetryBackoff > 0
+          ? ('建会话失败后等 ' + backoffWaits.join(' / ') + ' 秒')
+          : '不退避：建会话失败后立即重试';
+        dailyWebRetryBackoffState.style.color = dailyWebRetryBackoff > 0 ? 'var(--accent2)' : 'var(--dim)';
+      }
       const dailyWebFallbackModels = Array.isArray(data.daily_chat_web_fallback_models)
         ? data.daily_chat_web_fallback_models : [];
       renderDailyChatFallbackPicker(dailyWebFallbackModels);
@@ -11316,6 +11760,22 @@ async function loadSettings(showToast){
       if(egressBackoffState){
         egressBackoffState.textContent = egressBackoff ? '(已启用)' : '(未启用)';
         egressBackoffState.style.color = egressBackoff ? 'var(--accent2)' : 'var(--dim)';
+      }
+      const accountConcurrent = (typeof data.account_max_concurrent === 'number') ? data.account_max_concurrent : 0;
+      const accountConcurrentInput = document.getElementById('setAccountConcurrent');
+      if(accountConcurrentInput) accountConcurrentInput.value = accountConcurrent;
+      const accountConcurrentState = document.getElementById('setAccountConcurrentState');
+      if(accountConcurrentState){
+        accountConcurrentState.textContent = accountConcurrent > 0 ? '(' + accountConcurrent + ' 个 / 账号)' : '(不限)';
+        accountConcurrentState.style.color = accountConcurrent > 0 ? 'var(--accent2)' : 'var(--dim)';
+      }
+      const affinityStableKey = data.affinity_stable_key_enabled === true;
+      const affinityStableKeyInput = document.getElementById('setAffinityStableKey');
+      if(affinityStableKeyInput) affinityStableKeyInput.checked = affinityStableKey;
+      const affinityStableKeyState = document.getElementById('setAffinityStableKeyState');
+      if(affinityStableKeyState){
+        affinityStableKeyState.textContent = affinityStableKey ? '(已启用)' : '(未启用)';
+        affinityStableKeyState.style.color = affinityStableKey ? 'var(--accent2)' : 'var(--dim)';
       }
       SAVED_QUOTA_SCAN_MODELS = Array.isArray(data.quota_scan_models) ? data.quota_scan_models.slice() : [];
       QUOTA_SCAN_SELECTED = SAVED_QUOTA_SCAN_MODELS.slice();
@@ -12238,6 +12698,26 @@ function filterDailyChatFallbackPicker(){
     el.style.display = !q || (el.getAttribute('data-search') || '').indexOf(q) >= 0 ? 'flex' : 'none';
   });
 }
+async function saveDailyChatWebRetryBackoff(btn){
+  const el = document.getElementById('setDailyChatWebRetryBackoff');
+  const value = Math.floor(Number(el && el.value));
+  if(!isFinite(value) || value < 0){
+    toast('请输入不小于 0 的整数秒（0 = 不退避）', 'bad');
+    return;
+  }
+  if(btn) btn.disabled = true;
+  try {
+    await postJSON('/settings/save', {daily_chat_web_retry_backoff: value});
+    toast(value > 0 ? ('已保存：建会话失败后先等 ' + value + ' 秒再重试')
+                    : '已关闭退避：建会话失败后立即重试', 'ok');
+    loadSettings();
+  } catch(e) {
+    toast('保存失败: ' + e.message, 'bad');
+  } finally {
+    if(btn) btn.disabled = false;
+  }
+}
+
 async function saveDailyChatWebFallbackModels(btn){
   const models = DAILY_CHAT_FALLBACK_SELECTED.slice();
   if(btn) btn.disabled = true;
@@ -12474,6 +12954,43 @@ async function saveWindowProbe(btn){
   try {
     await postJSON('/settings/save', {window_probe: value});
     toast(value ? '已启用：额度窗口到点自动请求' : '已关闭额度窗口探针', 'ok');
+    loadSettings();
+  } catch(e) {
+    toast('保存失败: ' + e.message, 'bad');
+  } finally {
+    if(btn) btn.disabled = false;
+  }
+}
+
+async function saveAffinityStableKey(btn){
+  const el = document.getElementById('setAffinityStableKey');
+  const value = !!(el && el.checked);
+  if(btn) btn.disabled = true;
+  try {
+    await postJSON('/settings/save', {affinity_stable_key_enabled: value});
+    toast(value ? '已启用：会话键包含首条回复' : '已关闭：会话键只用前两条消息', 'ok');
+    loadSettings();
+  } catch(e) {
+    toast('保存失败: ' + e.message, 'bad');
+  } finally {
+    if(btn) btn.disabled = false;
+  }
+}
+
+/* 账号级并发上限：0 = 不限，1..10 = 每账号同时几个。后端只接受整数，
+   空值/小数/非数字就地拦下，不送上去换 400。 */
+async function saveAccountConcurrent(btn){
+  const el = document.getElementById('setAccountConcurrent');
+  const raw = (el && el.value !== '') ? Number(el.value) : NaN;
+  const value = Math.floor(raw);
+  if(!isFinite(value) || value < 0 || value > 10){
+    toast('请输入 0 到 10 的整数（0 = 不限）', 'bad');
+    return;
+  }
+  if(btn) btn.disabled = true;
+  try {
+    await postJSON('/settings/save', {account_max_concurrent: value});
+    toast(value > 0 ? ('已保存：每个账号同时最多 ' + value + ' 个请求') : '已保存：账号并发不限', 'ok');
     loadSettings();
   } catch(e) {
     toast('保存失败: ' + e.message, 'bad');
@@ -16096,9 +16613,19 @@ function renderKpis(){
 
   // ① Token
   $('kTokens').innerHTML = numSpan(w.total_tokens);
-  $('kTokensSub').innerHTML =
-    `输入 <b>${numSpan(w.prompt_tokens)}</b> · 输出 <b>${numSpan(w.completion_tokens)}</b><br>` +
-    `思考 <b>${numSpan(w.reasoning_tokens)}</b> · 缓存 <b>${numSpan(w.cached_tokens)}</b>`;
+  // 副行按桌面端原本的「行」分组，每项一个 span：
+  //   * 桌面端 .kline 是 block、.ksep 显示为「 · 」，渲染结果与从前逐字一致；
+  //   * 窄屏 .kvi 各占一行、.ksep 隐藏，于是每行只有一项（字号/颜色不变）。
+  const subItems = (lines) => lines.map(line =>
+    '<span class="kline">' +
+    line.map(t => `<span class="kvi">${t}</span>`).join('<span class="ksep"> · </span>') +
+    '</span>').join('');
+  $('kTokensSub').innerHTML = subItems([
+    [`输入 <b>${numSpan(w.prompt_tokens)}</b>`,
+     `输出 <b>${numSpan(w.completion_tokens)}</b>`],
+    [`思考 <b>${numSpan(w.reasoning_tokens)}</b>`,
+     `缓存 <b>${numSpan(w.cached_tokens)}</b>`],
+  ]);
   const parts = [
     ['输入', w.prompt_tokens - (w.cached_tokens||0), 'var(--accent)'],
     ['缓存', w.cached_tokens, 'var(--blue)'],
@@ -16112,7 +16639,10 @@ function renderKpis(){
   // ② 请求
   const okRate = w.requests ? (w.requests - w.errors) / w.requests * 100 : 100;
   $('kReqs').innerHTML = `${numSpan(w.requests)}<small>次</small>`;
-  $('kReqsSub').innerHTML = `失败 <b>${numSpan(w.errors)}</b> · 成功率 <span class="${okRate>=99?'ratio-ok':(okRate>=95?'ratio-gold':'ratio-bad')}"><b>${fmtPct(okRate)}</b></span>`;
+  $('kReqsSub').innerHTML = subItems([
+    [`失败 <b>${numSpan(w.errors)}</b>`,
+     `成功率 <span class="${okRate>=99?'ratio-ok':(okRate>=95?'ratio-gold':'ratio-bad')}"><b>${fmtPct(okRate)}</b></span>`],
+  ]);
 
   // ⑥′ 环形成功率卡
   const ringEl = $('ringSuccess');
@@ -16126,10 +16656,15 @@ function renderKpis(){
   // ③ 速度（TTFT 并入副行）
   $('kSpeed').innerHTML = `${w.speed_avg != null ? Number(w.speed_avg).toFixed(1) : '—'}<small>tok/s</small>`;
   const peak = peakThroughput();
-  $('kSpeedSub').innerHTML =
-    `平均耗时 <b>${fmtSec(w.elapsed_ms_avg)}</b> · 首字 <b>${fmtSec(w.ttft_ms_avg)}</b>` +
-    (peak != null ? `<br>峰值吞吐 <b>${fmtCompact(peak, 0)} tok/s</b>` : '') +
-    (state.perf && state.perf.ttft_ms ? ` · p90 首字 <b>${fmtSec(state.perf.ttft_ms.p90)}</b>` : '');
+  const speedLines = [[
+    `平均耗时 <b>${fmtSec(w.elapsed_ms_avg)}</b>`,
+    `首字 <b>${fmtSec(w.ttft_ms_avg)}</b>`,
+  ]];
+  const speedTail = [];
+  if(peak != null) speedTail.push(`峰值吞吐 <b>${fmtCompact(peak, 0)} tok/s</b>`);
+  if(state.perf && state.perf.ttft_ms) speedTail.push(`p90 首字 <b>${fmtSec(state.perf.ttft_ms.p90)}</b>`);
+  if(speedTail.length) speedLines.push(speedTail);
+  $('kSpeedSub').innerHTML = subItems(speedLines);
 
   // ⑤ 缓存
   $('kCache').innerHTML = fmtPct(w.cache_hit_pct);
@@ -16989,6 +17524,271 @@ if (typeof SORT_DENY_TABLES !== 'undefined' && SORT_DENY_TABLES && SORT_DENY_TAB
 
   apply();
   renderRows();
+})();
+</script>
+<script>
+/* ── 自定义下拉：运行时渐进增强 ────────────────────────────────────
+   把页面里所有原生 <select> 换成同尺寸的自绘下拉，展开层不再由浏览器
+   绘制（原生 option 列表无法用 CSS 控制，深色模式下尤其突兀）。
+   原生 select 元素保留：value / selectedIndex / change 事件 / 表单提交 /
+   无障碍语义全部不变，只是视觉被隐藏。JS 未执行时页面照常可用。 */
+(function(){
+  'use strict';
+  if (window.__csEnhanced) return;
+  window.__csEnhanced = true;
+
+  var openWrap = null;
+
+  function labelOf(sel){
+    var o = sel.options[sel.selectedIndex];
+    return o ? (o.textContent || o.text || '') : '';
+  }
+
+  function closeWrap(wrap){
+    if (!wrap) return;
+    wrap.classList.remove('cs-open');
+    var trg = wrap.querySelector('.cs-trigger');
+    if (trg) trg.setAttribute('aria-expanded','false');
+    if (openWrap === wrap) openWrap = null;
+  }
+
+  function closeAll(except){
+    if (openWrap && openWrap !== except) closeWrap(openWrap);
+  }
+
+  function syncLabel(sel, wrap){
+    var v = wrap.querySelector('.cs-value');
+    if (!v) return;
+    var txt = labelOf(sel);
+    v.textContent = txt;
+    v.classList.toggle('cs-placeholder', !txt);
+    var opts = wrap.querySelectorAll('.cs-opt');
+    for (var i = 0; i < opts.length; i++){
+      opts[i].classList.toggle('cs-selected', i === sel.selectedIndex);
+      opts[i].setAttribute('aria-selected', i === sel.selectedIndex ? 'true' : 'false');
+    }
+  }
+
+  function buildPanel(sel, wrap){
+    var panel = wrap.querySelector('.cs-panel');
+    if (!panel){
+      panel = document.createElement('div');
+      panel.className = 'cs-panel';
+      panel.setAttribute('role','listbox');
+      wrap.appendChild(panel);
+    }
+    panel.textContent = '';
+    var n = sel.options.length;
+    for (var i = 0; i < n; i++){
+      var o = sel.options[i];
+      var row = document.createElement('div');
+      row.className = 'cs-opt' + (o.disabled ? ' cs-disabled' : '');
+      row.setAttribute('role','option');
+      row.setAttribute('data-idx', i);
+      if (o.disabled) row.setAttribute('aria-disabled','true');
+      var tick = document.createElement('span');
+      tick.className = 'cs-tick';
+      tick.textContent = '\u2713';
+      var lab = document.createElement('span');
+      lab.textContent = o.textContent || o.text || '';
+      row.appendChild(tick);
+      row.appendChild(lab);
+      panel.appendChild(row);
+    }
+    if (!n){
+      var em = document.createElement('div');
+      em.className = 'cs-empty';
+      em.textContent = '\u2014';
+      panel.appendChild(em);
+    }
+    syncLabel(sel, wrap);
+  }
+
+  function positionPanel(wrap){
+    var r = wrap.getBoundingClientRect();
+    var below = window.innerHeight - r.bottom;
+    var need = Math.min(320, window.innerHeight * 0.52);
+    var up = below < need && r.top > below;
+    wrap.classList.toggle('cs-drop-up', up);
+  }
+
+  function openWrap_(wrap){
+    closeAll(wrap);
+    positionPanel(wrap);
+    wrap.classList.add('cs-open');
+    openWrap = wrap;
+    var trg = wrap.querySelector('.cs-trigger');
+    if (trg) trg.setAttribute('aria-expanded','true');
+    var sel = wrap.querySelector('select');
+    var panel = wrap.querySelector('.cs-panel');
+    if (panel && sel){
+      var cur = panel.children[sel.selectedIndex];
+      if (cur && cur.scrollIntoView) cur.scrollIntoView({ block: 'nearest' });
+    }
+  }
+
+  function pick(sel, wrap, idx){
+    var o = sel.options[idx];
+    if (!o || o.disabled) return;
+    if (sel.selectedIndex !== idx){
+      sel.selectedIndex = idx;
+      sel.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    syncLabel(sel, wrap);
+    closeWrap(wrap);
+    var trg = wrap.querySelector('.cs-trigger');
+    if (trg) trg.focus();
+  }
+
+  function hoverIdx(panel, idx){
+    var rows = panel.querySelectorAll('.cs-opt');
+    for (var i = 0; i < rows.length; i++){
+      rows[i].classList.toggle('cs-hover', i === idx);
+    }
+    if (rows[idx] && rows[idx].scrollIntoView) rows[idx].scrollIntoView({ block: 'nearest' });
+  }
+
+  function enhance(sel){
+    if (!sel || sel.dataset.csDone === '1') return;
+    if (sel.closest('.cs-wrap')) return;
+    sel.dataset.csDone = '1';
+
+    var wrap = document.createElement('span');
+    wrap.className = 'cs-wrap';
+    var cs = window.getComputedStyle(sel);
+    if (cs.display === 'block' || cs.width === '100%' || sel.style.width === '100%'){
+      wrap.classList.add('cs-block');
+    }
+    if (sel.id) wrap.setAttribute('data-for', sel.id);
+    sel.parentNode.insertBefore(wrap, sel);
+    wrap.appendChild(sel);
+    sel.classList.add('cs-native');
+    sel.setAttribute('tabindex','-1');
+
+    var trg = document.createElement('button');
+    trg.type = 'button';
+    trg.className = 'cs-trigger';
+    trg.setAttribute('aria-haspopup','listbox');
+    trg.setAttribute('aria-expanded','false');
+    var val = document.createElement('span');
+    val.className = 'cs-value';
+    var arrow = document.createElement('span');
+    arrow.className = 'cs-arrow';
+    trg.appendChild(val);
+    trg.appendChild(arrow);
+    wrap.insertBefore(trg, sel);
+
+    buildPanel(sel, wrap);
+
+    trg.addEventListener('click', function(e){
+      e.preventDefault();
+      e.stopPropagation();
+      if (wrap.classList.contains('cs-open')) closeWrap(wrap);
+      else openWrap_(wrap);
+    });
+
+    trg.addEventListener('keydown', function(e){
+      var panel = wrap.querySelector('.cs-panel');
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp'){
+        e.preventDefault();
+        if (!wrap.classList.contains('cs-open')) openWrap_(wrap);
+        var rows = panel.querySelectorAll('.cs-opt');
+        var cur = -1;
+        for (var i = 0; i < rows.length; i++) if (rows[i].classList.contains('cs-hover')) { cur = i; break; }
+        var next = e.key === 'ArrowDown'
+          ? Math.min(rows.length - 1, cur + 1)
+          : Math.max(0, cur < 0 ? rows.length - 1 : cur - 1);
+        hoverIdx(panel, next);
+      } else if (e.key === 'Enter' || e.key === ' '){
+        e.preventDefault();
+        if (!wrap.classList.contains('cs-open')) { openWrap_(wrap); return; }
+        var rows2 = panel.querySelectorAll('.cs-opt');
+        for (var j = 0; j < rows2.length; j++){
+          if (rows2[j].classList.contains('cs-hover')) { pick(sel, wrap, j); return; }
+        }
+      } else if (e.key === 'Escape'){
+        closeWrap(wrap);
+      } else if (e.key === 'Tab'){
+        closeWrap(wrap);
+      }
+    });
+
+    wrap.addEventListener('click', function(e){
+      var row = e.target.closest ? e.target.closest('.cs-opt') : null;
+      if (row && !row.classList.contains('cs-disabled')){
+        pick(sel, wrap, parseInt(row.getAttribute('data-idx'), 10));
+      }
+    });
+
+    wrap.addEventListener('mousemove', function(e){
+      var row = e.target.closest ? e.target.closest('.cs-opt') : null;
+      if (!row) return;
+      var panel = wrap.querySelector('.cs-panel');
+      var rows = panel.querySelectorAll('.cs-opt');
+      for (var i = 0; i < rows.length; i++) rows[i].classList.toggle('cs-hover', rows[i] === row);
+    });
+
+    /* 外部数据改了 options（例如账号列表刷新）时重建面板 */
+    if (typeof MutationObserver !== 'undefined'){
+      new MutationObserver(function(){
+        buildPanel(sel, wrap);
+      }).observe(sel, { childList: true, subtree: true, attributes: true, attributeFilter: ['disabled','selected'] });
+    }
+    /* 程序直接改 value 时同步显示 */
+    var desc = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value');
+    if (desc && desc.set && !sel.__csPatched){
+      sel.__csPatched = true;
+      try {
+        Object.defineProperty(sel, 'value', {
+          configurable: true,
+          get: function(){ return desc.get.call(sel); },
+          set: function(v){ desc.set.call(sel, v); syncLabel(sel, wrap); }
+        });
+      } catch (err) { /* 老浏览器忽略 */ }
+    }
+
+    sel.addEventListener('change', function(){ syncLabel(sel, wrap); });
+  }
+
+  function scan(root){
+    var list = (root || document).querySelectorAll('select');
+    for (var i = 0; i < list.length; i++) enhance(list[i]);
+  }
+
+  document.addEventListener('click', function(e){
+    if (openWrap && !openWrap.contains(e.target)) closeWrap(openWrap);
+  }, true);
+
+  document.addEventListener('keydown', function(e){
+    if (e.key === 'Escape' && openWrap) closeWrap(openWrap);
+  });
+
+  window.addEventListener('resize', function(){ if (openWrap) positionPanel(openWrap); });
+  /* 滚动时只重算方向，不关闭：scrollIntoView / 容器滚动都会派发 scroll，
+     直接关闭会让"点开就消失"。面板相对触发器定位，跟随即可。 */
+  window.addEventListener('scroll', function(){
+    if (openWrap) positionPanel(openWrap);
+  }, true);
+
+  function boot(){
+    scan(document);
+    if (typeof MutationObserver !== 'undefined'){
+      new MutationObserver(function(muts){
+        for (var i = 0; i < muts.length; i++){
+          var added = muts[i].addedNodes;
+          for (var j = 0; j < added.length; j++){
+            var n = added[j];
+            if (n.nodeType !== 1) continue;
+            if (n.tagName === 'SELECT') enhance(n);
+            else if (n.querySelectorAll) scan(n);
+          }
+        }
+      }).observe(document.body, { childList: true, subtree: true });
+    }
+  }
+
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
+  else boot();
 })();
 </script>
 </body>

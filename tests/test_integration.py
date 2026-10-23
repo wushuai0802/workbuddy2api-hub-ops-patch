@@ -56,6 +56,7 @@ class Stream:
 
 class Account:
     realm = "intl"
+    is_api_key = False
 
     def __init__(self, uid="a1"):
         self.uid = uid

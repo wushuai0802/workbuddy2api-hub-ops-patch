@@ -25,13 +25,12 @@ DEPENDENCIES = {
     "wb_atrest.py", "wb_catalog.py", "wb_egress.py", "wb_fingerprint.py", "wb_identity.py",
     "wb_ipintel.py", "wb_modelsdev.py", "wb_pricing.py", "wb_probes.py",
     "wb_logstore.py",
-    "wb_entitlements.py",
     "wb_prompt.py", "wb_scheduler.py", "wb_settings.py", "wb_tasks.py",
     "wb_updates.py", "wb_webagent.py", "wb_quota_scan.py", "wb_window_probe.py", "wb_update_request.py",
     "wb_tiers.py", "wb_update_apply.py", "wb_update_external.py", "wb_update_portable.py", "wb_webprompts.py",
 }
-BASE_TAG = "v1.7.28"
-UPSTREAM_COMMIT = "c22109def2793234236e0c3ab1d2c11f02a05c39"
+BASE_TAG = "v1.7.30"
+UPSTREAM_COMMIT = "84dbc99b1a34182130ee9035f9d80b69a0fc2e8b"
 
 
 def digest(data):

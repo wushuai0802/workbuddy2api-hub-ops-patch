@@ -2,11 +2,11 @@
 
 [中文](README.md) · [Install and rollback](docs/INSTALL.md) · [Patch scope](docs/PATCHES.md) · [Verification](docs/VERIFICATION.md)
 
-Release **v1.7.28-ops.20261022.2**, targeting upstream **v1.7.28** at `c22109def2793234236e0c3ab1d2c11f02a05c39`. Python 3.11+ is required.
+Release **v1.7.30-ops.20261023.1**, targeting upstream **v1.7.30** at `84dbc99b1a34182130ee9035f9d80b69a0fc2e8b`. Python 3.11+ is required.
 
-[Download ZIP and SHA256SUMS.txt](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.7.28-ops.20261022.2): `workbuddy2api-hub-v1.7.28-wushuai0802-ops-20261022-r2.zip`.
+[Download ZIP and SHA256SUMS.txt](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.7.30-ops.20261023.1): `workbuddy2api-hub-v1.7.30-wushuai0802-ops-20261023-r1.zip`.
 
-This version migrates our retained safeguards onto the exact v1.7.28 source and retains our mixed-stall guard, reasoning-alias budget, tool-image compatibility, refusals, bounded refresh, and pooled connection ownership. It preserves upstream additional-tools/custom namespace support, Anthropic thinking, DSML fallback, block I/O and shared TLS contexts.
+This version migrates our retained safeguards onto the exact v1.7.30 source and retains our mixed-stall guard, reasoning-alias budget, tool-image compatibility, refusals, bounded refresh, and pooled connection ownership. It preserves upstream additional-tools/custom namespace support, Anthropic thinking, DSML fallback, block I/O and shared TLS contexts.
 
 The installer replaces four upstream Python modules and the dashboard, and adds `wb_ops.py`, `wb_stall.py` and `wb_observe.py`, checking the unchanged core dependencies. It preserves accounts, keys, configuration and usage and does not deploy. The running gateway writes a separate bounded observation log, disabled with `WB_OPS_OBSERVE=0`.
 
@@ -14,7 +14,15 @@ The header phase respects panel settings (120 seconds by default); its 45-second
 
 The supplied v1.7.5-r2 reference informed quote-span masking and detached validated cumulative usage snapshots. Quoted examples remain protected while short quoted tool names no longer exempt a surrounding repeated plan. Original SSE bytes and tool arguments are preserved.
 
-## v1.7.28 changes
+## v1.7.30 changes
+
+Includes native check-in/keepalive/scheduler fixes, body draining and single chunk IDs, web-conversation cleanup/backoff, static API-key accounts, remote compaction v2, custom dropdowns and key policy persistence. Account concurrency, stable affinity, realm fallback and paid fallback retain existing settings and their off defaults.
+
+The new compaction adapter keeps the original generation deadline, consumed provider usage, actual billed model and key/effort attribution. Truncated, filtered, failed, refused, tool-bearing or empty summaries cannot produce a successful compaction item; no extra generation retry is added. Compaction output follows the native v2 format. Real long-session replay remains unverified.
+
+Concurrency slots are released on hard HTTP errors, timeout and all exceptional exits; refreshed accounts remain subject to readiness/exclusion checks. Waits share the original deadline. The removed entitlements module is retired in favor of upstream catalog tiers. Startup update checks may change only their persisted update_check cache.
+
+## v1.7.28 changes (historical)
 
 Includes native account-ID redaction, billing-tier discovery, grouped cooldown-row sorting, identity compatibility, retained update backups and optional realm fallback. The native realm fallback remains off by default. Removed the obsolete process-table fixture adaptation now fixed upstream.
 
@@ -67,11 +75,11 @@ Anthropic Messages and count_tokens endpoints now return400 by default, after au
 Prepare separate clean pinned sources, keep the previous deployment and backups, and verify first:
 
 ~~~sh
-git clone --depth 1 --branch v1.7.28-ops.20261022.1 https://github.com/wushuai0802/workbuddy2api-hub-ops-patch.git ops-patch-v1728
-git clone --depth 1 --branch v1.7.28 https://github.com/ardeyouxipianyi/workbuddy2api-hub.git workbuddy2api-hub-v1.7.28
-git -C workbuddy2api-hub-v1.7.28 rev-parse HEAD
-python3 -B ops-patch-v1728/apply.py --verify-package
-python3 -B ops-patch-v1728/apply.py --target ./workbuddy2api-hub-v1.7.28 --dry-run
+git clone --depth 1 --branch v1.7.30-ops.20261023.1 https://github.com/wushuai0802/workbuddy2api-hub-ops-patch.git ops-patch-v1730
+git clone --depth 1 --branch v1.7.30 https://github.com/ardeyouxipianyi/workbuddy2api-hub.git workbuddy2api-hub-v1.7.30
+git -C workbuddy2api-hub-v1.7.30 rev-parse HEAD
+python3 -B ops-patch-v1730/apply.py --verify-package
+python3 -B ops-patch-v1730/apply.py --target ./workbuddy2api-hub-v1.7.30 --dry-run
 ~~~
 
 Use [INSTALL.md](docs/INSTALL.md) to stop the one intended service, apply, rebuild and recreate it with its original parameters. Earlier patched trees are not overlays; do not delete state or checksum metadata to bypass a refusal. The [previous v1.6.20 release](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.6.20-ops.20261012.1) remains available.
@@ -82,7 +90,7 @@ A response whose wire body was read in one block retains its connection lease un
 
 ## Verification and limits
 
-The runner covers 195 Python groups (39 patch and all 156 official groups), plus 53 official and 2 patch Node groups. CI checks Linux3.11/3.12 and Windows3.11; see [VERIFICATION.md](docs/VERIFICATION.md). Tests use synthetic data and loopback HTTP with external Python sockets denied; they do not establish online task completion.
+The runner covers 205 Python groups (40 patch and all 165 official groups), plus 57 official and 2 patch Node groups. CI checks Linux3.11/3.12 and Windows3.11; see [VERIFICATION.md](docs/VERIFICATION.md). Tests use synthetic data and loopback HTTP with external Python sockets denied; they do not establish online task completion.
 
 r2 protects quoted repetition examples, preserves already-consumed provider usage across guard failure, transport errors and cancellation, and bounds SSE lines/events (4/8MiB defaults). A request-local history observer reports repeated tool results without blocking or replaying tools. It does not combine sessions or infer generic shell-command progress. Durable metrics distinguish requests from guarded attempts and legal-output recovery from business completion, with explicit time/version/protocol grouping and retention limits.
 
