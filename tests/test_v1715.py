@@ -95,6 +95,8 @@ class V1715Tests(unittest.TestCase):
         account = self.accounts[0]
         error = urllib.error.HTTPError('https://synthetic.invalid', 401, 'synthetic', {},
                                       io.BytesIO(b'<html>proxy authorization 401</html>'))
+        # The bounded transport captures this body before closing its watchdog.
+        error._ops_auth_error_body = b'<html>proxy authorization 401</html>'
         with mock.patch.object(wb.wb_accounts, 'http_json', side_effect=error):
             self.assertFalse(account.refresh_after_401(account.access_token))
         self.assertFalse(account.token_expired)
@@ -105,6 +107,7 @@ class V1715Tests(unittest.TestCase):
         account = self.accounts[0]
         error = urllib.error.HTTPError('https://synthetic.invalid', 401, 'synthetic', {},
                                       io.BytesIO(b'{"msg":"expired token"}'))
+        error._ops_auth_error_body = b'{"msg":"expired token"}'
         with mock.patch.object(wb.wb_accounts, 'http_json', side_effect=error):
             self.assertFalse(account.refresh_after_401(account.access_token))
         self.assertTrue(account.token_expired)

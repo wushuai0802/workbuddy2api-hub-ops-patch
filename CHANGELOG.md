@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.7.30-ops.20261023.2 — 2026-10-23
+
+- 参考外部v1.7.30-r2，名额仅由实际计数请求拥有；关闭限额不误还旧请求，close并发一次性归还。每次尝试finally关闭未交出的响应并归还，401先释放再刷新/准入，短等待服从原deadline。保留原白名单、候选ready与排除检查。
+- 请求刷新只采信watchdog内完整且不超过4096字节的UTF-8 JSON对象401；代理文本/畸形/过大响应不误标过期，watchdog后不再读取错误正文。后台三次刷新及验证TLS策略保持。
+- 缓存命中跳过畸形details与布尔/非有限/溢出别名，保持其他有效别名及原provider快照；移除重复不可达代码。
+- Added 18 regressions (14 slot lifecycle, 2 refresh evidence, 2 cache aliases), reproducing prior failures before the fix. Validation inventory: 206 Python and 59 Node suites. Compaction, loop/recovery limits, history/image compatibility, configuration defaults and upstream v1.7.30 remain unchanged.
+
 ## v1.7.30-ops.20261023.1 — 2026-10-23
 
 - 重基官方v1.7.30 / `84dbc99b1a34182130ee9035f9d80b69a0fc2e8b`，继承签到/保活/任务选号/调度器、501、单流ID、网页会话清理/退避、静态Key、目录tier、自绘下拉框、远程压缩v2与Key策略落盘等功能，不重复实现官方能力。

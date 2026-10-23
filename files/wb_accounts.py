@@ -384,9 +384,13 @@ def _deadline_json(url, data, method, headers, deadline_at, proxy):
             response = opener.open(req, timeout=owner.remaining())
         except urllib.error.HTTPError as exc:
             try:
-                owner.remaining()
-                exc._ops_auth_error_body = exc.read(4096)
-                owner.remaining()
+                exc._ops_auth_error_body = None
+                if exc.code == 401:
+                    owner.remaining()
+                    body = exc.read(4097)
+                    owner.remaining()
+                    if len(body) <= 4096:
+                        exc._ops_auth_error_body = body
             finally:
                 exc.close()
             raise
@@ -2079,12 +2083,16 @@ class Account(object):
             if isinstance(exc, urllib.error.HTTPError):
                 try:
                     body = getattr(exc, '_ops_auth_error_body', None)
-                    detail = (body if body is not None else exc.read(4096)).decode('utf8', 'replace')
-                except Exception:
-                    detail = ''
+                    # Bounded request refresh has already closed the error under
+                    # its watchdog. Never perform a late read after that budget.
+                    if not hasattr(exc, '_ops_auth_error_body') and deadline_at is None:
+                        body = exc.read(4097)
+                    if exc.code == 401 and body is not None and len(body) <= 4096:
+                        auth_failed = isinstance(json.loads(body.decode('utf8')), dict)
+                except (ValueError, UnicodeError, OSError):
+                    auth_failed = False
                 finally:
                     exc.close()
-                auth_failed = exc.code == 401 and '<html' not in detail.lower()
             elif isinstance(exc, RuntimeError) and not isinstance(exc, TLSVerifyError):
                 auth_failed = _auth_failure_text(str(exc))
             if auth_failed:

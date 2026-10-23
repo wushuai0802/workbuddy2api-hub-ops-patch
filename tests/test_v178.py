@@ -56,6 +56,37 @@ class V178BoundaryTests(unittest.TestCase):
         result['usage']['cached_tokens']=999
         self.assertEqual(holder['ops_received_usage']['cached_tokens'],7)
 
+    def test_invalid_cache_aliases_do_not_hide_valid_hits_six_paths(self):
+        variants = [
+            {'prompt_tokens_details': 'invalid', 'input_tokens_details': ['invalid'], 'cached_tokens': 17},
+            {'prompt_cache_hit_tokens': True, 'cache_read_input_tokens': float('inf'), 'cached_tokens': 17},
+        ]
+        for protocol in ('chat', 'responses', 'messages'):
+            for stream in (True, False):
+                for cache in variants:
+                    with self.subTest(protocol=protocol, stream=stream, cache=cache):
+                        usage = dict(prompt_tokens=71, completion_tokens=22, total_tokens=93, **cache)
+                        original = copy.deepcopy(usage)
+                        handler = self.invoke(protocol, stream, usage)
+                        if protocol == 'chat':
+                            value = next(row['usage'] for row in responses(handler) if row.get('usage')) if stream else handler.json_body['usage']
+                            self.assertEqual(value['prompt_tokens_details']['cached_tokens'], 17)
+                        elif protocol == 'responses':
+                            value = next(row['response']['usage'] for row in responses(handler) if row.get('type') == 'response.completed') if stream else handler.json_body['usage']
+                            self.assertEqual(value['input_tokens_details']['cached_tokens'], 17)
+                        else:
+                            values = [row.get('usage') or row.get('message', {}).get('usage') for row in responses(handler)] if stream else [handler.json_body['usage']]
+                            self.assertTrue(any(value and value.get('cache_read_input_tokens') == 17 for value in values))
+                        self.assertEqual(usage, original)
+
+    def test_invalid_detail_shapes_and_nonfinite_cache_values_are_ignored(self):
+        for details in (None, 'invalid', ['invalid'], 3, True):
+            for bad in (True, -1, float('inf'), float('-inf'), float('nan'), 10 ** 400):
+                usage = {'prompt_tokens_details': details, 'input_tokens_details': details,
+                         'completion_tokens_details': details, 'prompt_cache_hit_tokens': bad, 'cached_tokens': 17}
+                with self.subTest(details=type(details).__name__, bad=type(bad).__name__):
+                    self.assertEqual(wb._best_cached_tokens(usage), 17)
+
     def test_output_normalization_preserves_original_provider_ledger_six_paths(self):
         usage={'prompt_tokens':71,'completion_tokens':22,'total_tokens':93,'cached_tokens':17}
         for protocol in ('chat','responses','messages'):

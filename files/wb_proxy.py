@@ -620,15 +620,11 @@ def normalize_usage_cache_aliases(usage):
     usage["cache_read_input_tokens"] = best
     usage["cached_tokens"] = best
     usage["prompt_cache_hit_tokens"] = best
-    prompt_details = dict(usage.get("prompt_tokens_details") or {})
+    prompt_details = usage.get("prompt_tokens_details")
+    prompt_details = dict(prompt_details) if isinstance(prompt_details, dict) else {}
     prompt_details["cached_tokens"] = best
     usage["prompt_tokens_details"] = prompt_details
     # Also ensure input_tokens_details carries it when present
-    if isinstance(usage.get("input_tokens_details"), dict):
-        input_details = dict(usage["input_tokens_details"])
-        input_details["cached_tokens"] = best
-        usage["input_tokens_details"] = input_details
-    return usage
     if isinstance(usage.get("input_tokens_details"), dict):
         input_details = dict(usage["input_tokens_details"])
         input_details["cached_tokens"] = best
@@ -801,9 +797,12 @@ def _best_cached_tokens(usage):
     """
     if not isinstance(usage, dict):
         return 0
-    prompt_details = usage.get("prompt_tokens_details") or {}
-    input_details = usage.get("input_tokens_details") or {}
-    details = usage.get("completion_tokens_details") or {}
+    prompt_details = usage.get("prompt_tokens_details")
+    input_details = usage.get("input_tokens_details")
+    details = usage.get("completion_tokens_details")
+    prompt_details = prompt_details if isinstance(prompt_details, dict) else {}
+    input_details = input_details if isinstance(input_details, dict) else {}
+    details = details if isinstance(details, dict) else {}
     for value in (prompt_details.get("cached_tokens"),
                   usage.get("prompt_cache_hit_tokens"),
                   usage.get("cache_read_input_tokens"),
@@ -811,10 +810,12 @@ def _best_cached_tokens(usage):
                   input_details.get("cached_tokens"),
                   details.get("cached_tokens")):
         try:
+            if isinstance(value, bool):
+                continue
             number = float(value or 0)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             continue
-        if number > 0:
+        if 0 < number < float('inf'):
             # Token counts must stay integers: the Codex client parses
             # response.completed strictly and rejects 123.0 (invalid number).
             return int(number)
@@ -11576,7 +11577,7 @@ def _patch_payload_fingerprint():
     return hashlib.sha256(''.join(records).encode('ascii')).hexdigest()
 
 _OPS_PATCH_FINGERPRINT = _patch_payload_fingerprint()
-_OPS_PATCH_ID = "v1.7.30-ops.20261023.1"
+_OPS_PATCH_ID = "v1.7.30-ops.20261023.2"
 _OBSERVATION_STORE = None
 _OBSERVATION_STORE_LOCK = threading.Lock()
 
@@ -15070,11 +15071,13 @@ def bind_account_slot_to_response(response, account):
         account_slot_release(account)
         return
     released = [False]
+    release_lock = threading.Lock()
 
     def release_once():
-        if released[0]:
-            return
-        released[0] = True
+        with release_lock:
+            if released[0]:
+                return
+            released[0] = True
         account_slot_release(account)
 
     try:
@@ -15895,9 +15898,43 @@ def open_upstream(payload, session_key=None, target_realm=None,
     # tried 记的是「这一轮试过且失败」的账号，busy 只是「此刻没空」，等它的请求
     # 结束后这个账号完全可用，不该被当成失败账号影响熔断或亲和。
     busy = set()
-    # 当前这一轮已经占住、但还没交给调用方的账号名额。任何失败路径都要归还
-    # （循环开头统一处理），成功路径把它绑到响应对象上后置空。
+    # Only a counted admission owns a slot. Unlimited requests must not release
+    # an older counted request when the operator disables the limit mid-flight.
     slot_held = None
+
+    def release_slot():
+        nonlocal slot_held
+        held, slot_held = slot_held, None
+        if held is not None:
+            account_slot_release(held)
+
+    def take_slot(candidate):
+        nonlocal slot_held
+        limit = wb_settings.account_max_concurrent(ACCOUNTS_DIR)
+        if limit <= 0:
+            return True
+        if account_slot_acquire(candidate, limit=limit):
+            slot_held = candidate
+            return True
+        busy.add(candidate.uid)
+        return False
+
+    def wait_for_slot(candidate):
+        if candidate is None:
+            return None
+        wait_until = time.monotonic() + ACCOUNT_SLOT_WAIT_MAX
+        if deadline_at is not None:
+            wait_until = min(wait_until, deadline_at)
+        while True:
+            if deadline_at is not None and time.monotonic() >= deadline_at:
+                raise TimeoutError("upstream account slot deadline exceeded")
+            if take_slot(candidate):
+                return candidate
+            remaining = wait_until - time.monotonic()
+            if remaining <= 0:
+                return None
+            time.sleep(min(.05, remaining))
+
     def pick_account():
         """按当前 exclude/busy 选一个账号，并占住它的在飞名额。
 
@@ -15913,42 +15950,22 @@ def open_upstream(payload, session_key=None, target_realm=None,
             candidate = POOL.pick_for_session(**kwargs) if POOL else None
             if candidate is None:
                 return None
-            if account_slot_acquire(candidate):
+            if candidate.uid in exclude:
+                return None
+            if take_slot(candidate):
                 return candidate
-            busy.add(candidate.uid)
             if len(busy) >= max(1, total):
                 # 池子里每个可用账号都满了：不再空转，交给上层排队/报错。
                 return None
 
-    attempt = 0
-    try:
-        while True:
-            attempt += 1
-            _attempt = attempt - 1
-            if attempt > max_attempts:
-                break
-            # 上一轮拿到的名额如果没被交出去（任何 continue/break 都意味着这次尝试
-            # 没把响应交给调用方），在这里统一归还。成功路径会在 return 前把它绑到
-            # 响应对象上并清空这个标记，所以只有失败路径会走到这里。
-            if slot_held is not None:
-                account_slot_release(slot_held)
-                slot_held = None
+    for _attempt in range(max_attempts):
+        resp = None
+        try:
             if deadline_at is not None and time.monotonic() >= deadline_at:
                 raise TimeoutError("upstream connection deadline exceeded")
             if pinned is not None:
                 account = pinned if pinned.uid not in tried and pinned.ready(model=model) else None
-                # 固定账号（/u/<ref>/ 路由、流式中断后的原地重连）也要占名额，
-                # 否则下一轮开头的统一归还就会释放一个从未占过的名额。固定账号没有
-                # 「换一个」的余地，所以名额被占满时短暂等待，等不到就报池子忙。
-                if account is not None:
-                    got = account_slot_acquire(account)
-                    waited = 0.0
-                    while not got and waited < ACCOUNT_SLOT_WAIT_MAX:
-                        budget_sleep(0.05)
-                        waited += 0.05
-                        got = account_slot_acquire(account)
-                    if not got:
-                        account = None
+                account = wait_for_slot(account)
             elif refresh_uid is not None:
                 refreshed_uid = refresh_uid
                 account = pool_account(refreshed_uid)
@@ -15956,17 +15973,8 @@ def open_upstream(payload, session_key=None, target_realm=None,
                 if account is None or account.uid in excluded or not account.ready(model=model):
                     tried.add(refreshed_uid)
                     account = pick_account()
-                # 令牌刷新后的原地重试同样是「固定账号」：占不到名额就等，等不到
-                # 就放弃这一次尝试，不能凭空释放一个没占过的名额。
                 elif account is not None:
-                    got = account_slot_acquire(account)
-                    waited = 0.0
-                    while not got and waited < ACCOUNT_SLOT_WAIT_MAX:
-                        budget_sleep(0.05)
-                        waited += 0.05
-                        got = account_slot_acquire(account)
-                    if not got:
-                        account = None
+                    account = wait_for_slot(account)
             else:
                 account = pick_account()
             if (account is None and pinned is None
@@ -15985,11 +15993,9 @@ def open_upstream(payload, session_key=None, target_realm=None,
                 break
             if account.realm != realm:
                 if session_key and POOL: POOL.affinity.demote(session_key, account.uid)
-                account_slot_release(account)
                 continue
             tried.add(account.uid)
             last_uid = account.uid
-            slot_held = account
             cfg = wb_accounts.get_realm_config(account.realm)
             chat_url = account.chat_base_url() + CHAT_PATH
             # The cache key is account scoped, so it is rebuilt per candidate rather
@@ -16057,16 +16063,17 @@ def open_upstream(payload, session_key=None, target_realm=None,
                 if egress_backoff and defer_egress_success:
                     resp._wb_stream_egress = wb_upstream_pool.egress_key(
                         chat_url, account.proxy)
-                # 名额交给响应对象：它一直占到上游 body 读完/关掉为止（流式回复拿到
-                # 头之后还要读几十秒，那段时间上游仍算这个账号在跑）。绑定后本地
-                # 标记置空，循环开头就不会再重复归还。
-                bind_account_slot_to_response(resp, account)
-                slot_held = None
                 # The third element is the reasoning effort this request ran at: the
                 # body is rebuilt per attempt, but the effort is a property of the
                 # model and the request, and the callers record it on the usage row.
-                return resp, account, upstream_effort_of(upstream_body, model)
+                effort = upstream_effort_of(upstream_body, model)
+                if slot_held is not None:
+                    bind_account_slot_to_response(resp, slot_held)
+                    slot_held = None
+                completed_response, resp = resp, None
+                return completed_response, account, effort
             except urllib.error.HTTPError as exc:
+                release_slot()
                 if exc.code == 429:
                     try:
                         detail = read_http_error(exc, 600).decode("utf-8", "replace")
@@ -16285,6 +16292,10 @@ def open_upstream(payload, session_key=None, target_realm=None,
                     continue
                 raise
             except Exception as exc:
+                if resp is not None:
+                    _close_upstream(resp)
+                    resp = None
+                release_slot()
                 if wb_accounts.is_tls_verify_error(exc):
                     # One attempt is enough: the chain is the same for every
                     # account, and retrying only multiplies the failed handshakes.
@@ -16339,15 +16350,10 @@ def open_upstream(payload, session_key=None, target_realm=None,
                        3.0 if total <= 1 else 60.0, account.fails, total))
                 last_error = exc
                 continue
-    finally:
-        if slot_held is not None:
-            account_slot_release(slot_held)
-            slot_held = None
-    # 循环可能从 break 退出（TLS 校验失败、已知硬错误），这时本轮占的名额还在
-    # 手上；成功路径已经在 return 前把它交给响应对象并置空，所以这里释放是安全的。
-    if slot_held is not None:
-        account_slot_release(slot_held)
-        slot_held = None
+        finally:
+            if resp is not None:
+                _close_upstream(resp)
+            release_slot()
     # Only spend credits after every enabled, credential-bearing account in
     # this realm has a persisted upstream 6004 cap for this free model. The
     # switch is opt-in because the retry can incur real charges.

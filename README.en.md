@@ -2,9 +2,9 @@
 
 [中文](README.md) · [Install and rollback](docs/INSTALL.md) · [Patch scope](docs/PATCHES.md) · [Verification](docs/VERIFICATION.md)
 
-Release **v1.7.30-ops.20261023.1**, targeting upstream **v1.7.30** at `84dbc99b1a34182130ee9035f9d80b69a0fc2e8b`. Python 3.11+ is required.
+Release **v1.7.30-ops.20261023.2**, targeting upstream **v1.7.30** at `84dbc99b1a34182130ee9035f9d80b69a0fc2e8b`. Python 3.11+ is required.
 
-[Download ZIP and SHA256SUMS.txt](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.7.30-ops.20261023.1): `workbuddy2api-hub-v1.7.30-wushuai0802-ops-20261023-r1.zip`.
+[Download ZIP and SHA256SUMS.txt](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.7.30-ops.20261023.2): `workbuddy2api-hub-v1.7.30-wushuai0802-ops-20261023-r2.zip`.
 
 This version migrates our retained safeguards onto the exact v1.7.30 source and retains our mixed-stall guard, reasoning-alias budget, tool-image compatibility, refusals, bounded refresh, and pooled connection ownership. It preserves upstream additional-tools/custom namespace support, Anthropic thinking, DSML fallback, block I/O and shared TLS contexts.
 
@@ -15,6 +15,10 @@ The header phase respects panel settings (120 seconds by default); its 45-second
 The supplied v1.7.5-r2 reference informed quote-span masking and detached validated cumulative usage snapshots. Quoted examples remain protected while short quoted tool names no longer exempt a surrounding repeated plan. Original SSE bytes and tool arguments are preserved.
 
 ## v1.7.30 changes
+
+r2 adopts selected fixes from the supplied v1.7.30-r2 reference. Only counted admissions own slots: unlimited requests cannot release earlier requests, concurrent close releases once, and all exits close unreturned responses. OAuth refresh releases before renewal and reacquires under the original policy/deadline. Only complete bounded JSON-object 401 bodies establish expiry in request-triggered refresh; no late error-body reads occur after its watchdog. Background retry policy and verified TLS context remain unchanged. Cache accounting skips malformed details, booleans, nonfinite values and numeric overflow without rewriting the provider snapshot.
+
+The validation inventory is 206 Python suites (41 patch and 165 native) plus 59 Node suites. Eighteen added cases cover slot ownership, six adapters, cancellation, loop recovery, real loopback HTTP, 401 evidence and cache aliases. Synthetic tests do not establish production long-session completion rates.
 
 Includes native check-in/keepalive/scheduler fixes, body draining and single chunk IDs, web-conversation cleanup/backoff, static API-key accounts, remote compaction v2, custom dropdowns and key policy persistence. Account concurrency, stable affinity, realm fallback and paid fallback retain existing settings and their off defaults.
 
@@ -75,7 +79,7 @@ Anthropic Messages and count_tokens endpoints now return400 by default, after au
 Prepare separate clean pinned sources, keep the previous deployment and backups, and verify first:
 
 ~~~sh
-git clone --depth 1 --branch v1.7.30-ops.20261023.1 https://github.com/wushuai0802/workbuddy2api-hub-ops-patch.git ops-patch-v1730
+git clone --depth 1 --branch v1.7.30-ops.20261023.2 https://github.com/wushuai0802/workbuddy2api-hub-ops-patch.git ops-patch-v1730
 git clone --depth 1 --branch v1.7.30 https://github.com/ardeyouxipianyi/workbuddy2api-hub.git workbuddy2api-hub-v1.7.30
 git -C workbuddy2api-hub-v1.7.30 rev-parse HEAD
 python3 -B ops-patch-v1730/apply.py --verify-package

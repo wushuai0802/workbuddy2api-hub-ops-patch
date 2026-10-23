@@ -315,6 +315,30 @@ class DeadlineSocketTests(unittest.TestCase):
         self.assertLess(elapsed, .5)
         self.assertEqual(credential.access_token, 'synthetic-old')
 
+    def test_only_complete_bounded_json_401_is_credential_expiry_evidence(self):
+        cases = [(b'{"error":"expired"}', True), (b'{}' + b' ' * 4094, True),
+                 (b'{}' + b' ' * 4094 + b'overrun', False),
+                 (b'upstream service unavailable', False), (b'', False),
+                 (b'{} trailing', False), (b'null', False), (b'[]', False),
+                 (b'{"error":"invalid utf8\xff"}', False)]
+        for index, (body, expired) in enumerate(cases):
+            with self.subTest(index=index, expected_expired=expired):
+                path = '/evidence-' + str(index)
+                self.server.scenarios[path] = {'status': 401, 'body': body}
+                credential, result, _ = self.refresh(path, budget=1)
+                self.assertFalse(result)
+                self.assertEqual(credential.token_expired, expired)
+                self.assertEqual(credential.access_token, 'synthetic-old')
+
+    def test_missing_bounded_401_evidence_never_reads_a_closed_error(self):
+        error = urllib.error.HTTPError('https://example.invalid', 401, 'denied', {}, io.BytesIO(b'{}'))
+        credential = account()
+        with mock.patch.object(error, 'read', side_effect=AssertionError('late error read')) as read, \
+                mock.patch.object(accounts, 'http_json', side_effect=error):
+            self.assertFalse(credential.refresh_after_401('synthetic-old', deadline_at=time.monotonic() + 1))
+        read.assert_not_called()
+        self.assertFalse(credential.token_expired)
+
     def test_header_drip_stops_by_the_same_deadline(self):
         self.server.scenarios["/headers"] = {"drip_headers": True}
         credential, result, elapsed = self.refresh("/headers")

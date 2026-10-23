@@ -4,12 +4,12 @@
 
 为 WorkBuddy 网关提供 DeepSeek 复读保护、受限认证续期、推理历史与工具图片兼容，以及流式协议边界修复。基于[官方项目](https://github.com/ardeyouxipianyi/workbuddy2api-hub)，可检查、可回退，遵循 MIT。
 
-当前版本：**v1.7.30-ops.20261023.1**。
+当前版本：**v1.7.30-ops.20261023.2**。
 
-本次重基官方v1.7.30，继承签到/保活/调度器、面板501与单流ID、网页会话释放、静态Key和远程压缩v2等修复。补齐压缩失败终态、原始用量与实际计费模型接线，以及账号并发名额在错误/超时中的归还；保留已有防复读、历史/图片兼容及期限保护。
+本次参考外部v1.7.30-r2，修复关闭并发上限时误还旧请求名额、返回前异常漏关上游、401刷新占槽与等待超时误分类。收紧401过期证据，忽略畸形缓存用量别名；保留上一版完整压缩判定、防复读、历史/图片兼容及期限保护。官方最新仍为v1.7.30。
 
-- [下载 ZIP 与 SHA256SUMS.txt](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.7.30-ops.20261023.1)
-- 文件名：`workbuddy2api-hub-v1.7.30-wushuai0802-ops-20261023-r1.zip`
+- [下载 ZIP 与 SHA256SUMS.txt](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.7.30-ops.20261023.2)
+- 文件名：`workbuddy2api-hub-v1.7.30-wushuai0802-ops-20261023-r2.zip`
 - 仅支持官方 **v1.7.30**，提交 `84dbc99b1a34182130ee9035f9d80b69a0fc2e8b`。
 - Python 3.11+。Docker 用户从打过完整补丁的准确源码重新构建镜像。
 - 安装器替换四个上游Python模块（proxy、accounts、webtools、upstream_pool）及看板，新增 ops、stall、observe 三个模块；不操作账号、Key、配置、历史或部署。
@@ -33,6 +33,10 @@
 上游 v1.7.4/1.7.5 增加默认关闭的SQLite日志及保留限制、checkpoint修复、凭据手动导入、新主题/统计面板、每日及手动模型目录刷新、来源标记和原始目录归档。模型目录/倍率现在优先使用实际API结果，显示可能变化；这些原生功能不代替防复读。SQLite日志是否启用沿用用户设置，公开包不自动开启。
 
 ## v1.7.30 升级与修复
+
+r2仅为真正计数的准入保留名额；关限额后的新请求不会归还旧请求名额。响应持有名额直到close，并用锁保证并发close只归还一次。请求准备、返回前记账、取消等退出都会关闭尚未交出的响应并归还名额；401先归还再刷新/重新准入，等待受原截止时间限制。
+
+请求触发刷新仅用原watchdog内读取的完整UTF-8 JSON对象401作为过期证据，超过4096字节、空答、畸形JSON、代理文本不能误停账号；不在watchdog结束后再读错误正文。后台三次刷新策略和共享验证TLS保持。缓存命中别名跳过畸形details、布尔/非有限值与数值溢出，继续读取有效别名，不改原provider快照。
 
 官方v1.7.29～v1.7.30修复签到业务失败误判、任务选号、48小时保活提前量、调度器主模块状态、活跃网页会话释放/创建失败退避、API Key账号绑定与并发设置落盘、面板闸门与POST body排空、单次回复统一chunk id及Pro Only标注。支持静态API Key、账号并发/稳定粘滞、自绘下拉框和远程压缩v2。功能由官方基线直接提供；账号并发/稳定粘滞、跨出口及积分回退保持原设置与默认关闭，不新增账号或触发签到。
 
@@ -113,7 +117,7 @@ Chat流式响应在客户端尚未收到任何字节时，对同一账号、同�
 先保存旧镜像、源码、配置和数据，在新目录获取两个准确版本：
 
 ~~~sh
-git clone --depth 1 --branch v1.7.30-ops.20261023.1 https://github.com/wushuai0802/workbuddy2api-hub-ops-patch.git ops-patch-v1730
+git clone --depth 1 --branch v1.7.30-ops.20261023.2 https://github.com/wushuai0802/workbuddy2api-hub-ops-patch.git ops-patch-v1730
 git clone --depth 1 --branch v1.7.30 https://github.com/ardeyouxipianyi/workbuddy2api-hub.git workbuddy2api-hub-v1.7.30
 git -C workbuddy2api-hub-v1.7.30 rev-parse HEAD
 python3 -B ops-patch-v1730/apply.py --verify-package
@@ -126,7 +130,7 @@ python3 -B ops-patch-v1730/apply.py --target ./workbuddy2api-hub-v1.7.30 --dry-r
 
 ## 验证与边界
 
-离线runner包含205组Python回归（40组补丁及全部165组官方Python），另有57组官方Node及2组补丁Node。新增跨出口/白名单/期限、六路径过滤与三路径读取异常回归；面板使用官方Node合成DOM测试。CI检查Linux3.11/3.12与Windows3.11，实际结果见[验证记录](docs/VERIFICATION.md)。
+离线runner包含206组Python回归（41组补丁及全部165组官方Python），另有57组官方Node及2组补丁Node。r2新增14项名额生命周期、2项401证据及2项缓存用量回归，含六接口、真实loopback HTTP与并发close。CI检查Linux3.11/3.12与Windows3.11，实际结果见[验证记录](docs/VERIFICATION.md)。
 
 测试使用合成账号、空数据和本机HTTP，不含真实会话。检测仍以单次生成为范围，尚无通用跨工具回合业务进展熔断。健康、模块指纹或离线测试不等于真实长会话输出质量验收。
 
