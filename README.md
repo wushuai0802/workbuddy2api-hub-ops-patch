@@ -4,17 +4,17 @@
 
 为 WorkBuddy 网关提供 DeepSeek 复读保护、受限认证续期、推理历史与工具图片兼容，以及流式协议边界修复。基于[官方项目](https://github.com/ardeyouxipianyi/workbuddy2api-hub)，可检查、可回退，遵循 MIT。
 
-当前版本：**v1.7.33-ops.20261023.2**。完整离线与合成验证已通过；真实上游成功验收仍待完成，验证范围见[记录](docs/VERIFICATION.md)。
+当前版本：**v1.8.0-ops.20261025.1**。完整离线与合成验证已通过；真实上游成功验收仍待完成，验证范围见[记录](docs/VERIFICATION.md)。
 
-升级官方v1.7.33，继承成功请求解除凭证失效标记、Responses首段工具参数增量、每日活跃预算/有序候选与429窗口恢复。参考外部r3完善Windows心跳断连唤醒和恢复连接取消收尾，保留我们的首帧心跳、期限、压缩、防复读、401、计费与名额保护。官方已公告收紧非官方客户端识别并进入低频维护；本补丁不能解除云端风控。
+升级官方v1.8.0，采用原生stderr有界后台日志、10秒更新检查，以及默认关闭的桌面chat兼容和国际活跃证书失败上报。保留首帧心跳、绝对期限、压缩、防复读、401、计费与名额保护，并验证日志通道堵塞时这些保护仍能结束请求。官方的客户端识别限制没有因此解除。
 
-- [下载 ZIP 与 SHA256SUMS.txt](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.7.33-ops.20261023.2)
-- 文件名：`workbuddy2api-hub-v1.7.33-wushuai0802-ops-20261023-r2.zip`
-- 仅支持官方 **v1.7.33**，提交 `47775c5e4aceb9f977bdebf5dd20175b44b5a78b`。
+- [下载 ZIP 与 SHA256SUMS.txt](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.8.0-ops.20261025.1)
+- 文件名：`workbuddy2api-hub-v1.8.0-wushuai0802-ops-20261025-r1.zip`
+- 仅支持官方 **v1.8.0**，提交 `4f7ae6f2efcae5e6ae85aefa732035206044514b`。
 - Python 3.11+。Docker 用户从打过完整补丁的准确源码重新构建镜像。
 - 安装器替换四个上游Python模块（proxy、accounts、webtools、upstream_pool）及看板，新增 ops、stall、observe 三个模块；不操作账号、Key、配置、历史或部署。
 
-本版把已有补丁迁移到官方 v1.7.33，保留混合复读、推理别名预算、工具图片、拒答、用量结算和连接所有权保护。来源与许可见 [NOTICE.md](NOTICE.md) 和 [THIRD-PARTY-zh.md](THIRD-PARTY-zh.md)。
+本版把已有补丁迁移到官方 v1.8.0，保留混合复读、推理别名预算、工具图片、拒答、用量结算和连接所有权保护。来源与许可见 [NOTICE.md](NOTICE.md) 和 [THIRD-PARTY-zh.md](THIRD-PARTY-zh.md)。
 
 本次修复响应头预算被固定45秒覆盖的问题：响应头尊重面板设置，返回后才开始45秒首帧预算；初始连接、恢复和网页工具后续生成共享原300秒总期限。纯推理循环的唯一一次安全恢复默认加入简短接续提示，可用 `WB_OPS_LOOP_RECOVERY_HINT=0` 关闭提示。连续已知失败前缀最多清理16段/65536字符，保留未知后缀和客户端原历史。持久观察新增匿名规则、窗口计数和恢复停止原因；检测阈值保持。
 
@@ -32,7 +32,15 @@
 
 上游 v1.7.4/1.7.5 增加默认关闭的SQLite日志及保留限制、checkpoint修复、凭据手动导入、新主题/统计面板、每日及手动模型目录刷新、来源标记和原始目录归档。模型目录/倍率现在优先使用实际API结果，显示可能变化；这些原生功能不代替防复读。SQLite日志是否启用沿用用户设置，公开包不自动开启。
 
-## v1.7.33 升级与补充
+## v1.8.0 升级与验证
+
+原生stderr写出转到2000行有界后台队列，堵塞时请求线程继续处理；队列满会丢弃控制台行并在面板计数告警。更新获取的两条路径各允许10秒，模型调用继续原有连接/首帧/生成预算。
+
+`WB_DESKTOP_CHAT_COMPAT`默认关闭；显式开启后只调整桌面产品chat头，CLI/VSCode、计费REST、请求体和TLS校验保持原语义。`daily_chat_web_fallback_activity`默认关闭；开启后仅网页腿证书类错误可改走账号自身区域的活跃上报，业务拒绝/轮次超时仍失败，上报被拒不记当日完成。这些能力直接继承官方，不重复实现，也不承诺免风控。
+
+新增一项三协议联动回归：堵满stderr队列时，循环守卫仍输出失败终态、传递已接收provider用量、关闭上游并归还名额，不增加重试。5个补丁模块字节不变，16个关键类/函数的AST与上一正式版一致；旧Windows首帧竞态和取消回归继续执行。
+
+## v1.7.33 升级与补充（历史保护）
 
 首帧看门狗先设置明确到期标记，再中断所属读取；Windows时钟差一个刻度也不会误开额外连接。客户端取消在出口退避分类前收尾，不把断连记为出口故障。两项确定性反例先复现失败，原“只连接一次”断言保持。
 
@@ -135,11 +143,11 @@ v1.7.6～v1.7.30曾仅按模型名把`gpt-5.6-terra / gpt-5.6-luna / gpt-5.3-cod
 先保存旧镜像、源码、配置和数据，在新目录获取两个准确版本：
 
 ~~~sh
-git clone --depth 1 --branch v1.7.33-ops.20261023.2 https://github.com/wushuai0802/workbuddy2api-hub-ops-patch.git ops-patch-v1733
-git clone --depth 1 --branch v1.7.33 https://github.com/ardeyouxipianyi/workbuddy2api-hub.git workbuddy2api-hub-v1.7.33
-git -C workbuddy2api-hub-v1.7.33 rev-parse HEAD
-python3 -B ops-patch-v1733/apply.py --verify-package
-python3 -B ops-patch-v1733/apply.py --target ./workbuddy2api-hub-v1.7.33 --dry-run
+git clone --depth 1 --branch v1.8.0-ops.20261025.1 https://github.com/wushuai0802/workbuddy2api-hub-ops-patch.git ops-patch-v180
+git clone --depth 1 --branch v1.8.0 https://github.com/ardeyouxipianyi/workbuddy2api-hub.git workbuddy2api-hub-v1.8.0
+git -C workbuddy2api-hub-v1.8.0 rev-parse HEAD
+python3 -B ops-patch-v180/apply.py --verify-package
+python3 -B ops-patch-v180/apply.py --target ./workbuddy2api-hub-v1.8.0 --dry-run
 ~~~
 
 提交必须匹配上面的完整SHA。预检通过后，按[安装指南](docs/INSTALL.md)暂停唯一目标服务、应用完整补丁、构建并定向切换。已有旧补丁（包括v1.7.3）不能直接叠加；不要删除状态/备份绕过检查。旧Release/tag继续保留。
@@ -148,7 +156,7 @@ python3 -B ops-patch-v1733/apply.py --target ./workbuddy2api-hub-v1.7.33 --dry-r
 
 ## 验证与边界
 
-离线runner包含210组Python回归（44组补丁及全部166组官方Python），另有59组官方Node及2组补丁Node。新增8项v1.7.33专项，保留7项心跳、14项名额生命周期、2项401证据及2项缓存用量回归，含六接口、真实loopback HTTP与并发close。CI检查Linux3.11/3.12与Windows3.11，实际结果见[验证记录](docs/VERIFICATION.md)。
+离线runner包含212组Python回归（45组补丁及全部167组官方Python），另有59组官方Node及2组补丁Node。本版新增1项日志饱和联动，保留v1.7.33的8项专项及7项心跳、14项名额生命周期、2项401证据和2项缓存用量回归，含六接口、真实loopback HTTP与并发close。CI检查Linux3.11/3.12与Windows3.11，实际结果见[验证记录](docs/VERIFICATION.md)。
 
 测试使用合成账号、空数据和本机HTTP，不含真实会话。检测仍以单次生成为范围，尚无通用跨工具回合业务进展熔断。健康、模块指纹或离线测试不等于真实长会话输出质量验收。
 

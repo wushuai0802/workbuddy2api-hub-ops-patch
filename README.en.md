@@ -2,11 +2,11 @@
 
 [中文](README.md) · [Install and rollback](docs/INSTALL.md) · [Patch scope](docs/PATCHES.md) · [Verification](docs/VERIFICATION.md)
 
-Release **v1.7.33-ops.20261023.2**, targeting upstream **v1.7.33** at `47775c5e4aceb9f977bdebf5dd20175b44b5a78b`. Python 3.11+ is required. Offline/synthetic checks passed; successful live upstream validation remains pending. Upstream has announced tighter unofficial-client detection and reduced maintenance; this patch cannot remove upstream restrictions.
+Release **v1.8.0-ops.20261025.1**, targeting upstream **v1.8.0** at `4f7ae6f2efcae5e6ae85aefa732035206044514b`. Python 3.11+ is required. Offline/synthetic checks passed; successful live upstream validation remains pending. Upstream has announced tighter unofficial-client detection and reduced maintenance; this patch cannot remove upstream restrictions.
 
-[Download ZIP and SHA256SUMS.txt](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.7.33-ops.20261023.2): `workbuddy2api-hub-v1.7.33-wushuai0802-ops-20261023-r2.zip`.
+[Download ZIP and SHA256SUMS.txt](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.8.0-ops.20261025.1): `workbuddy2api-hub-v1.8.0-wushuai0802-ops-20261025-r1.zip`.
 
-This version migrates our retained safeguards onto the exact v1.7.33 source and retains our mixed-stall guard, reasoning-alias budget, tool-image compatibility, refusals, bounded refresh, and pooled connection ownership. It preserves upstream additional-tools/custom namespace support, Anthropic thinking, DSML fallback, block I/O and shared TLS contexts.
+This version migrates our retained safeguards onto the exact v1.8.0 source and retains our mixed-stall guard, reasoning-alias budget, tool-image compatibility, refusals, bounded refresh, and pooled connection ownership. It preserves upstream additional-tools/custom namespace support, Anthropic thinking, DSML fallback, block I/O and shared TLS contexts.
 
 The installer replaces four upstream Python modules and the dashboard, and adds `wb_ops.py`, `wb_stall.py` and `wb_observe.py`, checking the unchanged core dependencies. It preserves accounts, keys, configuration and usage and does not deploy. The running gateway writes a separate bounded observation log, disabled with `WB_OPS_OBSERVE=0`.
 
@@ -14,7 +14,15 @@ The header phase respects panel settings (120 seconds by default); its 45-second
 
 The supplied v1.7.5-r2 reference informed quote-span masking and detached validated cumulative usage snapshots. Quoted examples remain protected while short quoted tool names no longer exempt a surrounding repeated plan. Original SSE bytes and tool arguments are preserved.
 
-## v1.7.33 changes
+## v1.8.0 changes
+
+Native stderr writes now use a bounded 2,000-line background queue. A blocked console channel cannot park request threads; a full queue drops console lines and reports the count through panel warnings. Each update-download path now permits 10 seconds; model connection, first-frame and generation budgets stay unchanged.
+
+Desktop chat compatibility and certificate-only daily-activity reporting fallback are both off by default. The former affects desktop chat headers only; the latter uses the account's own realm and leaves non-certificate failures or rejected reports unsuccessful. TLS verification, request bodies and existing routing remain. These are upstream capabilities, not a claim of restriction removal.
+
+One new integration case fills the stderr queue and checks error terminals, received provider usage, response closure, account-slot release and no retry across three streaming protocols. Five patch modules and the AST of 16 critical guard symbols match the prior stable version.
+
+## v1.7.33 changes (historical safeguards retained)
 
 The first-frame watchdog records expiry before closing its owned socket, so a Windows clock-tick race cannot open extra connections. Client cancellation is handled before egress penalties. Both cases have deterministic regressions; the original single-connection assertion remains.
 
@@ -97,11 +105,11 @@ Anthropic Messages and count_tokens endpoints now return400 by default, after au
 Prepare separate clean pinned sources, keep the previous deployment and backups, and verify first:
 
 ~~~sh
-git clone --depth 1 --branch v1.7.33-ops.20261023.2 https://github.com/wushuai0802/workbuddy2api-hub-ops-patch.git ops-patch-v1733
-git clone --depth 1 --branch v1.7.33 https://github.com/ardeyouxipianyi/workbuddy2api-hub.git workbuddy2api-hub-v1.7.33
-git -C workbuddy2api-hub-v1.7.33 rev-parse HEAD
-python3 -B ops-patch-v1733/apply.py --verify-package
-python3 -B ops-patch-v1733/apply.py --target ./workbuddy2api-hub-v1.7.33 --dry-run
+git clone --depth 1 --branch v1.8.0-ops.20261025.1 https://github.com/wushuai0802/workbuddy2api-hub-ops-patch.git ops-patch-v180
+git clone --depth 1 --branch v1.8.0 https://github.com/ardeyouxipianyi/workbuddy2api-hub.git workbuddy2api-hub-v1.8.0
+git -C workbuddy2api-hub-v1.8.0 rev-parse HEAD
+python3 -B ops-patch-v180/apply.py --verify-package
+python3 -B ops-patch-v180/apply.py --target ./workbuddy2api-hub-v1.8.0 --dry-run
 ~~~
 
 Use [INSTALL.md](docs/INSTALL.md) to stop the one intended service, apply, rebuild and recreate it with its original parameters. Earlier patched trees are not overlays; do not delete state or checksum metadata to bypass a refusal. The [previous v1.6.20 release](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.6.20-ops.20261012.1) remains available.
@@ -112,7 +120,7 @@ A response whose wire body was read in one block retains its connection lease un
 
 ## Verification and limits
 
-The runner covers 210 Python groups (44 patch and all 166 official groups), plus 59 official and 2 patch Node groups. CI checks Linux3.11/3.12 and Windows3.11; see [VERIFICATION.md](docs/VERIFICATION.md). Tests use synthetic data and loopback HTTP with external Python sockets denied; they do not establish online task completion.
+The runner covers 212 Python groups (45 patch and all 167 official groups), plus 59 official and 2 patch Node groups. CI checks Linux3.11/3.12 and Windows3.11; see [VERIFICATION.md](docs/VERIFICATION.md). Tests use synthetic data and loopback HTTP with external Python sockets denied; they do not establish online task completion.
 
 r2 protects quoted repetition examples, preserves already-consumed provider usage across guard failure, transport errors and cancellation, and bounds SSE lines/events (4/8MiB defaults). A request-local history observer reports repeated tool results without blocking or replaying tools. It does not combine sessions or infer generic shell-command progress. Durable metrics distinguish requests from guarded attempts and legal-output recovery from business completion, with explicit time/version/protocol grouping and retention limits.
 

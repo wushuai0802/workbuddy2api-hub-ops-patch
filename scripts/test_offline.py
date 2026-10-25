@@ -29,7 +29,7 @@ PATCH_SUITES = ('test_installer.py', 'test_wb_stall.py', 'test_mixed_stall_proxy
                 'test_nullable_buffer.py', 'test_metadata_buffer.py', 'test_compact_buffer.py',
                 'test_extra_fields.py', 'test_sse_framing.py', 'test_buffer_records.py', 'test_recovery_hint.py', 'test_v176.py', 'test_v178.py', 'test_v1710.py', 'test_stream_contract.py', 'test_v1712.py', 'test_v1715.py',
                 'test_printed_call_boundaries.py', 'test_v1728.py', 'test_realm_fallback_boundaries.py', 'test_v1730.py',
-                'test_account_slot_lifecycle.py', 'test_heartbeat_lifecycle.py', 'test_connection_deadline.py', 'test_v1733.py')
+                'test_account_slot_lifecycle.py', 'test_heartbeat_lifecycle.py', 'test_connection_deadline.py', 'test_v1733.py', 'test_v180.py')
 
 
 def main():
@@ -39,7 +39,7 @@ def main():
     args = parser.parse_args()
     upstream = args.upstream.resolve(strict=True)
     official_suites = sorted((upstream / 'tests').glob('_test_*.py'))
-    assert len(official_suites) == 166, 'pinned official Python inventory changed'
+    assert len(official_suites) == 167, 'pinned official Python inventory changed'
     bundle = Bundle(ROOT)
     assert set(bundle.status(bundle.target(upstream)).values()) == {'base'}, 'use clean pinned upstream'
     args.output.mkdir(parents=True, exist_ok=True)
