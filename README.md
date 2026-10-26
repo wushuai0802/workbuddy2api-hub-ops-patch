@@ -4,12 +4,12 @@
 
 为 WorkBuddy 网关提供 DeepSeek 复读保护、受限认证续期、推理历史与工具图片兼容，以及流式协议边界修复。基于[官方项目](https://github.com/ardeyouxipianyi/workbuddy2api-hub)，可检查、可回退，遵循 MIT。
 
-当前版本：**v1.8.0-ops.20261025.1**。完整离线与合成验证已通过；真实上游成功验收仍待完成，验证范围见[记录](docs/VERIFICATION.md)。
+当前版本：**v1.8.0-ops.20261026.1**。完整离线与合成验证已通过；真实上游成功验收仍待完成，验证范围见[记录](docs/VERIFICATION.md)。
 
-升级官方v1.8.0，采用原生stderr有界后台日志、10秒更新检查，以及默认关闭的桌面chat兼容和国际活跃证书失败上报。保留首帧心跳、绝对期限、压缩、防复读、401、计费与名额保护，并验证日志通道堵塞时这些保护仍能结束请求。官方的客户端识别限制没有因此解除。
+官方基线仍为v1.8.0。本次修复风控区域暂停在重启后丢失、定时活跃遇11140未记冷却、连接阶段失败漏出观察范围，以及空账号池状态码不一致。原防循环规则、生成预算和请求内容保持，补丁不能解除云端账号限制。
 
-- [下载 ZIP 与 SHA256SUMS.txt](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.8.0-ops.20261025.1)
-- 文件名：`workbuddy2api-hub-v1.8.0-wushuai0802-ops-20261025-r1.zip`
+- [下载 ZIP 与 SHA256SUMS.txt](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.8.0-ops.20261026.1)
+- 文件名：`workbuddy2api-hub-v1.8.0-wushuai0802-ops-20261026-r1.zip`
 - 仅支持官方 **v1.8.0**，提交 `4f7ae6f2efcae5e6ae85aefa732035206044514b`。
 - Python 3.11+。Docker 用户从打过完整补丁的准确源码重新构建镜像。
 - 安装器替换四个上游Python模块（proxy、accounts、webtools、upstream_pool）及看板，新增 ops、stall、observe 三个模块；不操作账号、Key、配置、历史或部署。
@@ -32,7 +32,17 @@
 
 上游 v1.7.4/1.7.5 增加默认关闭的SQLite日志及保留限制、checkpoint修复、凭据手动导入、新主题/统计面板、每日及手动模型目录刷新、来源标记和原始目录归档。模型目录/倍率现在优先使用实际API结果，显示可能变化；这些原生功能不代替防复读。SQLite日志是否启用沿用用户设置，公开包不自动开启。
 
-## v1.8.0 升级与验证
+## 2026-10-26 风控状态与早期错误
+
+区域暂停的原到期时间和窗口内账号哈希写入`usage/restriction-state.json`，重启后继续原期限，不重新起算。文件有大小/条数限制，采用原子写入；损坏、符号链接或写入失败会在`/health/retry`报告，写入失败时内存保护继续。已有账号自身冷却与显式关闭配置保留，不从历史报错追补限制。
+
+每日活跃收到明确11140后也写入原账号冷却，并通知正在运行的网关区域状态；账号或区域受限时，任务入口不会发出新请求。网页活跃停止后续轮次，不记当日完成；普通配额/内容拒绝不误判风控，111400不会因数字前缀误中11140。定时与手动入口共用这条边界。
+
+模型处理入口的上游拒绝现在也进入观察记录，区分账号风控、区域暂停、普通限流和连接失败；新增`stage=entry/response`及适用时的`http_status`，成功响应仍只记一个请求，不增加用量行。空池在三协议统一为503并与账本一致。观察文件不保存原始报错、提示词、Key或账号身份，业务完成仍标为未测量。
+
+新增21项回归（10持久化、4入口、7任务），包含新进程、并发、损坏/超大文件、三协议、同批次停止及真实记账路径。原生上游账号风控与其他供应商的传输故障不因这些修复消失。
+
+## v1.8.0 升级与验证（基线功能）
 
 原生stderr写出转到2000行有界后台队列，堵塞时请求线程继续处理；队列满会丢弃控制台行并在面板计数告警。更新获取的两条路径各允许10秒，模型调用继续原有连接/首帧/生成预算。
 
@@ -143,7 +153,7 @@ v1.7.6～v1.7.30曾仅按模型名把`gpt-5.6-terra / gpt-5.6-luna / gpt-5.3-cod
 先保存旧镜像、源码、配置和数据，在新目录获取两个准确版本：
 
 ~~~sh
-git clone --depth 1 --branch v1.8.0-ops.20261025.1 https://github.com/wushuai0802/workbuddy2api-hub-ops-patch.git ops-patch-v180
+git clone --depth 1 --branch v1.8.0-ops.20261026.1 https://github.com/wushuai0802/workbuddy2api-hub-ops-patch.git ops-patch-v180
 git clone --depth 1 --branch v1.8.0 https://github.com/ardeyouxipianyi/workbuddy2api-hub.git workbuddy2api-hub-v1.8.0
 git -C workbuddy2api-hub-v1.8.0 rev-parse HEAD
 python3 -B ops-patch-v180/apply.py --verify-package
@@ -156,7 +166,7 @@ python3 -B ops-patch-v180/apply.py --target ./workbuddy2api-hub-v1.8.0 --dry-run
 
 ## 验证与边界
 
-离线runner包含212组Python回归（45组补丁及全部167组官方Python），另有59组官方Node及2组补丁Node。本版新增1项日志饱和联动，保留v1.7.33的8项专项及7项心跳、14项名额生命周期、2项401证据和2项缓存用量回归，含六接口、真实loopback HTTP与并发close。CI检查Linux3.11/3.12与Windows3.11，实际结果见[验证记录](docs/VERIFICATION.md)。
+离线runner包含215组Python回归（48组补丁及全部167组官方Python），另有59组官方Node及2组补丁Node。本版新增21项风控与入口回归，保留日志饱和联动、v1.7.33的8项专项及7项心跳、14项名额生命周期、2项401证据和2项缓存用量回归，含六接口、真实loopback HTTP与并发close。CI检查Linux3.11/3.12与Windows3.11，实际结果见[验证记录](docs/VERIFICATION.md)。
 
 测试使用合成账号、空数据和本机HTTP，不含真实会话。检测仍以单次生成为范围，尚无通用跨工具回合业务进展熔断。健康、模块指纹或离线测试不等于真实长会话输出质量验收。
 

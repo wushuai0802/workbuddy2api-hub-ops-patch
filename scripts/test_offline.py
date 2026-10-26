@@ -29,7 +29,8 @@ PATCH_SUITES = ('test_installer.py', 'test_wb_stall.py', 'test_mixed_stall_proxy
                 'test_nullable_buffer.py', 'test_metadata_buffer.py', 'test_compact_buffer.py',
                 'test_extra_fields.py', 'test_sse_framing.py', 'test_buffer_records.py', 'test_recovery_hint.py', 'test_v176.py', 'test_v178.py', 'test_v1710.py', 'test_stream_contract.py', 'test_v1712.py', 'test_v1715.py',
                 'test_printed_call_boundaries.py', 'test_v1728.py', 'test_realm_fallback_boundaries.py', 'test_v1730.py',
-                'test_account_slot_lifecycle.py', 'test_heartbeat_lifecycle.py', 'test_connection_deadline.py', 'test_v1733.py', 'test_v180.py')
+                'test_account_slot_lifecycle.py', 'test_heartbeat_lifecycle.py', 'test_connection_deadline.py', 'test_v1733.py', 'test_v180.py',
+                'test_restriction_persistence.py', 'test_entry_observation.py', 'test_task_restriction.py')
 
 
 def main():

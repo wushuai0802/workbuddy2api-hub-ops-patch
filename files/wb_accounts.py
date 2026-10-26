@@ -217,6 +217,25 @@ def is_tls_verify_text(text):
     return is_tls_verify_error(TLSVerifyError(str(text)))
 
 
+RESTRICTED_403_CODE_RE = re.compile(r'"code"\s*:\s*"?11140(?=["\s,}]|$)')
+RESTRICTION_403_MARKERS = ("unusual activity", "账号存在异常行为", "已被限制")
+
+
+def is_account_restriction(detail):
+    text = str(detail or '')
+    return bool(RESTRICTED_403_CODE_RE.search(text) or
+                any(marker in text.lower() for marker in RESTRICTION_403_MARKERS))
+
+
+def _task_proxy_runtime():
+    # Account tasks must share the live gateway's pause, including script launch.
+    for name in ('__main__', 'wb_proxy'):
+        module = sys.modules.get(name)
+        if module is not None and callable(getattr(module, 'restriction_hold_remaining', None)) and callable(getattr(module, 'note_account_restriction', None)):
+            return module
+    return None
+
+
 def _retryable(exc):
     """Transient network faults worth another attempt (TLS resets, timeouts, 5xx)."""
     if is_tls_verify_error(exc):
@@ -2363,6 +2382,42 @@ class Account(object):
         if not pool:
             pool = wb_webprompts.builtin_prompts()
         return random.choice(pool) if pool else DAILY_CHAT_WEB_PROMPT
+    def _task_restriction_error(self):
+        remaining = max(0., self.restricted_until - time.time())
+        if remaining:
+            return {'ok': False, 'blocked': True, 'retryable': False,
+                    'error': '本地账号风控冷却，未发送请求（剩余 %ds）' % int(remaining)}
+        runtime = _task_proxy_runtime()
+        if runtime is not None:
+            remaining = runtime.restriction_hold_remaining(self.realm)
+            if remaining > 0:
+                return {'ok': False, 'blocked': True, 'retryable': False,
+                        'error': '本地区域风控暂停，未发送请求（剩余 %ds）' % int(remaining)}
+        return None
+
+    def _capture_task_restriction(self, detail, status=None):
+        text = str(detail or '')
+        # Web errors can also contain quota wording. Account-level text markers
+        # require a 403 context; an explicit 11140 code is sufficient on its own.
+        forbidden = status == 403 or bool(re.search(r'\bHTTP(?: Error)?\s+403\b', text, re.I))
+        if not (RESTRICTED_403_CODE_RE.search(text) or (forbidden and is_account_restriction(text))):
+            return False
+        self.note_restricted(detail)
+        runtime = _task_proxy_runtime()
+        if runtime is not None:
+            try:
+                runtime.note_account_restriction(self.realm, self.uid)
+            except Exception:
+                if callable(getattr(runtime, 'log', None)):
+                    runtime.log('daily activity restriction could not update the realm pause', level='WARN')
+        try:
+            if self.path:
+                self.save(os.path.dirname(self.path))
+        except Exception:
+            if runtime is not None and callable(getattr(runtime, 'log', None)):
+                runtime.log('daily activity account restriction could not be persisted', level='WARN')
+        return True
+
     def daily_chat_web(self, prompt=None, trigger="unknown"):
         """网页通道的每日活跃会话（issue #75 / #59 / #90）。
 
@@ -2384,7 +2439,9 @@ class Account(object):
         if not self.can_daily_chat():
             return {"ok": True, "skipped": True,
                     "msg": "今日活跃已完成，跳过网页活跃"}
-        res = self._daily_chat_web_upstream(prompt)
+        res = self._task_restriction_error()
+        if res is None:
+            res = self._daily_chat_web_upstream(prompt)
         wb_activity.record_attempt(self, wb_activity.TASK_DAILY_CHAT, trigger, res)
         return res
 
@@ -2405,6 +2462,9 @@ class Account(object):
         返回里带 attempts（实际跑了几轮）、models_tried、model，其余字段与
         _daily_chat_web_once 一致。
         """
+        blocked = self._task_restriction_error()
+        if blocked is not None:
+            return blocked
         models = self.web_fallback_models() or [self.daily_chat_model()]
         turn_cap, rounds = self.daily_chat_web_policy()
         budget = self.daily_chat_budget()
@@ -2423,6 +2483,10 @@ class Account(object):
         except Exception:
             pass
         for index in range(rounds):
+            blocked = self._task_restriction_error()
+            if blocked is not None:
+                blocked.update(attempts=index, models_tried=tried)
+                return blocked
             wait = turn_cap
             if deadline is not None:
                 remaining = deadline - time.time()
@@ -2437,6 +2501,9 @@ class Account(object):
             res["attempts"] = index + 1
             res["models_tried"] = tried + [model]
             res["model"] = model
+            if not res.get('ok') and self._capture_task_restriction(res.get('error')):
+                res.update(retryable=False, restricted=True)
+                return res
             if res.get("ok"):
                 return res
             last = res
@@ -2824,7 +2891,9 @@ class Account(object):
         if not self.can_daily_chat():
             return {"ok": True, "skipped": True,
                     "msg": "今日活跃已完成，跳过本轮"}
-        res = self._daily_chat_upstream(web)
+        res = self._task_restriction_error()
+        if res is None:
+            res = self._daily_chat_upstream(web)
         wb_activity.record_attempt(self, wb_activity.TASK_DAILY_CHAT, trigger, res)
         return res
 
@@ -2917,10 +2986,18 @@ class Account(object):
             return result
         except urllib.error.HTTPError as exc:
             try:
-                err = exc.read().decode("utf-8", "replace")
+                err = exc.read(4096).decode("utf-8", "replace")
             except Exception:
                 err = str(exc)
-            return {"ok": False, "error": f"HTTP {exc.code}: {err[:100]}"}
+            finally:
+                try:
+                    exc.close()
+                except Exception:
+                    pass
+            result = {"ok": False, "error": f"HTTP {exc.code}: {err[:100]}"}
+            if exc.code == 403 and self._capture_task_restriction(err, status=403):
+                result['restricted'] = True
+            return result
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 

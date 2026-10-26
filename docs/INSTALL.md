@@ -2,7 +2,7 @@
 
 完整离线/合成验证通过，真实上游成功验收仍待完成。先在隔离环境验证自己的调用链，并准备回滚后再替换生产。
 
-本包 `v1.8.0-ops.20261025.1` 只支持官方v1.8.0 / `4f7ae6f2efcae5e6ae85aefa732035206044514b`。以下路径、Compose参数和服务名需要按自己的部署填写。Python3.11+，Linux/macOS示例；Windows使用同一安装器参数及完整路径。
+本包 `v1.8.0-ops.20261026.1` 只支持官方v1.8.0 / `4f7ae6f2efcae5e6ae85aefa732035206044514b`。以下路径、Compose参数和服务名需要按自己的部署填写。Python3.11+，Linux/macOS示例；Windows使用同一安装器参数及完整路径。
 
 v1.7.33每日活跃改为总预算（默认600秒）、有序候选、留空时两个随机时段，以及默认开启的启动补跑。更新前核对原任务策略；已有明确时段优先，旧模型设置按原含义读取。需要沿用旧版重启不补跑行为时，将面板启动补跑开关关闭（`daily_chat_startup_catchup=false`）。公开安装器不改业务设置，也不能解除上游风控。
 
@@ -10,7 +10,7 @@ v1.8.0的`WB_DESKTOP_CHAT_COMPAT`和`daily_chat_web_fallback_activity`默认关�
 
 ## 核对输入
 
-[Release下载](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.8.0-ops.20261025.1)含ZIP和SHA256SUMS.txt；ZIP顶层目录为`workbuddy2api-hub-ops-patch/`。
+[Release下载](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.8.0-ops.20261026.1)含ZIP和SHA256SUMS.txt；ZIP顶层目录为`workbuddy2api-hub-ops-patch/`。
 
 ~~~sh
 sha256sum -c SHA256SUMS.txt
@@ -25,6 +25,8 @@ python3 -B "$PATCH_DIR/apply.py" --target "$TARGET_DIR" --dry-run
 SHA必须匹配上述完整提交；预检通过只代表可以应用，尚未部署。已有旧补丁或未知改动时，另建准确干净源码，保留旧部署。不删除状态/备份或重写校验绕过拒绝。回滚旧源码补丁使用其原版本安装器；当前安装器不能卸载旧包。
 
 这也适用于旧补丁→v1.8.0：在新基线整体安装，不直接覆盖旧已安装树。运行时独立`usage/ops-observations.jsonl`不属于安装器修改范围；它有界轮换且可用`WB_OPS_OBSERVE=0`关闭，不改写原usage历史。
+
+区域暂停新增`usage/restriction-state.json`，与现有usage目录一起保留；它只含账号哈希、时间和区域，不含凭据。有效状态在重启后沿用原到期时间。坏文件/权限问题可从`/health/retry.restriction_pause`查看；无法从损坏文件恢复未知暂停，账号自身冷却仍独立生效。降级到不识别该文件的旧版不会获得这项跨重启保护，代码回退应保留现用数据。
 
 ## 保存部署与数据
 

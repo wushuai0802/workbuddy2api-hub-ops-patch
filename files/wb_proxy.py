@@ -1025,7 +1025,7 @@ def record_error(model, status, message, elapsed_ms=None, account=None,
     _persist_usage(row, "error persist failed")
     observation = wb_observe.CURRENT.get()
     if observation is not None:
-        observation.finish_attempt(outcome, usage, reason=message)
+        observation.finish_attempt(outcome, usage, reason=message, status=status)
     dur = f" {elapsed_ms:.0f}ms" if elapsed_ms is not None else ""
     # 账号与终态也带上看板日志。上面那段本来就把 account 写进了 JSONL，但日志
     # 行一直没打出来——出错时最想知道的「哪个账号、什么终态」反而要回去翻
@@ -11728,7 +11728,7 @@ def _patch_payload_fingerprint():
     return hashlib.sha256(''.join(records).encode('ascii')).hexdigest()
 
 _OPS_PATCH_FINGERPRINT = _patch_payload_fingerprint()
-_OPS_PATCH_ID = "v1.8.0-ops.20261025.1"
+_OPS_PATCH_ID = "v1.8.0-ops.20261026.1"
 _OBSERVATION_STORE = None
 _OBSERVATION_STORE_LOCK = threading.Lock()
 
@@ -11745,6 +11745,15 @@ def _observation_store():
 def _track_response(protocol, stream):
     return wb_observe.tracked_response(protocol, stream, lambda: _observation_store(),
                                       lambda: (_OPS_PATCH_ID, _OPS_PATCH_FINGERPRINT))
+
+def _track_entry(protocol):
+    return wb_observe.tracked_entry(protocol, lambda: _observation_store(),
+                                   lambda: (_OPS_PATCH_ID, _OPS_PATCH_FINGERPRINT))
+
+def _observe_entry_metadata(model, stream, session_key):
+    observation = wb_observe.CURRENT.get()
+    if observation is not None:
+        observation.base.update(model=model, stream=bool(stream), session_present=bool(session_key))
 
 def _single_candidate_error(payload):
     """The gateway's aggregation/Responses/Messages lifecycles are singular."""
@@ -11764,6 +11773,7 @@ def retry_health_snapshot(limit=200, since=None, until=None, model=None):
              "ops_patch_source": "wushuai0802/workbuddy2api-hub-ops-patch",
              "ops_patch_fingerprint": _OPS_PATCH_FINGERPRINT,
              "loops": loop_health_snapshot(),
+             "restriction_pause": restriction_state_snapshot(),
              "process_started": _RETRY_STARTED_AT, "turns": 0,
              "reasoning_only": 0, "empty_output": 0, "failed": 0, "client_aborted": 0, "upstream_aborted": 0,
              "legacy_window": {"scope": "last_usage_rows", "limit": limit,
@@ -15091,10 +15101,10 @@ class PinnedAccountError(Exception):
 
 
 class ContentRejected(Exception):
-    """Upstream content review rejected this request (403 / code 11140).
+    """An upstream 403, including separately handled account restriction 11140.
 
-    Not an account problem: another credential gets the same 403 for the same
-    content, so it is passed straight through instead of cooling the pool.
+    Restriction cooling/rotation is decided from the upstream detail before
+    this exception is raised; callers preserve the rejection and do not replay.
     """
 
     def __init__(self, http_error=None, detail=""):
@@ -15703,19 +15713,136 @@ RESTRICTION_HOLD_SECONDS = _env_number("WB_RESTRICTION_HOLD_SECONDS", 1800.0)
 _RESTRICTION_LOCK = threading.Lock()
 _RESTRICTION_EVENTS = {}   # realm -> {uid: epoch}（窗口内被限制的账号）
 _RESTRICTION_HOLD = {}     # realm -> 暂停到哪个 epoch
+_RESTRICTION_STATE_PATH = None
+_RESTRICTION_LOAD_ERROR = False
+_RESTRICTION_WRITE_FAILURES = 0
+
+
+def _load_restriction_state_locked(now):
+    """Restore bounded realm deadlines once per usage directory; caller owns the lock."""
+    global _RESTRICTION_STATE_PATH, _RESTRICTION_LOAD_ERROR
+    path = os.path.abspath(os.path.join(USAGE_DIR, 'restriction-state.json'))
+    if _RESTRICTION_STATE_PATH == path:
+        return
+    if _RESTRICTION_STATE_PATH is not None:
+        _RESTRICTION_EVENTS.clear()
+        _RESTRICTION_HOLD.clear()
+    _RESTRICTION_STATE_PATH = path
+    _RESTRICTION_LOAD_ERROR = False
+    try:
+        if os.path.islink(path):
+            raise ValueError('restriction state symlink')
+        with open(path, 'rb') as source:
+            raw = source.read(1024 * 1024 + 1)
+        if len(raw) > 1024 * 1024:
+            raise ValueError('restriction state too large')
+        data = json.loads(raw)
+        if not isinstance(data, dict) or type(data.get('schema')) is not int or data['schema'] != 1:
+            raise ValueError('restriction state schema')
+        holds, events = data.get('holds'), data.get('events')
+        if not isinstance(holds, dict) or not isinstance(events, dict):
+            raise ValueError('restriction state shape')
+        restored_holds, restored_events = {}, {}
+        for realm in ('cn', 'intl'):
+            until = holds.get(realm, 0)
+            if isinstance(until, bool) or not isinstance(until, (int, float)) or not math.isfinite(until) or until < 0:
+                raise ValueError('restriction expiry')
+            if until > now:
+                restored_holds[realm] = until
+            entries = events.get(realm, {})
+            if not isinstance(entries, dict) or len(entries) > 4096:
+                raise ValueError('restriction event bound')
+            kept = {}
+            for digest, at in entries.items():
+                if (not isinstance(digest, str) or not re.fullmatch(r'[0-9a-f]{64}', digest) or
+                        isinstance(at, bool) or not isinstance(at, (int, float)) or not math.isfinite(at)):
+                    raise ValueError('restriction event')
+                if 0 <= now - at <= RESTRICTION_WAVE_WINDOW:
+                    kept[digest] = at
+            restored_events[realm] = kept
+        for realm, until in restored_holds.items():
+            _RESTRICTION_HOLD[realm] = max(_RESTRICTION_HOLD.get(realm, 0), until)
+        for realm, entries in restored_events.items():
+            _RESTRICTION_EVENTS.setdefault(realm, {}).update(entries)
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError, TypeError, RecursionError, OverflowError):
+        _RESTRICTION_LOAD_ERROR = True
+
+
+def _save_restriction_state_locked(now):
+    """Atomic metadata only: hashed identities, event times and original expiries."""
+    global _RESTRICTION_WRITE_FAILURES, _RESTRICTION_LOAD_ERROR
+    path = _RESTRICTION_STATE_PATH
+    temporary = None
+    try:
+        if not path or os.path.islink(path):
+            raise ValueError('restriction state path')
+        data = {'schema': 1, 'holds': {}, 'events': {}}
+        for realm in ('cn', 'intl'):
+            until = _RESTRICTION_HOLD.get(realm, 0)
+            if until > now:
+                data['holds'][realm] = until
+            entries = {key: at for key, at in _RESTRICTION_EVENTS.get(realm, {}).items()
+                       if 0 <= now - at <= RESTRICTION_WAVE_WINDOW}
+            if len(entries) > 4096:
+                raise ValueError('restriction event bound')
+            data['events'][realm] = entries
+        raw = json.dumps(data, separators=(',', ':')).encode('utf8')
+        if len(raw) > 1024 * 1024:
+            raise ValueError('restriction state too large')
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        temporary = path + '.tmp-' + uuid.uuid4().hex
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, 'wb') as target:
+            target.write(raw)
+            target.flush()
+            os.fsync(target.fileno())
+        os.replace(temporary, path)
+        temporary = None
+        _RESTRICTION_LOAD_ERROR = False
+        return True
+    except (OSError, ValueError, TypeError):
+        _RESTRICTION_WRITE_FAILURES += 1
+        return False
+    finally:
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+
+
+def restriction_state_snapshot(now=None):
+    now = time.time() if now is None else now
+    with _RESTRICTION_LOCK:
+        _load_restriction_state_locked(now)
+        return {'scope': 'local_dispatch_pause', 'enabled': RESTRICTION_HOLD_SECONDS > 0,
+                'load_error': _RESTRICTION_LOAD_ERROR, 'write_failures': _RESTRICTION_WRITE_FAILURES,
+                'realms': {realm: {'remaining_seconds': max(0., _RESTRICTION_HOLD.get(realm, 0.) - now)
+                                  if RESTRICTION_HOLD_SECONDS > 0 else 0.}
+                           for realm in ('cn', 'intl')}}
 
 
 def reset_restriction_state():
     """清空连坐保护状态（测试，以及人工确认「已申诉、可以恢复派发」时用）。"""
+    global _RESTRICTION_STATE_PATH
     with _RESTRICTION_LOCK:
         _RESTRICTION_EVENTS.clear()
         _RESTRICTION_HOLD.clear()
+        _RESTRICTION_STATE_PATH = os.path.abspath(os.path.join(USAGE_DIR, 'restriction-state.json'))
+        persisted = _save_restriction_state_locked(time.time())
+    if not persisted:
+        log('restriction state reset could not be persisted', level='WARN', tag='retry')
 
 
 def restriction_hold_remaining(realm, now=None):
     """该区域整池暂停还剩多少秒（0 = 没有暂停）。"""
     now = time.time() if now is None else now
     with _RESTRICTION_LOCK:
+        _load_restriction_state_locked(now)
+        if RESTRICTION_HOLD_SECONDS <= 0:
+            return 0.0
         return max(0.0, _RESTRICTION_HOLD.get(realm, 0.0) - now)
 
 
@@ -15729,16 +15856,22 @@ def note_account_restriction(realm, uid="", now=None):
     """
     now = time.time() if now is None else now
     uid = str(uid or "").strip() or "-"
+    digest = hashlib.sha256(uid.encode('utf8')).hexdigest()
     with _RESTRICTION_LOCK:
+        _load_restriction_state_locked(now)
         events = {key: at for key, at in _RESTRICTION_EVENTS.get(realm, {}).items()
                   if now - at <= RESTRICTION_WAVE_WINDOW}
-        events[uid] = now
+        events[digest] = now
         _RESTRICTION_EVENTS[realm] = events
-        if len(events) < RESTRICTION_WAVE_MIN or RESTRICTION_HOLD_SECONDS <= 0:
-            return 0.0
-        until = max(_RESTRICTION_HOLD.get(realm, 0.0),
-                    now + RESTRICTION_HOLD_SECONDS)
-        _RESTRICTION_HOLD[realm] = until
+        until = 0.0
+        if len(events) >= RESTRICTION_WAVE_MIN and RESTRICTION_HOLD_SECONDS > 0:
+            until = max(_RESTRICTION_HOLD.get(realm, 0.0), now + RESTRICTION_HOLD_SECONDS)
+            _RESTRICTION_HOLD[realm] = until
+        persisted = _save_restriction_state_locked(now)
+    if not persisted:
+        log('restriction state persistence failed; in-memory pause remains active', level='WARN', tag='retry')
+    if not until:
+        return 0.0
     log("upstream restriction wave on %s: %d account(s) restricted within %.0fs; "
         "pausing dispatch for %.0fs to avoid cross-account bans (uid %s)"
         % (realm, len(events), RESTRICTION_WAVE_WINDOW,
@@ -15769,8 +15902,8 @@ def _persist_restriction(account):
 #: 识别风控限制 403 的正文特征。内容审核的 403 走降级提示词那条路，二者必须
 #: 分开：对被限制的账号换提示词没有意义。code 匹配用正则（requestId 是 hex，
 #: 裸字符串 "11140" 可能撞上），措辞只收实测的限制用语，不猜。
-_RESTRICTED_403_CODE_RE = re.compile(r'"code"\s*:\s*"?11140"?')
-_RESTRICTION_403_MARKERS = ("unusual activity", "账号存在异常行为", "已被限制")
+_RESTRICTED_403_CODE_RE = wb_accounts.RESTRICTED_403_CODE_RE
+_RESTRICTION_403_MARKERS = wb_accounts.RESTRICTION_403_MARKERS
 
 
 def restriction_is_account_level(detail):
@@ -15781,12 +15914,7 @@ def restriction_is_account_level(detail):
     异常行为，已被限制使用"}}。en 在前 zh 在后，短截断也保得住 code 与 en；
     拿不全的正文宁可漏判回内容审核路径，也不误判。
     """
-    if not detail:
-        return False
-    if _RESTRICTED_403_CODE_RE.search(detail):
-        return True
-    lowered = detail.lower()
-    return any(marker in lowered for marker in _RESTRICTION_403_MARKERS)
+    return wb_accounts.is_account_restriction(detail)
 
 
 def _unescape_body(detail):
@@ -23960,6 +24088,7 @@ class Handler(BaseHTTPRequestHandler):
             "accounts": account_views(),
         })
 
+    @_track_entry('responses')
     def _handle_responses(self, payload):
         candidate_error = _single_candidate_error(payload)
         if candidate_error:
@@ -24001,6 +24130,7 @@ class Handler(BaseHTTPRequestHandler):
         }
         model = payload.get("model") or "deepseek-v4.1-flash"
         want_stream = bool(payload.get("stream"))
+        _observe_entry_metadata(model, want_stream, session_key)
         t_start = time.time()
         fp = prompt_fingerprint(chat_req.get("messages"))
         log(
@@ -24067,7 +24197,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(exc.code, f"upstream {exc.code}: {detail}")
         except Exception as exc:
             message = str(exc)
-            record_error(model, 502, message,
+            status = 503 if message.startswith('no usable account') else 502
+            record_error(model, status, message,
                          elapsed_ms=int((time.time() - t_start) * 1000),
                          account=getattr(exc, "account_uid", None),
                          key=self._key_id())
@@ -24405,6 +24536,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._anthropic_error(400, str(exc), "invalid_request_error")
         return self._json(200, {"input_tokens": _anthropic_estimate_chat_tokens(chat)})
 
+    @_track_entry('messages')
     def _handle_messages(self, payload):
         candidate_error = _single_candidate_error(payload)
         if candidate_error:
@@ -24417,6 +24549,7 @@ class Handler(BaseHTTPRequestHandler):
         model = chat_req.get("model") or "unknown"
         want_stream = bool(chat_req.get("stream"))
         session_key = extract_session_key(self.headers, chat_req)
+        _observe_entry_metadata(model, want_stream, session_key)
         t_start = time.time()
         fp = prompt_fingerprint(chat_req.get("messages"))
         try:
@@ -24491,7 +24624,7 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             message = str(exc)
             low = message.lower()
-            status = 503 if ("no account" in low or "no enabled account" in low) else 502
+            status = 503 if ("no usable account" in low or "no account" in low or "no enabled account" in low) else 502
             record_error(model, status, message,
                          elapsed_ms=int((time.time() - t_start) * 1000),
                          account=getattr(exc, "account_uid", None),
@@ -24831,6 +24964,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 
+    @_track_entry('auto')
     def _dispatch_chat_post(self, path, payload):
         # 先挡背景请求：Codex 自己发的（记忆整理／环境建议／自动复核）
         # 不算「使用者实际使用」，一律本地拒绝，不碰上游。
@@ -24870,6 +25004,7 @@ class Handler(BaseHTTPRequestHandler):
         fp = prompt_fingerprint(forwarded.get("messages"))
         want_stream = bool(payload.get("stream"))
         model = payload.get("model") or "hy4-preview"
+        _observe_entry_metadata(model, want_stream, session_key)
         t_start = time.time()
         try:
             explicit_realm = self._request_realm()
@@ -24929,7 +25064,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(exc.code, f"upstream {exc.code}: {detail}")
         except Exception as exc:
             message = str(exc)
-            record_error(model, 502, message, elapsed_ms=int((time.time() - t_start) * 1000),
+            status = 503 if message.startswith('no usable account') else 502
+            record_error(model, status, message, elapsed_ms=int((time.time() - t_start) * 1000),
                          account=getattr(exc, "account_uid", None),
                          key=self._key_id())
             if message.startswith("no usable account"):

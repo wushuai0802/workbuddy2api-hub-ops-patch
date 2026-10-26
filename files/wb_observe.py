@@ -1,4 +1,4 @@
-"""Bounded, privacy-safe response observations; never changes model behavior.
+"""Bounded, privacy-safe model-request observations; never changes model behavior.
 
 Tool histories are analyzed within the current request only. No client session,
 account, prompt, reasoning or tool text is persisted or shared across requests.
@@ -36,7 +36,10 @@ REASONS = SIGNALS | frozenset(('none', 'upstream_stream_error', 'first_frame_pro
                              'upstream_truncated', 'reasoning_only_turn', 'empty_output_turn',
                              'continuation_timeout', 'continuation_request_failed',
                              'continuation_probe_failed', 'upstream_content_rejected',
-                             'upstream_rate_limited', 'client_disconnect', 'other'))
+                             'upstream_rate_limited', 'upstream_account_restricted', 'upstream_restriction_pause',
+                             'upstream_authentication_error', 'upstream_forbidden', 'upstream_invalid_request',
+                             'upstream_connection_timeout', 'no_account_available', 'payload_too_large',
+                             'client_disconnect', 'entry_error', 'other'))
 KINDS = frozenset(('text', 'tool', 'refusal', 'reasoning', 'empty', 'unknown'))
 
 
@@ -57,8 +60,9 @@ def _safe_name(value):
     return value if re.fullmatch(r'[a-zA-Z0-9_./:-]{1,96}', value) else 'unknown'
 
 
-def reason_code(value):
+def reason_code(value, status=None):
     # Arbitrary exception strings never enter observation files.
+    status = status if type(status) is int else None
     value = str(value or '')
     if value in REASONS:
         return value
@@ -67,7 +71,17 @@ def reason_code(value):
     for code in REASONS:
         if value.startswith(code+':'):
             return code
-    return 'other'
+    low = value.lower()
+    if low.startswith('upstream account restriction in effect') or ('11140' in low and ('dispatch paused' in low or '暂停派发' in low)):
+        return 'upstream_restriction_pause'
+    if status in (403, 429) and re.search(r'(?:"code"\s*:\s*"?11140\b|\bcode\s*[=:]?\s*11140\b)', low):
+        return 'upstream_account_restricted'
+    if low.startswith(('no usable account', 'no account', 'no enabled account')):
+        return 'no_account_available'
+    if 'connection deadline exceeded' in low:
+        return 'upstream_connection_timeout'
+    return {401:'upstream_authentication_error',403:'upstream_forbidden',400:'upstream_invalid_request',
+            413:'payload_too_large',429:'upstream_rate_limited'}.get(status, 'other')
 
 
 def usage_fields(usage):
@@ -184,6 +198,7 @@ def clean_record(row):
               'patch_id': _safe_name(row.get('patch_id')), 'model': _safe_name(row.get('model')),
               'fingerprint': row.get('fingerprint') if re.fullmatch(r'[0-9a-f]{64}', str(row.get('fingerprint', ''))) else None,
               'protocol': row.get('protocol') if row.get('protocol') in ('chat', 'responses', 'messages') else 'unknown',
+              'stage': row.get('stage') if row.get('stage') in ('entry', 'response') else 'response',
               'stream': bool(row.get('stream')), 'session_present': bool(row.get('session_present')),
               'outcome': row.get('outcome') if row.get('outcome') in OUTCOMES else 'unknown',
               'reason': reason_code(row.get('reason')),
@@ -192,6 +207,8 @@ def clean_record(row):
               'usage': usage_fields(row.get('usage')),
               'signals': {k: int(_number(v)) for k, v in (row.get('signals') or {}).items() if k in SIGNALS}
                          if isinstance(row.get('signals'), dict) else {}}
+    if type(row.get('http_status')) is int and 100 <= row['http_status'] <= 599:
+        result['http_status'] = row['http_status']
     for field in ('attempt', 'attempts', 'attempts_overflow', 'failed_attempts', 'recovery_with_output',
                   'paired_rounds', 'repeated_results', 'distinct_arguments'):
         if field in row:
@@ -282,9 +299,9 @@ class ObservationStore:
                     (until is None or r['at'] <= until) and (not model or r['model'] == model)]
         groups = {}
         for row in selected:
-            key = (row['patch_id'], row['fingerprint'], row['model'], row['protocol'], row['phase'])
+            key = (row['patch_id'], row['fingerprint'], row['model'], row['protocol'], row['phase'], row['stage'])
             if key not in groups and len(groups) >= 64:
-                key = ('other', None, 'other', 'unknown', row['phase'])
+                key = ('other', None, 'other', 'unknown', row['phase'], row['stage'])
             group = groups.setdefault(key, {'rows': 0, 'outcomes': Counter(), 'reasons': Counter(),
                                            'final_kinds': Counter(), 'usage_sources': Counter(),
                                            'signals': Counter(), 'usage': Counter(), 'recovery_with_output': 0})
@@ -296,7 +313,7 @@ class ObservationStore:
             group['signals'].update(row['signals'])
             group['usage'].update(row['usage'])
             group['recovery_with_output'] += row.get('recovery_with_output', 0)
-        return {'schema': 1, 'scope': 'response_adapters', 'business_completion': 'unmeasured',
+        return {'schema': 1, 'scope': 'model_requests', 'coverage': ['response_adapters', 'entry_errors'], 'business_completion': 'unmeasured',
                 'write_enabled': enabled(), 'write_failures_this_process': self.write_failures,
                 'read_errors': read_errors, 'invalid_rows': invalid_rows,
                 'since': since, 'until': until, 'model': _safe_name(model) if model else None,
@@ -304,16 +321,16 @@ class ObservationStore:
                 'retained_rows_scanned': len(rows), 'truncated': truncated,
                 'retained_since': min((r['at'] for r in rows), default=None),
                 'retained_until': max((r['at'] for r in rows), default=None),
-                'groups': [dict(patch_id=k[0], fingerprint=k[1], model=k[2], protocol=k[3], phase=k[4], **v)
+            'groups': [dict(patch_id=k[0], fingerprint=k[1], model=k[2], protocol=k[3], phase=k[4], stage=k[5], **v)
                            for k, v in groups.items()], 'recent': selected[-64:]}
 
 
 class RequestObservation:
-    """At most 32 attempt records per adapter request, emitted once at exit."""
-    def __init__(self, model, protocol, stream, patch_id, fingerprint, session_present=False):
+    """At most 32 attempt records per model request, emitted once at exit."""
+    def __init__(self, model, protocol, stream, patch_id, fingerprint, session_present=False, stage='response'):
         self.base = {'schema': 1, 'request_id': uuid.uuid4().hex, 'started': time.time(),
                      'model': model, 'protocol': protocol, 'stream': stream,
-                     'patch_id': patch_id, 'fingerprint': fingerprint, 'session_present': session_present}
+                     'patch_id': patch_id, 'fingerprint': fingerprint, 'session_present': session_present, 'stage': stage}
         self.attempts, self.overflow, self.signals = [], 0, Counter()
         self.current = None
         self.last_outcome, self.last_reason = 'unknown', 'none'
@@ -321,6 +338,8 @@ class RequestObservation:
         self.progress = {}
 
     def begin(self, holder):
+        if holder.get('model') is not None:
+            self.base['stage'] = 'response'
         self.base['session_present'] = self.base['session_present'] or bool(holder.get('session_key'))
         if self.current is not None and not self.current.get('settled'):
             self.current.update(outcome='failed', reason='upstream_stream_error')
@@ -370,7 +389,7 @@ class RequestObservation:
             self.progress = {k: int(_number(metrics.get(k))) for k in
                              ('paired_rounds', 'repeated_results', 'distinct_arguments')}
 
-    def finish_attempt(self, outcome, usage=None, reason='none'):
+    def finish_attempt(self, outcome, usage=None, reason='none', status=None):
         if self.current is None:
             self.begin({})
         if self.current['usage_source'] != 'provider' and isinstance(usage, dict):
@@ -378,7 +397,9 @@ class RequestObservation:
         if reason == 'none' and outcome in ('failed', 'upstream_aborted') and self.current['guard_details']:
             reason = self.current['guard_details'][-1]['kind']
         self.current.update(outcome=outcome if outcome in OUTCOMES else 'unknown',
-                            reason=reason_code(reason), settled=True)
+                            reason=reason_code(reason, status=status), settled=True)
+        if type(status) is int and 100 <= status <= 599:
+            self.current['http_status'] = status
         self.last_outcome, self.last_reason = self.current['outcome'], self.current['reason']
 
     def records(self):
@@ -396,6 +417,7 @@ class RequestObservation:
             usage.update(usage_fields(row['usage']))
         request = dict(self.base, phase='request', at=now, outcome=outcome, reason='client_disconnect' if self.client_aborted else self.last_reason,
                        final_kind=last.get('final_kind', 'unknown'), signals=self.signals,
+                       http_status=last.get('http_status'),
                        attempts=len(self.attempts)+self.overflow, attempts_overflow=self.overflow,
                        failed_attempts=sum(r['outcome'] in ('failed', 'upstream_aborted') for r in self.attempts),
                        recovery_with_output=int(recovered), usage=usage, usage_source=source,
@@ -403,11 +425,49 @@ class RequestObservation:
         return self.attempts+[request]
 
 
+def tracked_entry(protocol, store_factory, identity):
+    """Include errors before a response adapter without recording validation-only exits."""
+    def decorate(function):
+        @functools.wraps(function)
+        def wrapped(handler, *args, **kwargs):
+            payload = kwargs.get('payload', args[-1] if args else None)
+            if not enabled() or CURRENT.get() is not None or not isinstance(payload, dict):
+                return function(handler, *args, **kwargs)
+            kind = protocol
+            if kind == 'auto':
+                path = kwargs.get('path', args[0] if args else '')
+                kind = 'responses' if path in ('/v1/responses','/responses','/v1/responses/compact','/responses/compact') else 'chat'
+            patch_id, fingerprint = identity()
+            observation = RequestObservation(payload.get('model') or 'unknown', kind, bool(payload.get('stream')),
+                                             patch_id, fingerprint, stage='entry')
+            token = CURRENT.set(observation)
+            try:
+                return function(handler, *args, **kwargs)
+            except BaseException as exc:
+                if isinstance(exc, (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)):
+                    observation.client_aborted = True
+                if observation.current is None or not observation.current.get('settled'):
+                    observation.finish_attempt('upstream_aborted', reason=(
+                        'entry_error' if observation.base['stage'] == 'entry' else 'upstream_stream_error'))
+                raise
+            finally:
+                CURRENT.reset(token)
+                if observation.attempts:
+                    store_factory().append(observation.records())
+        return wrapped
+    return decorate
+
+
 def tracked_response(protocol, stream, store_factory, identity):
     def decorate(function):
         @functools.wraps(function)
         def wrapped(handler, upstream, model, *args, **kwargs):
-            if not enabled() or CURRENT.get() is not None:
+            if not enabled():
+                return function(handler, upstream, model, *args, **kwargs)
+            current = CURRENT.get()
+            if current is not None:
+                current.base.update(model=model, protocol=protocol, stream=stream, stage='response',
+                                    session_present=current.base['session_present'] or bool(kwargs.get('session_key')))
                 return function(handler, upstream, model, *args, **kwargs)
             patch_id, fingerprint = identity()
             observation = RequestObservation(model, protocol, stream, patch_id, fingerprint,
