@@ -968,6 +968,36 @@ def _persist_usage(row, fail_label):
     except Exception as exc:
         log("%s: %s" % (fail_label, exc))
 
+def _record_open_error(exc, model, status, message, **kwargs):
+    """Attribute an entry failure to the attempted model without duplicate rows."""
+    kwargs.setdefault('account', getattr(exc, 'account_uid', None))
+    return _record_billed_error({'billed_model': getattr(exc, '_wb_billed_model', None)},
+                               model, status, message, **kwargs)
+
+
+def upstream_failure_response(handler, model, exc, t_start, key_id=None):
+    """一次上游失败的统一出口：先定状态码，再落盘，最后回客户端。
+
+    池空（no usable account）是 **503**——等上游配额恢复，或者去面板加号；
+    其余是 **502**——查上游链路。顺序不能反：先记 502 再把响应改成 503，会
+    让日志与 `usage/usage.jsonl` 把"该等"记成"该查"，按状态码统计 5xx 时
+    两者混在一起（issue #666）。
+
+    两条链路（`/v1/responses`、`/v1/chat/completions`）原本各写一遍同样的
+    判断；收到这里后，状态码只有一个决定点，用量行与客户端看到的是同一个。
+    """
+    message = str(exc)
+    status = 503 if message.startswith("no usable account") else 502
+    _record_open_error(exc, model, status, message,
+                 elapsed_ms=int((time.time() - t_start) * 1000),
+                 account=getattr(exc, "account_uid", None),
+                 key=key_id)
+    if status == 503:
+        return handler._error(503, message +
+                              " - add or enable one at the dashboard (/)")
+    return handler._error(502, "upstream unreachable: %s" % exc)
+
+
 def record_error(model, status, message, elapsed_ms=None, account=None,
                  usage=None, stream=None, ttft_ms=None, gen_ms=None, fp=None,
                  outcome="failed", key=None, effort=None, requested_model=None):
@@ -2027,6 +2057,23 @@ def apply_daily_credit_limit(refresh=False):
         credits = stats["credits"] if stats is not None else None
         free_models = free_models_by_realm()
     return POOL.apply_daily_credit_limit(limits, credits, free_models)
+
+
+def apply_reserve_credits(refresh=False):
+    """Publish the reserve and, only when it is on, the realm free ids.
+
+    This reuses the existing 60-second local catalogue cache; it never folds
+    usage logs or adds network work. The settings-save path passes refresh=True
+    so switching the guard off also clears the in-memory threshold.
+    """
+    if POOL is None:
+        return 0
+    values = wb_settings.limit_values(ACCOUNTS_DIR, "reserve_credits")
+    on = any(value > 0 for value in values.values())
+    if not on and not refresh:
+        return values
+    return POOL.apply_reserve_credits(
+        values, free_models_by_realm() if on else None)
 
 
 def apply_model_daily_token_limit(refresh=False):
@@ -10270,7 +10317,7 @@ def runtime_settings_view():
         "accounts_dir": ACCOUNTS_DIR,
         "usage_dir": USAGE_DIR,
         "settings_file": wb_settings.settings_path(ACCOUNTS_DIR),
-        "version": "1.8.0",
+        "version": "1.9.0",
     }
 def current_account():
     """Account used for display purposes (health / usage summaries)."""
@@ -11728,7 +11775,7 @@ def _patch_payload_fingerprint():
     return hashlib.sha256(''.join(records).encode('ascii')).hexdigest()
 
 _OPS_PATCH_FINGERPRINT = _patch_payload_fingerprint()
-_OPS_PATCH_ID = "v1.8.0-ops.20261026.1"
+_OPS_PATCH_ID = "v1.9.0-ops.20261029.1"
 _OBSERVATION_STORE = None
 _OBSERVATION_STORE_LOCK = threading.Lock()
 
@@ -13113,6 +13160,18 @@ SANITIZE_DSH_GUI_RE = re.compile(
     r" whose URL the runtime context names\.")
 SANITIZE_DSH_GUI_REPLACEMENT = r"\1 whose URL is named in the runtime context."
 SANITIZE_DSH_GUI_LOWER = "whose url the runtime context names"
+# 文件引用段（#683）：官方插件 @deepseek-ai/dsh-file-reference 注入的
+# FILE_REFERENCE_PROMPT 整段命中同一套「A 句 + B 句连续出现」判据，
+# 回 400 / code 11-128。实测（2026-10-28，CN 号池）：整段 5 句连排稳定 400，
+# 只发前两句 200 —— 匹配的是整段，不是单词。
+#
+# 修法只动 A 句一个词：`paths the user` -> `paths that the user`，语义不变，
+# 整段不再连续；负向前瞻 (?!that ) 保证幂等。作用域与 GUI 段一致：
+# system / developer / assistant，user / tool 里的同句属用户数据不改写（#537）。
+SANITIZE_DSH_FILEREF_RE = re.compile(
+    r"(?i)(Tokens prefixed with @ are paths )(?!that )(the user explicitly referenced\.)")
+SANITIZE_DSH_FILEREF_REPLACEMENT = r"\1that \2"
+SANITIZE_DSH_FILEREF_LOWER = "are paths the user explicitly referenced"
 # 品牌词缩减（#574）：`DeepSeek Harness` 单独出现放行，但它和 GUI 描述句
 # （`this page` / `this GUI` / `this app`）连续出现时命中同一套 11-128 校验。
 # 逐段二分实测：只把品牌缩成 `DeepSeek` 就能通过，句子其余部分不用动；
@@ -13170,6 +13229,10 @@ def has_fingerprint(text, identity=True):
     if (SANITIZE_DSH_GUI_LOWER in low
             and SANITIZE_DSH_GUI_RE.search(text) is not None):
         return True
+    # 文件引用段：同一条廉价前置探测，命中才走正则。
+    if (SANITIZE_DSH_FILEREF_LOWER in low
+            and SANITIZE_DSH_FILEREF_RE.search(text) is not None):
+        return True
     # 动词短语只是廉价前置筛：真命中与否交给正则判定。这样 "powered by" 出现在
     # 与自我介绍无关的句子（工具/插件的产品描述）时不会走进 sanitize_text 的其余
     # 清洗步骤，也不会白白改写。
@@ -13190,6 +13253,8 @@ def sanitize_text(text, identity=True):
         text = SANITIZE_IDENTITY_RE.sub(SANITIZE_IDENTITY_REPLACEMENT, text)
         # GUI 描述段单独一条规则：锚定整句，只调整句尾语序。
         text = SANITIZE_DSH_GUI_RE.sub(SANITIZE_DSH_GUI_REPLACEMENT, text)
+        # 文件引用段：只补一个词，打断整段连续匹配。
+        text = SANITIZE_DSH_FILEREF_RE.sub(SANITIZE_DSH_FILEREF_REPLACEMENT, text)
         # 品牌词缩减放在最后：GUI 规则还认全名，先让它匹配原文。
         text = SANITIZE_BRAND_RE.sub(SANITIZE_BRAND_REPLACEMENT, text)
     for old, new in SANITIZE_REWRITES:
@@ -15513,6 +15578,36 @@ def read_http_error(exc, limit=600):
         return b""
 
 
+def _read_auth_error_message(exc, deadline_at, timeout):
+    """Retain bounded 401 evidence while its owned stream still has a budget."""
+    end = time.monotonic() + timeout
+    if deadline_at is not None:
+        end = min(end, deadline_at)
+    remaining = end - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError('upstream connection deadline exceeded')
+    expired = threading.Event()
+    timer = threading.Timer(remaining, _interrupt_probe_deadline, args=(exc, expired))
+    timer.daemon = True
+    timer.start()
+    try:
+        try:
+            raw = exc.read(4097)
+        except Exception:
+            raw = b''
+        if expired.is_set() or time.monotonic() >= end:
+            raise TimeoutError('upstream connection deadline exceeded')
+        # Unknown/oversized bodies cannot prove credential expiry. A genuine
+        # challenge remains independently authoritative through the header.
+        detail = raw.decode('utf8', 'replace') if raw and len(raw) <= 4096 else '<html>unverified error body</html>'
+        exc.wb_body = raw[:4096]
+        return wb_accounts.http_error_message(exc, detail)
+    finally:
+        timer.cancel()
+        timer.join()
+        exc.close()
+
+
 def model_scoped_errors_penalize_account():
     """Escape hatch: restore the old "any 5xx charges the account" behaviour."""
     raw = os.environ.get("WB_MODEL_SCOPED_ERRORS_PENALIZE", "")
@@ -16025,12 +16120,16 @@ def _apply_stream_idle_timeout(response, seconds):
         return False
 
 
-def schedule_window_probe(account, model, reset_at):
+def schedule_window_probe(account, model, reset_at, cap=False, cap_at=0.0):
     """把上游给出的重置时刻登记给窗口探针（wb_window_probe）。
 
     上游的额度窗口按首次请求起算，到点无人请求就不会开始新一轮，所以这个
     时刻要在后台被主动用掉，而不是只当作一段冷却。登记本身不能影响请求
     路径：任何异常都只写日志，本次 429 照常换号重试。
+
+    `cap` 说明这条窗口是上游 6004 判定额度用满；连同撞线时刻一起落盘，
+    于是**任何模型**（不只免费模型）重启后仍然知道"这是配额用尽、撞线于
+    何时"，面板不会把它误写成一次临时限流（issue #668）。
     """
     if not reset_at or account is None or not model:
         return False
@@ -16040,7 +16139,8 @@ def schedule_window_probe(account, model, reset_at):
     accounts_dir = getattr(POOL, "dir", "") or ACCOUNTS_DIR
     try:
         import wb_window_probe
-        return wb_window_probe.schedule(accounts_dir, account.uid, model, reset_at)
+        return wb_window_probe.schedule(accounts_dir, account.uid, model, reset_at,
+                                         cap=cap, cap_at=cap_at)
     except Exception as exc:
         log("window probe schedule failed: %s" % exc)
         return False
@@ -16073,6 +16173,7 @@ def open_upstream(payload, session_key=None, target_realm=None,
     # share the same fold, and calling them separately paid for it three
     # times on every request.
     apply_daily_guards()
+    apply_reserve_credits()
     # 剩余用量优先调度（开关默认关）：把「估计剩余接近耗尽」的 (账号, 模型)
     # 权重推给池，让它们先接单。只在开关打开时读剩余估算（载荷有短 TTL，热路径
     # 上是缓存命中）；关着时推空表，把上一次可能留下的权重清掉，下一个请求就
@@ -16438,7 +16539,14 @@ def open_upstream(payload, session_key=None, target_realm=None,
                                        cooldown=wait, detail=detail)
                     # 除了记冷却，还要把重置时刻交给后台探针：到点主动发一个最小
                     # 请求，把新一轮窗口的计时起点钉在那一刻（窗口按首次请求起算）。
-                    schedule_window_probe(account, model, reset_at)
+                    # Persist 6004 exhaustion for every model, including paid CN models.
+                    # Credential model_caps retain their native free-model scope.
+                    is_cap = rate_limit_is_cap(detail)
+                    cap_at = time.time() if is_cap else 0.0
+                    if is_cap:
+                        account.model_cap_marks[model] = cap_at
+                    schedule_window_probe(account, model, reset_at, cap=is_cap,
+                                          cap_at=cap_at)
                     if reset_at:
                         # A cap with a reset clock is the one observable moment the
                         # window budget can be measured from; the usage rows alone
@@ -16539,8 +16647,10 @@ def open_upstream(payload, session_key=None, target_realm=None,
                     last_error = exc
                     continue
                 if exc.code == 401:
+                    auth_message = _read_auth_error_message(exc, deadline_at, header_timeout)
                     refresh = getattr(account, "refresh_after_401", None)
-                    if account.uid not in auth_refreshed and _attempt + 1 < max_attempts:
+                    if (not getattr(account, 'is_api_key', False)
+                            and account.uid not in auth_refreshed and _attempt + 1 < max_attempts):
                         auth_refreshed.add(account.uid)
                         exc.close()
                         retry_bump("auth_refresh_attempt")
@@ -16570,7 +16680,7 @@ def open_upstream(payload, session_key=None, target_realm=None,
                     log("account %s rejected (HTTP 401), rotating" % account.uid[:8])
                     if session_key and POOL:
                         POOL.affinity.demote(session_key, account.uid)
-                    account.note_error("HTTP 401", cooldown=60, single_account=(total <= 1))
+                    account.note_error(auth_message, cooldown=60, single_account=(total <= 1))
                     last_error = exc
                     continue
                 if exc.code == 400:
@@ -16704,11 +16814,15 @@ def open_upstream(payload, session_key=None, target_realm=None,
         paid_payload["model"] = paid_model
         log("free model '%s' exhausted on all %d %s account(s); retrying paid model '%s'"
             % (model, len(eligible), realm, paid_model))
-        response, account, effort = open_upstream(
-            paid_payload, session_key=session_key, target_realm=realm,
-            exclude_uids=exclude_uids, deadline_at=deadline_at,
-            allow_credit_fallback=False, allow_product_switch=False,
-            **({'allowed_accounts': allowed_accounts} if allowed_accounts is not None else {}))
+        try:
+            response, account, effort = open_upstream(
+                paid_payload, session_key=session_key, target_realm=realm,
+                exclude_uids=exclude_uids, deadline_at=deadline_at,
+                allow_credit_fallback=False, allow_product_switch=False,
+                **({'allowed_accounts': allowed_accounts} if allowed_accounts is not None else {}))
+        except Exception as exc:
+            exc._wb_billed_model = paid_model
+            raise
         try:
             response._wb_billed_model = paid_model
         except Exception:
@@ -16745,7 +16859,12 @@ def open_upstream(payload, session_key=None, target_realm=None,
         raise last_error
     throttled, wait = realm_model_throttled(realm, model)
     if throttled:
-        raise RateLimited(None, "usage exceeds frequency limit", wait=wait)
+        # 说清在等什么、等多久：客户端看到 "usage exceeds frequency limit"
+        # 时不知道是哪个模型、还有多久能好，于是照旧立刻重试（issue #665）。
+        reason = ("every usable account in realm '%s' is cooling the upstream %s "
+                  "window; the pool resumes in %ds" % (realm, model, wait))
+        raise RateLimited(None, "usage exceeds frequency limit", wait=wait,
+                          message=reason)
     enabled = [a for a in POOL.accounts
                if a.realm == realm and a.enabled and a.access_token] if POOL else []
     if enabled and all(a.daily_limit_blocked() for a in enabled):
@@ -16776,9 +16895,29 @@ def open_upstream(payload, session_key=None, target_realm=None,
                   "request(s) (account_max_concurrent=%d); retry shortly or "
                   "raise the cap" % (limit, limit))
         raise RateLimited(None, reason, wait=1, message=reason)
-    raise RuntimeError("no usable account for realm '%s': all are disabled, cooling down, "
-                       "expired or parked by the daily token limit%s"
-                       % (realm, pool_unavailable_detail(realm, model)))
+    candidates = [a for a in enabled
+                  if allowed_accounts is None or a.uid in allowed_accounts]
+    if (model and candidates
+            and all(a.blocked_by_model_cooldown(model) for a in candidates)):
+        # 全部候选都只差"这个模型的上游窗口恢复"：这是**等待**，不是故障。
+        # 503 + "去面板加号" 解决不了上游配额，只会让客户端立刻重试（真机
+        # 实测 24ms 一轮、3 分钟 12 次）；429 + Retry-After 才会让客户端等到
+        # 恢复时刻（issue #665）。
+        until = min(a.model_cooldown_until(model) for a in candidates)
+        wait = max(1, int(until - time.time()))
+        reason = ("every candidate account is waiting for the upstream %s window "
+                  "to reset (%d account(s), earliest reset in %ds); the pool is "
+                  "idle, not broken - retry after the reset"
+                  % (model, len(candidates), wait))
+        raise RateLimited(None, detail=reason, wait=wait, message=reason)
+    scope = ""
+    if allowed_accounts:
+        scope = ("; this API key may use %d account(s)" % len(allowed_accounts))
+    raise RuntimeError("no usable account for realm '%s': every candidate is "
+                       "disabled, cooling down, expired, out of upstream quota "
+                       "or parked by a local limit%s%s"
+                       % (realm, scope,
+                          pool_unavailable_detail(realm, model, allowed_accounts)))
 
 
 # ---- 跨出口回退：国际版 → 国内版（开关默认关）--------------------------------
@@ -16885,7 +17024,7 @@ def open_upstream_with_fallback(payload, session_key=None, target_realm=None,
     return open_upstream(payload, session_key=session_key,
                          target_realm=backup, **kwargs)
 
-def pool_unavailable_detail(realm, model=None):
+def pool_unavailable_detail(realm, model=None, allowed_accounts=None):
     """把该区域每个账号不可用的原因拼成一句，附在「没有可用账号」后面。
 
     这句话以前只列了四种可能（停用 / 冷却 / 过期 / 日限额），而 v1.6.16 之后
@@ -16895,11 +17034,20 @@ def pool_unavailable_detail(realm, model=None):
     排查的人只能对着「明明有 9 个账号」的池子猜。
 
     这里不改变判定，只把判定结果说出来：每个不可用账号「八位 UID + 原因」。
+
+    `allowed_accounts` 给定时只列**真正参与本次派发**的账号：API Key 可以
+    绑定账号，绑定之外的号再健康也轮不到。把它们列进来只会把排查的人引去
+    看整个区域——真机上就是这样：Key 绑的 2 个号在冷却，报错却列了全区 4 个
+    在冷却的号，而 2 个健康的号（没绑这个 Key）一个字都没提（issue #665）。
     """
     if POOL is None:
         return ""
     accounts = [a for a in POOL.accounts if a.realm == realm]
+    if allowed_accounts is not None:
+        accounts = [a for a in accounts if a.uid in allowed_accounts]
     if not accounts:
+        if allowed_accounts is not None:
+            return "；本 Key 绑定的账号都不在 %s 区" % realm
         return "；该区域没有任何账号"
     reasons = []
     for account in accounts:
@@ -16912,6 +17060,70 @@ def pool_unavailable_detail(realm, model=None):
     if not reasons:
         return ""
     return "；各账号：%s" % "，".join(reasons)
+
+
+def pool_readiness(pool=None, realm=None):
+    """账号池的可用口径：总数、按区域、按模型。
+
+    `/health` 以前只报两个数：全池的账号数与全池的"可用"数。它们既不按区域
+    分，也不看模型级冷却——被上游按 (账号, 模型) 限额挡住的号仍算"可用"。
+    于是池子对某个模型已经空了，探针与面板还是一片绿（issue #667）。
+
+    旧的 `accounts` / `accounts_ready` 保持原义（老脚本不受影响），这里补上
+    三种口径：按区域、按模型、当前出口的可用数。模型清单取自账号自己知道的
+    那些（免费模型名单、已撞线的模型、正在冷却的模型），不额外去打上游。
+    """
+    pool = POOL if pool is None else pool
+    out = {"accounts": 0, "accounts_ready": 0, "accounts_by_realm": {},
+           "accounts_ready_by_realm": {}, "accounts_ready_current_realm": 0,
+           "models_ready": {}}
+    if pool is None:
+        return out
+    accounts = list(pool.accounts)
+    realms = []
+    for a in accounts:
+        r = getattr(a, "realm", "") or ""
+        if r not in realms:
+            realms.append(r)
+    out["accounts"] = len(accounts)
+    out["accounts_ready"] = pool.count_ready()
+    for r in realms:
+        out["accounts_by_realm"][r] = len(
+            [a for a in accounts if (getattr(a, "realm", "") or "") == r])
+        out["accounts_ready_by_realm"][r] = pool.count_ready(realm=r)
+    out["accounts_ready_current_realm"] = pool.count_ready(
+        realm=realm or CURRENT_REALM)
+    models = set()
+    for a in accounts:
+        models.update(getattr(a, "free_models", ()) or ())
+        models.update(list((getattr(a, "model_caps", {}) or {}).keys()))
+        models.update(list((getattr(a, "model_cooldowns", {}) or {}).keys()))
+    for m in sorted(models)[:50]:
+        out["models_ready"][m] = {
+            r: pool.count_ready(realm=r, model=m, refresh=False) for r in realms}
+    return out
+
+
+def key_readiness(entry, pool=None):
+    """这个 API Key 真正能用到几个号（绑定 × 区域 × 当前状态）。
+
+    `/health` 报的是全池的数：池子里有号、服务在跑，但这个 Key 绑定的号可能
+    全在冷却里——"服务正常但我的 Key 用不了"就是这么发生的（issue #667）。
+    """
+    pool = POOL if pool is None else pool
+    out = {"key_accounts_ready": 0, "key_accounts_bound": 0}
+    if pool is None or not entry:
+        return out
+    allowed = wb_settings.key_allowed_accounts(entry)
+    realm = (entry or {}).get("realm") or CURRENT_REALM
+    out["key_accounts_ready"] = pool.count_ready(
+        realm=realm, allowed=allowed, refresh=False)
+    if allowed is not None:
+        out["key_accounts_bound"] = len(allowed)
+    else:
+        out["key_accounts_bound"] = len(
+            [a for a in pool.accounts if (getattr(a, "realm", "") or "") == realm])
+    return out
 
 #: 「测试」默认用哪条模型：最便宜、任何区域都有的那条。
 TEST_MODEL_DEFAULT = "deepseek-v4.1-flash"
@@ -17035,7 +17247,12 @@ def probe_account(account, model=None, timeout=30):
         # The label keeps its 80-char cut; `detail` rides along untouched so the
         # panel can show the whole upstream body on hover.
         row["status"] = exc.code
-        row["error"] = "HTTP %d: %s" % (exc.code, detail[:150])
+        # Keep the 401's WWW-Authenticate in the label: APISIX says
+        # error="invalid_token" there and serves an HTML body, so a body-only
+        # label reads like a proxy page and leaves the account parked in the
+        # pool while every dispatch bounces (#435's exemption is not meant to
+        # cover a gateway that names the credential as bad).
+        row["error"] = wb_accounts.http_error_message(exc, detail, 150)
         if exc.code == 403 and restriction_is_account_level(detail):
             # 测试也认账号级风控限制：不能用 60 秒的普通冷却把 2 小时覆盖掉，
             # 更不能用「测试通过」的语义把被限制的账号放回池子（见 #422）。
@@ -17046,7 +17263,7 @@ def probe_account(account, model=None, timeout=30):
             row["restricted"] = True
             row["fails"] = int(account.fails)
             return row
-        account.note_error("HTTP %d: %s" % (exc.code, detail[:80]),
+        account.note_error(wb_accounts.http_error_message(exc, detail, 80),
                            cooldown=60, detail=detail)
         row["fails"] = int(account.fails)
         return row
@@ -20644,7 +20861,7 @@ class Handler(BaseHTTPRequestHandler):
             super().finish()
         except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
             pass
-    server_version = "wb-proxy/1.8.0"
+    server_version = "wb-proxy/1.9.0"
     def log_message(self, fmt, *args):
         # 静默过滤前端看板高频定时心跳的正常 200 GET 请求（/logs、/usage、/accounts 轮询等）
         # 避免自增死循环刷屏与日志污染。遇 4xx/5xx 异常或所有非 GET 业务操作依然如实记录。
@@ -21381,10 +21598,12 @@ class Handler(BaseHTTPRequestHandler):
             # Report the realm actually in use; this used to be the
             # literal "intl" and drifted from the panel switch.
             "realm": CURRENT_REALM,
-            "accounts": len(POOL.accounts) if POOL else 0,
-            "accounts_ready": POOL.count_ready() if POOL else 0,
-            "api_key_required": auth_required(),
         }
+        # accounts / accounts_ready keep their old meaning (whole pool, any
+        # model); the per-realm and per-model counts say which combinations
+        # are actually servable (issue #667).
+        info.update(pool_readiness())
+        info["api_key_required"] = auth_required()
         if self._key_ok():
             info.update({
                 "uid": rep.uid if rep else None,
@@ -21393,6 +21612,7 @@ class Handler(BaseHTTPRequestHandler):
                 "credential_file": os.path.basename(rep.path) if rep and rep.path else None,
                 "expires_at": rep.expires_at if rep else None,
             })
+            info.update(key_readiness(getattr(self, "key_entry", None)))
         return self._json(200, info)
     # Accept the conventional /v1 prefix and the bare path, because clients
     # differ in whether they append "/v1" themselves.
@@ -22180,8 +22400,8 @@ class Handler(BaseHTTPRequestHandler):
         if limits_payload is not None:
             reply["limits"] = wb_settings.limits_snapshot(ACCOUNTS_DIR)
         if touched:
-            if POOL and "reserve_credits" in touched:
-                POOL.apply_reserve_credits()
+            if "reserve_credits" in touched:
+                apply_reserve_credits(refresh=True)
             if any(k in touched for k in ("daily_token_limit", "daily_credit_limit",
                                           "model_daily_token_limit")):
                 # One pass refreshes all three: a limit edit is rare, and the
@@ -24158,19 +24378,19 @@ class Handler(BaseHTTPRequestHandler):
                 allowed_accounts=_key_allowed_accounts_for(self))
             req_realm = getattr(account, 'realm', req_realm)
         except PinnedAccountError as exc:
-            record_error(model, exc.status, exc.message[:200],
+            _record_open_error(exc, model, exc.status, exc.message[:200],
                          elapsed_ms=int((time.time() - t_start) * 1000),
                          account=exc.account_uid, key=self._key_id())
             return self._error(exc.status, exc.message, "invalid_request_error")
         except ContentRejected as exc:
-            record_error(model, 403, exc.detail[:200],
+            _record_open_error(exc, model, 403, exc.detail[:200],
                          elapsed_ms=int((time.time() - t_start) * 1000),
                          account=getattr(exc, "account_uid", None),
                          key=self._key_id())
             return self._error(403, "upstream 403: %s" % (exc.detail or "content rejected"),
                                "invalid_request_error")
         except LocalNetworkError as exc:
-            record_error(model, 503, exc.detail[:200],
+            _record_open_error(exc, model, 503, exc.detail[:200],
                          elapsed_ms=int((time.time() - t_start) * 1000),
                          account=getattr(exc, "account_uid", None),
                          key=self._key_id())
@@ -24178,34 +24398,26 @@ class Handler(BaseHTTPRequestHandler):
                                     "（本次不计入账号熔断）" % (exc.detail or "DNS/路由失败"),
                                "invalid_request_error")
         except wb_accounts.TLSVerifyError as exc:
-            record_error(model, 502, str(exc)[:200],
+            _record_open_error(exc, model, 502, str(exc)[:200],
                          elapsed_ms=int((time.time() - t_start) * 1000),
                          key=self._key_id())
             return self._error(502, str(exc), "invalid_request_error")
         except RateLimited as exc:
             t = time.time() - t_start
-            record_error(model, 429, exc.detail[:200], elapsed_ms=int(t * 1000),
+            _record_open_error(exc, model, 429, exc.detail[:200], elapsed_ms=int(t * 1000),
                          account=getattr(exc, "account_uid", None),
                          key=self._key_id())
             return self._rate_limited(exc)
         except urllib.error.HTTPError as exc:
             detail = read_http_error(exc, 600).decode("utf-8", "replace")
-            record_error(model, exc.code, detail,
+            _record_open_error(exc, model, exc.code, detail,
                          elapsed_ms=int((time.time() - t_start) * 1000),
                          account=getattr(exc, "account_uid", None),
                          key=self._key_id())
             return self._error(exc.code, f"upstream {exc.code}: {detail}")
         except Exception as exc:
-            message = str(exc)
-            status = 503 if message.startswith('no usable account') else 502
-            record_error(model, status, message,
-                         elapsed_ms=int((time.time() - t_start) * 1000),
-                         account=getattr(exc, "account_uid", None),
-                         key=self._key_id())
-            if message.startswith("no usable account"):
-                return self._error(503, message +
-                                   " - add or enable one at the dashboard (/)")
-            return self._error(502, f"upstream unreachable: {exc}")
+            return upstream_failure_response(self, model, exc, t_start,
+                                             self._key_id())
         with upstream:
             if compaction:
                 return self._responses_compaction_response(
@@ -24578,12 +24790,12 @@ class Handler(BaseHTTPRequestHandler):
                 allowed_accounts=_key_allowed_accounts_for(self))
             req_realm = getattr(account, 'realm', req_realm)
         except PinnedAccountError as exc:
-            record_error(model, exc.status, exc.message[:200],
+            _record_open_error(exc, model, exc.status, exc.message[:200],
                          elapsed_ms=int((time.time() - t_start) * 1000),
                          account=exc.account_uid, key=self._key_id())
             return self._anthropic_error(exc.status, exc.message)
         except ContentRejected as exc:
-            record_error(model, 403, exc.detail[:200],
+            _record_open_error(exc, model, 403, exc.detail[:200],
                          elapsed_ms=int((time.time() - t_start) * 1000),
                          account=getattr(exc, "account_uid", None),
                          key=self._key_id())
@@ -24591,7 +24803,7 @@ class Handler(BaseHTTPRequestHandler):
                                           (exc.detail or "content rejected"),
                                           "permission_error")
         except LocalNetworkError as exc:
-            record_error(model, 503, exc.detail[:200],
+            _record_open_error(exc, model, 503, exc.detail[:200],
                          elapsed_ms=int((time.time() - t_start) * 1000),
                          account=getattr(exc, "account_uid", None),
                          key=self._key_id())
@@ -24600,12 +24812,12 @@ class Handler(BaseHTTPRequestHandler):
                                               % (exc.detail or "DNS/路由失败"),
                                          "api_error")
         except wb_accounts.TLSVerifyError as exc:
-            record_error(model, 502, str(exc)[:200],
+            _record_open_error(exc, model, 502, str(exc)[:200],
                          elapsed_ms=int((time.time() - t_start) * 1000),
                          key=self._key_id())
             return self._anthropic_error(502, str(exc), "api_error")
         except RateLimited as exc:
-            record_error(model, 429, exc.detail[:200],
+            _record_open_error(exc, model, 429, exc.detail[:200],
                          elapsed_ms=int((time.time() - t_start) * 1000),
                          account=getattr(exc, "account_uid", None),
                          key=self._key_id())
@@ -24615,7 +24827,7 @@ class Handler(BaseHTTPRequestHandler):
                 detail = read_http_error(exc, 600).decode("utf-8", "replace")
             except Exception:
                 detail = str(exc)
-            record_error(model, exc.code, detail,
+            _record_open_error(exc, model, exc.code, detail,
                          elapsed_ms=int((time.time() - t_start) * 1000),
                          account=getattr(exc, "account_uid", None),
                          key=self._key_id())
@@ -24625,7 +24837,7 @@ class Handler(BaseHTTPRequestHandler):
             message = str(exc)
             low = message.lower()
             status = 503 if ("no usable account" in low or "no account" in low or "no enabled account" in low) else 502
-            record_error(model, status, message,
+            _record_open_error(exc, model, status, message,
                          elapsed_ms=int((time.time() - t_start) * 1000),
                          account=getattr(exc, "account_uid", None),
                          key=self._key_id())
@@ -25025,19 +25237,19 @@ class Handler(BaseHTTPRequestHandler):
                 allowed_accounts=_key_allowed_accounts_for(self))
             req_realm = getattr(account, 'realm', req_realm)
         except PinnedAccountError as exc:
-            record_error(model, exc.status, exc.message[:200],
+            _record_open_error(exc, model, exc.status, exc.message[:200],
                          elapsed_ms=int((time.time() - t_start) * 1000),
                          account=exc.account_uid, key=self._key_id())
             return self._error(exc.status, exc.message, "invalid_request_error")
         except ContentRejected as exc:
-            record_error(model, 403, exc.detail[:200],
+            _record_open_error(exc, model, 403, exc.detail[:200],
                          elapsed_ms=int((time.time() - t_start) * 1000),
                          account=getattr(exc, "account_uid", None),
                          key=self._key_id())
             return self._error(403, "upstream 403: %s" % (exc.detail or "content rejected"),
                                "invalid_request_error")
         except LocalNetworkError as exc:
-            record_error(model, 503, exc.detail[:200],
+            _record_open_error(exc, model, 503, exc.detail[:200],
                          elapsed_ms=int((time.time() - t_start) * 1000),
                          account=getattr(exc, "account_uid", None),
                          key=self._key_id())
@@ -25045,35 +25257,28 @@ class Handler(BaseHTTPRequestHandler):
                                     "（本次不计入账号熔断）" % (exc.detail or "DNS/路由失败"),
                                "invalid_request_error")
         except wb_accounts.TLSVerifyError as exc:
-            record_error(model, 502, str(exc)[:200],
+            _record_open_error(exc, model, 502, str(exc)[:200],
                          elapsed_ms=int((time.time() - t_start) * 1000),
                          key=self._key_id())
             return self._error(502, str(exc), "invalid_request_error")
         except RateLimited as exc:
-            record_error(model, 429, exc.detail[:200],
+            _record_open_error(exc, model, 429, exc.detail[:200],
                          elapsed_ms=int((time.time() - t_start) * 1000),
                          account=getattr(exc, "account_uid", None),
                          key=self._key_id())
             return self._rate_limited(exc)
         except urllib.error.HTTPError as exc:
             detail = read_http_error(exc, 600).decode("utf-8", "replace")
-            record_error(model, exc.code, detail,
+            _record_open_error(exc, model, exc.code, detail,
                          elapsed_ms=int((time.time() - t_start) * 1000),
                          account=getattr(exc, "account_uid", None),
                          key=self._key_id())
             return self._error(exc.code, f"upstream {exc.code}: {detail}")
         except Exception as exc:
-            message = str(exc)
-            status = 503 if message.startswith('no usable account') else 502
-            record_error(model, status, message, elapsed_ms=int((time.time() - t_start) * 1000),
-                         account=getattr(exc, "account_uid", None),
-                         key=self._key_id())
-            if message.startswith("no usable account"):
-                # Only a genuinely empty/cooling pool is a 503. A throttled model
-                # is reported as 429 by _rate_limited above instead.
-                return self._error(503, message +
-                                   " - add or enable one at the dashboard (/)")
-            return self._error(502, f"upstream unreachable: {exc}")
+            # Only a genuinely empty/cooling pool is a 503. A throttled model
+            # is reported as 429 by _rate_limited above instead.
+            return upstream_failure_response(self, model, exc, t_start,
+                                             self._key_id())
         with upstream:
             def reopen_stream():
                 # Same account, same egress: only the TCP connection is new.
@@ -25447,7 +25652,7 @@ def _bootstrap_runtime(args):
     POOL = wb_accounts.AccountPool(ACCOUNTS_DIR, log=log)
     POOL.load()
     POOL.apply_proxy_slots()
-    POOL.apply_reserve_credits()
+    apply_reserve_credits()
     # WB_MAX_CONCURRENT_CHAT=auto: size the chat ceiling from the pool that was
     # just loaded. Runs before the listener exists, so no request can hold a
     # slot yet and the semaphore swap is safe.

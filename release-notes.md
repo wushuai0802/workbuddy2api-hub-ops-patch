@@ -1,4 +1,17 @@
-基于官方v1.8.0完善风控状态、每日活跃停手机制和早期错误诊断；本轮没有新的官方基线版本。
+升级官方v1.9.0并吸收参考补丁中的认证、免费模型冷却和失败模型归属改进。
+
+- 正式补丁`v1.9.0-ops.20261029.1`，固定官方`a6a967ef04b9824e962c4f285ebd589fbb1f1312`。
+- 采用官方6004持久化、健康细分、池空/限流归因和界面修复；保留本地区域保护、入口观察和Messages补充。
+- 严格区分真正Bearer挑战与HTML/Basic/realm文字；原刷新期限及有界读取保持。免费模型冷却与ready同口径，付费回退建连失败保留实际模型/原模型/账号/Key。
+- 网页活跃受限返回失败阻断，防止误报今日已完成。循环阈值和恢复次数不变。
+- 验证清单221 Python（49补丁＋172官方）与61 Node。无主动真实模型、签到或活跃探测；不承诺解除账号风控。官方DSH规则会改变匹配的system/developer/assistant文本，见docs/V190.md。
+- 下载`workbuddy2api-hub-v1.9.0-wushuai0802-ops-20261029-r1.zip`与`SHA256SUMS.txt`。保留现用数据、准确基线预检与回滚。
+
+Pin official v1.9.0 and adopt native quota/readiness/UI fixes. Require strict Bearer challenge evidence, align free-model cooldown admission, preserve failed paid-fallback identity and report restricted web activity honestly. Inventory: 221 Python and 61 Node suites; offline checks do not prove live-upstream availability. Native DSH normalization changes matching history text. Preserve account/usage data on rollback.
+
+## Previous release: v1.8.0-ops.20261026.1
+
+基于官方v1.8.0完善风控状态、每日活跃停手机制和早期错误诊断；该轮没有新的官方基线版本。
 
 - 补丁：`v1.8.0-ops.20261026.1`；官方提交：`4f7ae6f2efcae5e6ae85aefa732035206044514b`。
 - 区域暂停写入有界、原子的`usage/restriction-state.json`，只存账号哈希/时间/区域。重启沿用原到期，不延长暂停；损坏和写失败可见，内存保护保持。

@@ -2,13 +2,15 @@
 
 [中文](README.md) · [Install and rollback](docs/INSTALL.md) · [Patch scope](docs/PATCHES.md) · [Verification](docs/VERIFICATION.md)
 
-Release **v1.8.0-ops.20261026.1**, targeting upstream **v1.8.0** at `4f7ae6f2efcae5e6ae85aefa732035206044514b`. Python 3.11+ is required. Offline/synthetic checks passed; successful live upstream validation remains pending. Upstream has announced tighter unofficial-client detection and reduced maintenance; this patch cannot remove upstream restrictions.
+Release **v1.9.0-ops.20261029.1**, targeting upstream **v1.9.0** at `a6a967ef04b9824e962c4f285ebd589fbb1f1312`. Python 3.11+ is required. Offline/synthetic checks passed; successful live upstream validation remains pending. Upstream has announced tighter unofficial-client detection and reduced maintenance; this patch cannot remove upstream restrictions.
 
-[Download ZIP and SHA256SUMS.txt](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.8.0-ops.20261026.1): `workbuddy2api-hub-v1.8.0-wushuai0802-ops-20261026-r1.zip`.
+[Download ZIP and SHA256SUMS.txt](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.9.0-ops.20261029.1): `workbuddy2api-hub-v1.9.0-wushuai0802-ops-20261029-r1.zip`.
 
-This version migrates our retained safeguards onto the exact v1.8.0 source and retains our mixed-stall guard, reasoning-alias budget, tool-image compatibility, refusals, bounded refresh, and pooled connection ownership. It preserves upstream additional-tools/custom namespace support, Anthropic thinking, DSML fallback, block I/O and shared TLS contexts.
+This version migrates our retained safeguards onto the exact v1.9.0 source and retains our mixed-stall guard, reasoning-alias budget, tool-image compatibility, refusals, bounded refresh, and pooled connection ownership. It preserves upstream additional-tools/custom namespace support, Anthropic thinking, DSML fallback, block I/O and shared TLS contexts.
 
 The installer replaces four upstream Python modules and the dashboard, and adds `wb_ops.py`, `wb_stall.py` and `wb_observe.py`, checking the unchanged core dependencies. It preserves accounts, keys, configuration and usage and does not deploy. The running gateway writes a separate bounded observation log, disabled with `WB_OPS_OBSERVE=0`.
+
+The v1.9.0 migration adopts upstream quota persistence, readiness and pool-error classification. Additional fixes require real Bearer challenge evidence, preserve free-model cooldown classification and failed paid-fallback attribution, and prevent restricted web activity from appearing complete. Native DSH normalization changes matching system/developer/assistant text; user/tool text and tool arguments retain their existing treatment. See [v1.9.0 scope and boundaries](docs/V190.md).
 
 The header phase respects panel settings (120 seconds by default); its 45-second first-frame phase starts after headers. Initial connection, recovery and web-tool follow-ups share the original generation deadline. The sole safe pure-reasoning recovery now adds a short continuation hint by default; set `WB_OPS_LOOP_RECOVERY_HINT=0` to disable the hint. Consecutive exact failed prefixes are cleaned within 16-segment/65536-character bounds. Guard thresholds remain unchanged; anonymous bounded rule/window metrics and retry-stop reasons are persisted.
 
@@ -16,7 +18,7 @@ The supplied v1.7.5-r2 reference informed quote-span masking and detached valida
 
 ## 2026-10-26 restriction state and early errors
 
-The upstream baseline remains v1.8.0. Realm pauses retain their original expiry across restarts through a bounded, atomic `usage/restriction-state.json` containing hashed account markers and timestamps only. Invalid/symlinked state and write failures are reported; memory enforcement remains when persistence fails. Existing account cooldowns and the explicit off switch remain, with no historical restriction backfill.
+The retained v1.8.0 safeguards persist realm pauses with their original expiry through a bounded, atomic `usage/restriction-state.json` containing hashed account markers and timestamps only. Invalid/symlinked state and write failures are reported; memory enforcement remains when persistence fails. Existing account cooldowns and the explicit off switch remain, with no historical restriction backfill.
 
 Daily activity now records verified 11140 restrictions and consults the live gateway's pause before new work. Web retries stop without marking the day completed; quota wording and code prefixes cannot become false account restrictions. Early model-entry failures join observation records with `stage` and optional HTTP status, without duplicate request/usage records. Empty-pool responses and ledgers agree on 503 across all three protocols.
 
@@ -113,11 +115,11 @@ Anthropic Messages and count_tokens endpoints now return400 by default, after au
 Prepare separate clean pinned sources, keep the previous deployment and backups, and verify first:
 
 ~~~sh
-git clone --depth 1 --branch v1.8.0-ops.20261026.1 https://github.com/wushuai0802/workbuddy2api-hub-ops-patch.git ops-patch-v180
-git clone --depth 1 --branch v1.8.0 https://github.com/ardeyouxipianyi/workbuddy2api-hub.git workbuddy2api-hub-v1.8.0
-git -C workbuddy2api-hub-v1.8.0 rev-parse HEAD
-python3 -B ops-patch-v180/apply.py --verify-package
-python3 -B ops-patch-v180/apply.py --target ./workbuddy2api-hub-v1.8.0 --dry-run
+git clone --depth 1 --branch v1.9.0-ops.20261029.1 https://github.com/wushuai0802/workbuddy2api-hub-ops-patch.git ops-patch-v190
+git clone --depth 1 --branch v1.9.0 https://github.com/ardeyouxipianyi/workbuddy2api-hub.git workbuddy2api-hub-v1.9.0
+git -C workbuddy2api-hub-v1.9.0 rev-parse HEAD
+python3 -B ops-patch-v190/apply.py --verify-package
+python3 -B ops-patch-v190/apply.py --target ./workbuddy2api-hub-v1.9.0 --dry-run
 ~~~
 
 Use [INSTALL.md](docs/INSTALL.md) to stop the one intended service, apply, rebuild and recreate it with its original parameters. Earlier patched trees are not overlays; do not delete state or checksum metadata to bypass a refusal. The [previous v1.6.20 release](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.6.20-ops.20261012.1) remains available.
@@ -128,7 +130,7 @@ A response whose wire body was read in one block retains its connection lease un
 
 ## Verification and limits
 
-The runner covers 215 Python groups (48 patch and all 167 official groups), plus 59 official and 2 patch Node groups. CI checks Linux3.11/3.12 and Windows3.11; see [VERIFICATION.md](docs/VERIFICATION.md). Tests use synthetic data and loopback HTTP with external Python sockets denied; they do not establish online task completion.
+The runner covers 221 Python groups (49 patch and all 172 official groups), plus 59 official and 2 patch Node groups. CI checks Linux3.11/3.12 and Windows3.11; see [VERIFICATION.md](docs/VERIFICATION.md). Tests use synthetic data and loopback HTTP with external Python sockets denied; they do not establish online task completion.
 
 r2 protects quoted repetition examples, preserves already-consumed provider usage across guard failure, transport errors and cancellation, and bounds SSE lines/events (4/8MiB defaults). A request-local history observer reports repeated tool results without blocking or replaying tools. It does not combine sessions or infer generic shell-command progress. Durable metrics distinguish requests from guarded attempts and legal-output recovery from business completion, with explicit time/version/protocol grouping and retention limits.
 

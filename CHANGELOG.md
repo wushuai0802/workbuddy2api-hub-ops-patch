@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.9.0-ops.20261029.1 — 2026-10-29
+
+- 固定官方v1.9.0 / `a6a967ef04b9824e962c4f285ebd589fbb1f1312`。采用原生6004持久化、认证挑战、区域/模型健康、Key候选池归因、免费模型保留额度豁免及面板改进，保留已有区域持久保护、入口观察与跨协议补充。
+- 参考v1.9.0-r1补齐严格Bearer挑战证据、关闭/溢出错误体下的刷新判定、免费模型冷却429分类和付费回退建连失败归属。额外修复网页活跃受限时误报今日已完成。
+- 新增13项专项；清单221 Python（49补丁＋172官方）及61 Node。循环阈值、期限、租约和恢复次数保持。官方DSH规范化会改写匹配的system/developer/assistant文本；不证明云端限制解除。
+- Pin official v1.9.0, adopt its quota/readiness/UI fixes, and retain local restrictions, observations and protocol safeguards. Tighten authentication evidence, align free-model cooldown admission, retain failed paid-fallback identity, and report restricted web activity honestly. Synthetic inventory: 221 Python and 61 Node suites; no live-upstream availability claim.
+
 ## v1.8.0-ops.20261026.1 — 2026-10-26
 
 - 官方基线保持v1.8.0 / `4f7ae6f2efcae5e6ae85aefa732035206044514b`。区域暂停以账号哈希/时间戳原子持久化，重启不重置原到期；有界读取、坏文件/写失败诊断和显式关闭语义保留。

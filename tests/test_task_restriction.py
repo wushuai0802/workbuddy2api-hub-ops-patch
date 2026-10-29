@@ -45,7 +45,9 @@ class TaskRestrictionTests(unittest.TestCase):
             self.assertGreater(a.restricted_until,time.time()+7100)
             again=a.daily_chat(web=False)
             self.assertFalse(again['ok']);self.assertTrue(again['blocked'])
-            self.assertNotIn('skipped',again)
+            # v1.9.0 exposes a restricted skip; it must remain a failed block,
+            # distinct from a successful "already completed" skip.
+            self.assertTrue(again['skipped']);self.assertTrue(again['restricted'])
             self.assertEqual(opened.call_count,1)
         saved=json.loads(Path(a.path).read_text())
         self.assertEqual(saved['accessToken'],'PRIVATE_ACCESS')

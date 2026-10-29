@@ -1,8 +1,10 @@
 # Attribution
 
+The supplied v1.9.0 / 20261028-r1 archive (SHA256 `2b847b3230231b365b44575a550cd50983eea874e79239ff0c33ac8e887a0ffe`) informed strict Bearer challenge parsing, free-model cooldown parity and failed paid-fallback attribution. Changes were adapted to this repository's existing deadlines, leases, observation and per-attempt accounting. No private verification text is included. MIT notices and historical attribution remain below.
+
 This unofficial bundle derives from [WorkBuddy2API-Hub](https://github.com/ardeyouxipianyi/workbuddy2api-hub), distributed under MIT. Original notice is preserved in [LICENSE](LICENSE).
 
-Supported upstream: v1.8.0, commit `4f7ae6f2efcae5e6ae85aefa732035206044514b`.
+Supported upstream: v1.9.0, commit `a6a967ef04b9824e962c4f285ebd589fbb1f1312`.
 
 The user-supplied v1.7.33-r3 reference (SHA256 `25a5e39264eb1be3aac512a541c32734c787944ab3de402ca0a36ce5748832af`) informed Windows timed-read interruption and cancellation during recovery. We adapted these boundaries to our existing pooled-lease ownership, initial heartbeat and deadline safeguards, with independent synthetic regressions. Reference installers and private verification data were not executed or republished.
 
