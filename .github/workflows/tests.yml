@@ -33,7 +33,7 @@ jobs:
       - name: Fetch the pinned official baseline
         run: |
           git clone --no-checkout https://github.com/ardeyouxipianyi/workbuddy2api-hub.git ../workbuddy-upstream
-          git -C ../workbuddy-upstream checkout --detach a6a967ef04b9824e962c4f285ebd589fbb1f1312
+          git -C ../workbuddy-upstream checkout --detach 736d08eaf067bf2c0487ec2872f48d8f8aaecc54
       - name: Verify the package
         run: python apply.py --verify-package
       - name: Run synthetic offline tests

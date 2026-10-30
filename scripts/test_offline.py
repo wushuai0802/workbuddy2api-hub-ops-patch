@@ -31,7 +31,7 @@ PATCH_SUITES = ('test_installer.py', 'test_wb_stall.py', 'test_mixed_stall_proxy
                 'test_printed_call_boundaries.py', 'test_v1728.py', 'test_realm_fallback_boundaries.py', 'test_v1730.py',
                 'test_account_slot_lifecycle.py', 'test_heartbeat_lifecycle.py', 'test_connection_deadline.py', 'test_v1733.py', 'test_v180.py',
                 'test_restriction_persistence.py', 'test_entry_observation.py', 'test_task_restriction.py',
-                'test_v190.py')
+                'test_v190.py', 'test_v192.py')
 
 
 def main():
@@ -41,7 +41,7 @@ def main():
     args = parser.parse_args()
     upstream = args.upstream.resolve(strict=True)
     official_suites = sorted((upstream / 'tests').glob('_test_*.py'))
-    assert len(official_suites) == 172, 'pinned official Python inventory changed'
+    assert len(official_suites) == 175, 'pinned official Python inventory changed'
     bundle = Bundle(ROOT)
     assert set(bundle.status(bundle.target(upstream)).values()) == {'base'}, 'use clean pinned upstream'
     args.output.mkdir(parents=True, exist_ok=True)

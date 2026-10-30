@@ -1,3 +1,12 @@
+升级官方v1.9.2，保留既有运维保护。
+
+- 固定官方`736d08eaf067bf2c0487ec2872f48d8f8aaecc54`，补丁`v1.9.2-ops.20261031.1`。
+- 继承慢轮询去重、更新卡片提示、密码加密环境错误与启动失败保护。SSE终态和通用错误缓存沿用原生默认关闭；现有受保护流仍在DONE立即停读。
+- 保留循环阈值、期限、取消、名额、401、区域暂停、历史及实际用量/模型归属。新增3项专项，清单225 Python＋61 Node；未主动请求真实模型或账号任务。
+- Pin official v1.9.2. Adopt its polling, update-action and password-crypto fixes while retaining stronger guarded stream terminals and existing safety/accounting contracts. Native switches remain opt-in. Inventory: 225 Python and 61 Node suites; synthetic checks do not prove upstream availability.
+
+## Previous release: v1.9.0-ops.20261029.1
+
 升级官方v1.9.0并吸收参考补丁中的认证、免费模型冷却和失败模型归属改进。
 
 - 正式补丁`v1.9.0-ops.20261029.1`，固定官方`a6a967ef04b9824e962c4f285ebd589fbb1f1312`。

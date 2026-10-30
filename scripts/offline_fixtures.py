@@ -31,6 +31,25 @@ def prepare_refresh_fixtures(gateway):
 
 
 def prepare_test_fixtures(gateway):
+    # Native 1.9.1 makes terminal stopping opt-in. Our guarded Responses/Chat
+    # streams already stop unconditionally, a deliberately stronger old contract.
+    # Preserve default tail consumption for the native aggregate, and assert no
+    # tail read for the guarded streams. Supply a real completed answer so the
+    # native transport test does not conflict with our empty-answer rejection.
+    path = gateway / 'tests/_test_sse_termination.py'
+    source = path.read_text(encoding='utf8')
+    prefix = b'data: {"id":"fixture","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}\n\n'
+    for indent, quote in ((8, "'"), (16, '"')):
+        old = ' ' * indent + 'yield b' + quote + 'data: [DONE]\\n\\n' + quote
+        assert source.count(old) == 1, 'pinned SSE fixture changed'
+        source = source.replace(old, ' ' * indent + 'yield ' + repr(prefix) + '\n' + old)
+    old = "for consume in (lambda stream: proxy.aggregate_stream(stream, 'model', 'id'),\n                            lambda stream: list(proxy.stream_responses_events(stream, 'model', {})),\n                            self.run_chat):"
+    new = "for index, consume in enumerate((lambda stream: proxy.aggregate_stream(stream, 'model', 'id'),\n                            lambda stream: list(proxy.stream_responses_events(stream, 'model', {})),\n                            self.run_chat)):"
+    assert source.count(old) == 1
+    source = source.replace(old, new)
+    assert source.count('self.assertTrue(stream.reached_end)') == 1
+    source = source.replace('self.assertTrue(stream.reached_end)', 'self.assertEqual(stream.reached_end, index == 0)')
+    path.write_text(source, encoding='utf8')
     prepare_refresh_fixtures(gateway)
     # The native compaction stub suppresses the unguarded accounting helper.
     # Our adapter uses the same lower-level ledger as the other six adapters.

@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.9.2-ops.20261031.1 — 2026-10-31
+
+- 固定官方v1.9.2 / `736d08eaf067bf2c0487ec2872f48d8f8aaecc54`，继承慢轮询去重、更新提示和密码加密组件错误处理，以及默认关闭的SSE/错误正文选项。
+- 两处流式冲突保留已有终态立即停读、缓冲、取消、期限与用量保护；保留原401有界错误证据、冷却、白名单和记账。
+- 新增3项协议联动回归，完整清单225 Python（50补丁＋175官方）及61 Node。原生SSE夹具明确区分聚合默认行为和本地更强的流式合同，终态后不读取断言保留。
+- Pin official v1.9.2 and adopt its polling, update-UI and crypto-environment fixes. Preserve stronger guarded terminals, bounded authentication evidence, deadlines, leases and accounting. Add three synthetic integration cases; native opt-in switches remain off by default.
+
 ## v1.9.0-ops.20261029.1 — 2026-10-29
 
 - 固定官方v1.9.0 / `a6a967ef04b9824e962c4f285ebd589fbb1f1312`。采用原生6004持久化、认证挑战、区域/模型健康、Key候选池归因、免费模型保留额度豁免及面板改进，保留已有区域持久保护、入口观察与跨协议补充。

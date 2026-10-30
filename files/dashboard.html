@@ -4042,10 +4042,13 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
            onkeydown="if(event.key==='Enter') submitPanelLogin()"
            style="width:100%;background:var(--panel2);border:1px solid var(--line);
                   border-radius:8px;padding:9px 12px;color:var(--fg);font:inherit">
-    <div id="panelLoginMsg" style="font-size:12px;color:var(--bad);min-height:17px;margin:8px 0 12px"></div>
+    <div id="panelLoginMsg" style="font-size:12px;color:var(--bad);min-height:17px;margin:8px 0 12px;word-break:break-word;line-height:1.4"></div>
     <button onclick="submitPanelLogin()" style="width:100%;padding:9px 12px;font-size:13px">进入面板</button>
     <div id="panelDefaultHint" style="display:none;font-size:11px;color:var(--warn);margin-top:12px">
       当前仍在使用默认密码 <b>admin</b>，登录后请在「设置」中修改。
+    </div>
+    <div id="panelCryptoWarning" style="display:none;font-size:11px;color:var(--bad);margin-top:12px;line-height:1.4;word-break:break-word">
+      警告：当前 Python 解释器缺少 <code>hashlib.pbkdf2_hmac</code> 支持。若使用 Windows 便携版 Python，可能因系统安全策略（如 Smart App Control）拦截了 <code>DLLs/_hashlib.pyd</code>。自定义密码将无法登录，请更换为完整 Python 或放行该 DLL。
     </div>
   </div>
 </div>
@@ -5640,6 +5643,7 @@ button.page-nav-top:hover{background:var(--panel2);border-color:var(--accent);co
           </tbody>
         </table>
         <div id="setUpdateError" style="font-size:12px;color:var(--warn);margin-top:8px"></div>
+        <div id="setUpdateInstallHint" style="font-size:12px;color:var(--dim);margin-top:8px" aria-live="polite"></div>
         <label style="display:flex;align-items:center;gap:6px;font-size:13px;margin-top:14px">
           <input id="setUpdateCheckEnabled" type="checkbox" style="width:16px;height:16px">
           每天自动检查更新
@@ -10853,6 +10857,8 @@ async function bootPanel(){
   } catch(e) { PANEL_STATUS = {}; }
   const hint = document.getElementById('panelDefaultHint');
   if(hint && PANEL_STATUS.panel_password_is_default) hint.style.display = 'block';
+  const cryptoWarn = document.getElementById('panelCryptoWarning');
+  if(cryptoWarn && PANEL_STATUS.crypto_ok === false) cryptoWarn.style.display = 'block';
   if(PANEL_STATUS.authenticated){
     panelHideGate();
     await startDashboard();
@@ -13274,8 +13280,11 @@ function applyUpdateStatus(data){
     install.disabled = !canInstall;
     install.title = !data.install_enabled ? '更新服务未安装'
       : busy ? '已有更新任务正在运行'
+      : data.checking ? '正在检查更新，请稍候'
       : !data.update_available ? '当前没有可安装的新版本'
       : (!data.latest_tag || !data.release_url) ? '请先点击立即检查更新' : '';
+    const hint = document.getElementById('setUpdateInstallHint');
+    if(hint) hint.textContent = canInstall ? '发现新版本，点击“安装更新”开始安装。' : install.title;
   }
 }
 
@@ -16638,7 +16647,11 @@ if(typeof MutationObserver !== 'undefined'){
  * 的一轮（刚切了区间、或轮询撞上点击），这批结果已经过期，直接丢掉——否则慢的那一轮
  * 晚到，会把上一个区间的数字画到新区间的标题下面（实测有 1.2~1.8 秒的错位窗口）。 */
 let WBA_GEN = 0;
+const WBA_PENDING = new Map();
 async function loadRange(polled){
+  const range = state.range;
+  if(polled && WBA_PENDING.has(range)) return;
+  WBA_PENDING.set(range, (WBA_PENDING.get(range) || 0) + 1);
   const gen = ++WBA_GEN;
   const untilAt = polled ? pollUntil() : null;
   $('kpis').style.opacity = .55;
@@ -16656,6 +16669,10 @@ async function loadRange(polled){
   } catch(e){
     if (gen !== WBA_GEN) return;
     console.error('load range failed', e);
+  } finally {
+    const remaining = WBA_PENDING.get(range) - 1;
+    if(remaining) WBA_PENDING.set(range, remaining);
+    else WBA_PENDING.delete(range);
   }
   $('kpis').style.opacity = 1;
   renderKpis();

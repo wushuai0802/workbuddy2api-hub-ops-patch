@@ -32,7 +32,7 @@ function fixture(html) {
     }, renderKpis:()=>rendered.push(state.analytics && state.analytics.id),
     renderSeriesMeta(){}, drawSeries(){}, drawSparks(){}, renderDim(){}, loadRecent(){}});
   const names=['prevRange','loadPrevSummary','rangeParams','loadRange'];
-  let code='let prevSummary=null; let WBA_GEN=0; const POLL_UNTIL_BUCKET=15;\n';
+  let code='let prevSummary=null; let WBA_GEN=0; const WBA_PENDING=new Map(); const POLL_UNTIL_BUCKET=15;\n';
   if(html.includes('function pollUntil(')) code += source('pollUntil')+'\n';
   code += names.map(source).join('\n');
   vm.runInContext(code,c);
@@ -65,6 +65,18 @@ async function check(html) {
   const success=f.c.loadRange(); f.settle(3,'new'); await success;
   f.settle(0,'old',true); await older;
   assert.deepStrictEqual(f.rendered,['new']); assert.equal(f.errors.length,0);
+
+  // A pending poll suppresses only polls for that range. Manual selection must
+  // still run, and completing the older poll must not clear the manual owner.
+  f=fixture(html); older=f.c.loadRange(true);
+  await f.c.loadRange(true); assert.equal(f.pending.length,3);
+  const manual=f.c.loadRange(false); assert.equal(f.pending.length,6);
+  f.settle(0,'old'); await older;
+  await f.c.loadRange(true); assert.equal(f.pending.length,6);
+  f.settle(3,'manual'); await manual;
+  const resumed=f.c.loadRange(true); assert.equal(f.pending.length,9);
+  f.settle(6,'resumed'); await resumed;
+  assert.equal(f.state.analytics.id,'resumed');
 
   const base=Math.floor(1700000000/15)*15;
   for(const range of ['d3','d30','all']) {

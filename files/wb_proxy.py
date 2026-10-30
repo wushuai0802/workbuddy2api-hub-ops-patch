@@ -10317,7 +10317,7 @@ def runtime_settings_view():
         "accounts_dir": ACCOUNTS_DIR,
         "usage_dir": USAGE_DIR,
         "settings_file": wb_settings.settings_path(ACCOUNTS_DIR),
-        "version": "1.9.0",
+        "version": "1.9.2",
     }
 def current_account():
     """Account used for display purposes (health / usage summaries)."""
@@ -11775,7 +11775,7 @@ def _patch_payload_fingerprint():
     return hashlib.sha256(''.join(records).encode('ascii')).hexdigest()
 
 _OPS_PATCH_FINGERPRINT = _patch_payload_fingerprint()
-_OPS_PATCH_ID = "v1.9.0-ops.20261029.1"
+_OPS_PATCH_ID = "v1.9.2-ops.20261031.1"
 _OBSERVATION_STORE = None
 _OBSERVATION_STORE_LOCK = threading.Lock()
 
@@ -15573,7 +15573,10 @@ def read_http_error(exc, limit=600):
     if raw is not None:
         return raw[:limit]
     try:
-        return exc.read(limit)
+        raw = exc.read(limit)
+        if os.environ.get("WB_CACHE_HTTP_ERROR_BODY", "").strip().lower() in ("1", "true", "yes", "on"):
+            exc.wb_body = raw
+        return raw
     except Exception:
         return b""
 
@@ -17555,9 +17558,12 @@ def _aggregate_stream_impl(raw_iter, model, resp_id):
     failed_reason = None
     for line in iter_sse_lines(raw_iter):
         data = strip_data_prefix(line.decode("utf-8", "replace"))
-        if not data or data == "[DONE]":
-            if data == "[DONE]":
-                saw_done = True
+        if data == "[DONE]":
+            saw_done = True
+            if os.environ.get("WB_STOP_AT_SSE_DONE", "").strip().lower() in ("1", "true", "yes", "on"):
+                break
+            continue
+        if not data:
             continue
         try:
             chunk = json.loads(data)
@@ -20861,7 +20867,7 @@ class Handler(BaseHTTPRequestHandler):
             super().finish()
         except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
             pass
-    server_version = "wb-proxy/1.9.0"
+    server_version = "wb-proxy/1.9.2"
     def log_message(self, fmt, *args):
         # 静默过滤前端看板高频定时心跳的正常 200 GET 请求（/logs、/usage、/accounts 轮询等）
         # 避免自增死循环刷屏与日志污染。遇 4xx/5xx 异常或所有非 GET 业务操作依然如实记录。
@@ -21542,11 +21548,15 @@ class Handler(BaseHTTPRequestHandler):
     def _get_panel_status(self):
         # Answer without a token: the dashboard needs to know whether to
         # show the login screen before it can hold a session.
+        crypto_ok, crypto_reason = wb_settings.check_pbkdf2_available()
         info = {
             "panel_password_required": True,
             "panel_password_is_default": wb_settings.panel_password_is_default(ACCOUNTS_DIR),
             "authenticated": self._panel_ok(),
+            "crypto_ok": crypto_ok,
         }
+        if not crypto_ok:
+            info["crypto_error"] = crypto_reason
         # Whether a key exists is not a secret; its value never leaves the
         # process, and the settings endpoint only reports a masked form.
         info["api_key_set"] = bool(API_KEY)
@@ -21593,12 +21603,16 @@ class Handler(BaseHTTPRequestHandler):
         # Always answer (the launcher uses this to detect a running copy),
         # but only expose account identity to an authorised caller.
         rep = current_account()
+        crypto_ok, crypto_reason = wb_settings.check_pbkdf2_available()
         info = {
             "ok": True,
             # Report the realm actually in use; this used to be the
             # literal "intl" and drifted from the panel switch.
             "realm": CURRENT_REALM,
+            "crypto_ok": crypto_ok,
         }
+        if not crypto_ok:
+            info["crypto_error"] = crypto_reason
         # accounts / accounts_ready keep their old meaning (whole pool, any
         # model); the per-realm and per-model counts say which combinations
         # are actually servable (issue #667).
@@ -22574,7 +22588,12 @@ class Handler(BaseHTTPRequestHandler):
                 reply["identity_private_data"] = value
         if "identity_versions" in payload:
             password = payload.get("panel_password") or ""
-            if not wb_settings.verify_panel_password(ACCOUNTS_DIR, password):
+            try:
+                valid = wb_settings.verify_panel_password(ACCOUNTS_DIR, password)
+            except wb_settings.PanelPasswordCryptoError as exc:
+                log("panel      : crypto failure verifying password: %s" % exc)
+                return self._error(500, str(exc), "server_error")
+            if not valid:
                 return self._error(401, "invalid panel password",
                                    "invalid_request_error")
             raw = payload.get("identity_versions")
@@ -23347,7 +23366,12 @@ class Handler(BaseHTTPRequestHandler):
                     wait_sec = int(60 - (now - attempts[0]))
                     return self._error(429, f"too many login attempts, please wait {max(1, wait_sec)}s", "rate_limit_error")
             password = str(payload.get("password") or "")
-            if not wb_settings.verify_panel_password(ACCOUNTS_DIR, password):
+            try:
+                valid = wb_settings.verify_panel_password(ACCOUNTS_DIR, password)
+            except wb_settings.PanelPasswordCryptoError as exc:
+                log("panel      : crypto failure verifying password: %s" % exc)
+                return self._error(500, str(exc), "server_error")
+            if not valid:
                 with _login_lock:
                     _login_attempts.setdefault(client_ip, []).append(now)
                 # Small backoff delay to mitigate automated brute force
@@ -23370,11 +23394,20 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/panel/password":
             current = str(payload.get("current") or "")
             new = str(payload.get("new") or "")
-            if not wb_settings.verify_panel_password(ACCOUNTS_DIR, current):
+            try:
+                valid = wb_settings.verify_panel_password(ACCOUNTS_DIR, current)
+            except wb_settings.PanelPasswordCryptoError as exc:
+                log("panel      : crypto failure verifying current password: %s" % exc)
+                return self._error(500, str(exc), "server_error")
+            if not valid:
                 return self._error(401, "current password is wrong", "invalid_request_error")
             if len(new) < 4:
                 return self._error(400, "new password must be at least 4 characters", "invalid_request_error")
-            wb_settings.set_panel_password(ACCOUNTS_DIR, new)
+            try:
+                wb_settings.set_panel_password(ACCOUNTS_DIR, new)
+            except wb_settings.PanelPasswordCryptoError as exc:
+                log("panel      : crypto failure setting password: %s" % exc)
+                return self._error(500, str(exc), "server_error")
             log("panel      : password changed")
             if new != wb_settings.DEFAULT_PANEL_PASSWORD:
                 # Rotating the password invalidates every other browser session.
@@ -25644,9 +25677,19 @@ def _bootstrap_runtime(args):
     if key_from_panel and not args.api_key:
         API_KEY = saved_key
         API_KEY_FILE_SET = True
+    crypto_ok, crypto_reason = wb_settings.check_pbkdf2_available()
+    if not crypto_ok:
+        log("WARN: Python 解释器缺少 hashlib.pbkdf2_hmac 支持 (%s)" % crypto_reason)
+        log("WARN: 若使用 Windows 便携版 Python，请检查系统安全策略（如 Smart App Control）是否拦截了 DLLs/_hashlib.pyd")
+        if not wb_settings.panel_password_is_default(ACCOUNTS_DIR):
+            log("WARN: 已检测到非默认面板密码，当前环境下将无法登录面板！")
     if args.panel_password:
-        wb_settings.set_panel_password(ACCOUNTS_DIR, args.panel_password)
-        log("panel      : password set from --panel-password")
+        try:
+            wb_settings.set_panel_password(ACCOUNTS_DIR, args.panel_password)
+            log("panel      : password set from --panel-password")
+        except wb_settings.PanelPasswordCryptoError as exc:
+            log("panel      : failed to set password from --panel-password: %s" % exc)
+            raise SystemExit("Cannot start: the requested panel password could not be set.") from exc
     elif wb_settings.panel_password_is_default(ACCOUNTS_DIR):
         log("panel      : password is still the default 'admin' - change it in the panel")
     POOL = wb_accounts.AccountPool(ACCOUNTS_DIR, log=log)
