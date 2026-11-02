@@ -1,10 +1,12 @@
 # Attribution
 
+The supplied v1.10.1 / 20261102-r2 archive (SHA256 `724d9650d0623f5580872040f0f6eaf1f7ed87c6519117328fdcf9a299d41ab1`) informed literal tool-name validation, reset overflow handling, CodeArts lease ownership and provider-isolated safeguards/accounting. Its 22 synthetic cases were adapted to this repository's existing fixtures; private verification/transcript files and installer scripts were not imported or executed. Original MIT attribution remains.
+
 The supplied v1.9.0 / 20261028-r1 archive (SHA256 `2b847b3230231b365b44575a550cd50983eea874e79239ff0c33ac8e887a0ffe`) informed strict Bearer challenge parsing, free-model cooldown parity and failed paid-fallback attribution. Changes were adapted to this repository's existing deadlines, leases, observation and per-attempt accounting. No private verification text is included. MIT notices and historical attribution remain below.
 
 This unofficial bundle derives from [WorkBuddy2API-Hub](https://github.com/ardeyouxipianyi/workbuddy2api-hub), distributed under MIT. Original notice is preserved in [LICENSE](LICENSE).
 
-Supported upstream: v1.9.2, commit `736d08eaf067bf2c0487ec2872f48d8f8aaecc54`.
+Supported upstream: v1.10.1, commit `28527f48cfaea0e456612eb8922cb51b5d804a22`.
 
 The user-supplied v1.7.33-r3 reference (SHA256 `25a5e39264eb1be3aac512a541c32734c787944ab3de402ca0a36ce5748832af`) informed Windows timed-read interruption and cancellation during recovery. We adapted these boundaries to our existing pooled-lease ownership, initial heartbeat and deadline safeguards, with independent synthetic regressions. Reference installers and private verification data were not executed or republished.
 

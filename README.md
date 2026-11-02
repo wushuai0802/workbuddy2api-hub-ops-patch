@@ -4,17 +4,17 @@
 
 为 WorkBuddy 网关提供 DeepSeek 复读保护、受限认证续期、推理历史与工具图片兼容，以及流式协议边界修复。基于[官方项目](https://github.com/ardeyouxipianyi/workbuddy2api-hub)，可检查、可回退，遵循 MIT。
 
-当前版本：**v1.9.2-ops.20261031.1**。完整离线与合成验证已通过；真实上游成功验收仍待完成，验证范围见[记录](docs/VERIFICATION.md)。
+当前版本：**v1.10.1-ops.20261102.1**。完整离线与合成验证已通过；真实上游成功验收仍待完成，验证范围见[记录](docs/VERIFICATION.md)。
 
-升级到官方v1.9.2，采用慢轮询去重、更新按钮提示及密码加密环境错误处理。继承默认关闭的SSE终态与HTTP错误正文选项，保留本地更强的流式终态停读，以及循环、认证、冷却、计费和历史保护。详见[v1.9.2说明](docs/V192.md)，此前修复见[v1.9.0说明](docs/V190.md)；补丁不能解除云端限制。
+升级到官方v1.10.1，采用原生CodeArts第三出口、面板请求体热配置、429绝对恢复时刻和代理认证规整。参考外部r2包补齐工具名原值校验、极端时间戳容错，以及CodeArts单次释放、六路径保护与记账隔离；CodeArts默认关闭。详见[v1.10.1说明](docs/V1101.md)，历史修复见[v1.9.2说明](docs/V192.md)；补丁不能解除云端限制。
 
-- [下载 ZIP 与 SHA256SUMS.txt](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.9.2-ops.20261031.1)
-- 文件名：`workbuddy2api-hub-v1.9.2-wushuai0802-ops-20261031-r1.zip`
-- 仅支持官方 **v1.9.2**，提交 `736d08eaf067bf2c0487ec2872f48d8f8aaecc54`。
+- [下载 ZIP 与 SHA256SUMS.txt](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.10.1-ops.20261102.1)
+- 文件名：`workbuddy2api-hub-v1.10.1-wushuai0802-ops-20261102-r1.zip`
+- 仅支持官方 **v1.10.1**，提交 `28527f48cfaea0e456612eb8922cb51b5d804a22`。
 - Python 3.11+。Docker 用户从打过完整补丁的准确源码重新构建镜像。
-- 安装器替换四个上游Python模块（proxy、accounts、webtools、upstream_pool）及看板，新增 ops、stall、observe 三个模块；不操作账号、Key、配置、历史或部署。
+- 安装器替换五个上游Python模块（proxy、accounts、codearts、webtools、upstream_pool）及看板，新增 ops、stall、observe 三个模块；不操作账号、Key、配置、历史或部署。
 
-本版把已有补丁迁移到官方 v1.9.2，保留混合复读、推理别名预算、工具图片、拒答、用量结算和连接所有权保护。来源与许可见 [NOTICE.md](NOTICE.md) 和 [THIRD-PARTY-zh.md](THIRD-PARTY-zh.md)。
+本版把已有补丁迁移到官方 v1.10.1，保留混合复读、推理别名预算、工具图片、拒答、用量结算和连接所有权保护。来源与许可见 [NOTICE.md](NOTICE.md) 和 [THIRD-PARTY-zh.md](THIRD-PARTY-zh.md)。
 
 本次修复响应头预算被固定45秒覆盖的问题：响应头尊重面板设置，返回后才开始45秒首帧预算；初始连接、恢复和网页工具后续生成共享原300秒总期限。纯推理循环的唯一一次安全恢复默认加入简短接续提示，可用 `WB_OPS_LOOP_RECOVERY_HINT=0` 关闭提示。连续已知失败前缀最多清理16段/65536字符，保留未知后缀和客户端原历史。持久观察新增匿名规则、窗口计数和恢复停止原因；检测阈值保持。
 
@@ -153,11 +153,11 @@ v1.7.6～v1.7.30曾仅按模型名把`gpt-5.6-terra / gpt-5.6-luna / gpt-5.3-cod
 先保存旧镜像、源码、配置和数据，在新目录获取两个准确版本：
 
 ~~~sh
-git clone --depth 1 --branch v1.9.2-ops.20261031.1 https://github.com/wushuai0802/workbuddy2api-hub-ops-patch.git ops-patch-v192
-git clone --depth 1 --branch v1.9.2 https://github.com/ardeyouxipianyi/workbuddy2api-hub.git workbuddy2api-hub-v1.9.2
-git -C workbuddy2api-hub-v1.9.2 rev-parse HEAD
-python3 -B ops-patch-v192/apply.py --verify-package
-python3 -B ops-patch-v192/apply.py --target ./workbuddy2api-hub-v1.9.2 --dry-run
+git clone --depth 1 --branch v1.10.1-ops.20261102.1 https://github.com/wushuai0802/workbuddy2api-hub-ops-patch.git ops-patch-v1101
+git clone --depth 1 --branch v1.10.1 https://github.com/ardeyouxipianyi/workbuddy2api-hub.git workbuddy2api-hub-v1.10.1
+git -C workbuddy2api-hub-v1.10.1 rev-parse HEAD
+python3 -B ops-patch-v1101/apply.py --verify-package
+python3 -B ops-patch-v1101/apply.py --target ./workbuddy2api-hub-v1.10.1 --dry-run
 ~~~
 
 提交必须匹配上面的完整SHA。预检通过后，按[安装指南](docs/INSTALL.md)暂停唯一目标服务、应用完整补丁、构建并定向切换。已有旧补丁（包括v1.7.3）不能直接叠加；不要删除状态/备份绕过检查。旧Release/tag继续保留。
@@ -166,7 +166,7 @@ python3 -B ops-patch-v192/apply.py --target ./workbuddy2api-hub-v1.9.2 --dry-run
 
 ## 验证与边界
 
-离线runner包含225组Python回归（50组补丁及全部175组官方Python），另有59组官方Node及2组补丁Node。本版新增3项终态/用量/名额及401缓存联动，继承此前13项v1.9.0、21项风控/入口、日志饱和、Windows首帧/取消、心跳及认证保护。CI检查Linux3.11/3.12与Windows3.11，实际结果见[验证记录](docs/VERIFICATION.md)。
+离线runner包含235组Python回归（52组补丁及全部183组官方Python），另有63组官方Node及2组补丁Node。本版新增22项CodeArts隔离、并发释放、真实本机socket取消/期限、工具名及429恢复时间回归，继承所有既有保护。CI检查Linux3.11/3.12与Windows3.11，并从通过的提交构建发布包，实际结果见[验证记录](docs/VERIFICATION.md)。
 
 测试使用合成账号、空数据和本机HTTP，不含真实会话。检测仍以单次生成为范围，尚无通用跨工具回合业务进展熔断。健康、模块指纹或离线测试不等于真实长会话输出质量验收。
 

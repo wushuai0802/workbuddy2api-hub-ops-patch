@@ -31,6 +31,18 @@ def prepare_refresh_fixtures(gateway):
 
 
 def prepare_test_fixtures(gateway):
+    # Official reset tests use literal 2026-11-02 instants and expire on that
+    # date. Freeze their synthetic wall clock before those samples; retain all
+    # future/stale, header/body and exact-second assertions. Production time
+    # validation remains unchanged, and no other suite inherits this clock.
+    path = gateway / 'tests/_test_rate_limit_reset_at.py'
+    source = path.read_text(encoding='utf8')
+    old = 'if __name__ == "__main__":\n    unittest.main(verbosity=2)'
+    assert source.count(old) == 1, 'pinned reset-time fixture changed'
+    source = source.replace(old, 'if __name__ == "__main__":\n'
+                           '    with unittest.mock.patch.object(time, "time", return_value=1793500000):\n'
+                           '        unittest.main(verbosity=2)')
+    path.write_text(source, encoding='utf8')
     # Native 1.9.1 makes terminal stopping opt-in. Our guarded Responses/Chat
     # streams already stop unconditionally, a deliberately stronger old contract.
     # Preserve default tail consumption for the native aggregate, and assert no

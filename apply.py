@@ -18,10 +18,10 @@ import uuid
 STATE = ".ops-patch-state.json"
 BACKUPS = ".ops-patch-backups"
 LOCK = ".ops-patch.lock"
-FILES = {"dashboard.html", "wb_proxy.py", "wb_webtools.py", "wb_accounts.py", "wb_ops.py", "wb_stall.py", "wb_upstream_pool.py", "wb_observe.py"}
+FILES = {"dashboard.html", "wb_proxy.py", "wb_webtools.py", "wb_accounts.py", "wb_codearts.py", "wb_ops.py", "wb_stall.py", "wb_upstream_pool.py", "wb_observe.py"}
 NEW_FILES = {"wb_ops.py", "wb_stall.py", "wb_observe.py"}
 DEPENDENCIES = {
-    "wb_activity.py", "wb_agents.py",
+    "wb_activity.py", "wb_agents.py", "wb_codearts_crypto.py",
     "wb_atrest.py", "wb_catalog.py", "wb_egress.py", "wb_fingerprint.py", "wb_identity.py",
     "wb_ipintel.py", "wb_modelsdev.py", "wb_pricing.py", "wb_probes.py",
     "wb_logstore.py",
@@ -29,8 +29,8 @@ DEPENDENCIES = {
     "wb_updates.py", "wb_webagent.py", "wb_quota_scan.py", "wb_window_probe.py", "wb_update_request.py",
     "wb_tiers.py", "wb_update_apply.py", "wb_update_external.py", "wb_update_portable.py", "wb_webprompts.py",
 }
-BASE_TAG = "v1.9.2"
-UPSTREAM_COMMIT = "736d08eaf067bf2c0487ec2872f48d8f8aaecc54"
+BASE_TAG = "v1.10.1"
+UPSTREAM_COMMIT = "28527f48cfaea0e456612eb8922cb51b5d804a22"
 
 
 def digest(data):

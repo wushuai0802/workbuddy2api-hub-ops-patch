@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.10.1-ops.20261102.1 — 2026-11-02
+
+- 固定官方v1.10.1 / `28527f48cfaea0e456612eb8922cb51b5d804a22`，采用CodeArts第三出口、请求体热配置、429恢复时间、工具过滤及代理认证规整等原生能力。
+- 结合外部20261102-r2补齐严格工具名原值校验、时间戳溢出容错、CodeArts并发close/预检重试的名额所有权、六路径防护与provider用量/计费隔离。默认不开启CodeArts，不增加恢复次数或预算。
+- 新增22项回归；清单235 Python＋65 Node。六个保护模块及18个关键AST保持；发布包从通过的CI提交生成。真实上游及CodeArts登录未额外验证。
+- Pin official v1.10.1. Adopt native provider/UI/rate-limit/proxy features, validate literal tool names, tolerate oversized reset instants and preserve CodeArts lease ownership and provider-specific accounting. Add 22 synthetic cases without extending retries or deadlines. Inventory: 235 Python and 65 Node suites; no live-provider claim.
+
 ## v1.9.2-ops.20261031.1 — 2026-10-31
 
 - 固定官方v1.9.2 / `736d08eaf067bf2c0487ec2872f48d8f8aaecc54`，继承慢轮询去重、更新提示和密码加密组件错误处理，以及默认关闭的SSE/错误正文选项。

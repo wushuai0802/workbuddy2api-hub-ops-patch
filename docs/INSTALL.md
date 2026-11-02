@@ -2,7 +2,7 @@
 
 完整离线/合成验证通过，真实上游成功验收仍待完成。先在隔离环境验证自己的调用链，并准备回滚后再替换生产。
 
-本包 `v1.9.2-ops.20261031.1` 只支持官方v1.9.2 / `736d08eaf067bf2c0487ec2872f48d8f8aaecc54`。以下路径、Compose参数和服务名需要按自己的部署填写。Python3.11+，Linux/macOS示例；Windows使用同一安装器参数及完整路径。
+本包 `v1.10.1-ops.20261102.1` 只支持官方v1.10.1 / `28527f48cfaea0e456612eb8922cb51b5d804a22`。以下路径、Compose参数和服务名需要按自己的部署填写。Python3.11+，Linux/macOS示例；Windows使用同一安装器参数及完整路径。
 
 v1.7.33每日活跃改为总预算（默认600秒）、有序候选、留空时两个随机时段，以及默认开启的启动补跑。更新前核对原任务策略；已有明确时段优先，旧模型设置按原含义读取。需要沿用旧版重启不补跑行为时，将面板启动补跑开关关闭（`daily_chat_startup_catchup=false`）。公开安装器不改业务设置，也不能解除上游风控。
 
@@ -10,21 +10,21 @@ v1.8.0的`WB_DESKTOP_CHAT_COMPAT`和`daily_chat_web_fallback_activity`默认关�
 
 ## 核对输入
 
-[Release下载](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.9.2-ops.20261031.1)含ZIP和SHA256SUMS.txt；ZIP顶层目录为`workbuddy2api-hub-ops-patch/`。
+[Release下载](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.10.1-ops.20261102.1)含ZIP和SHA256SUMS.txt；ZIP顶层目录为`workbuddy2api-hub-ops-patch/`。
 
 ~~~sh
 sha256sum -c SHA256SUMS.txt
-git clone --depth 1 --branch v1.9.2 https://github.com/ardeyouxipianyi/workbuddy2api-hub.git workbuddy2api-hub-v1.9.2
-git -C workbuddy2api-hub-v1.9.2 rev-parse HEAD
+git clone --depth 1 --branch v1.10.1 https://github.com/ardeyouxipianyi/workbuddy2api-hub.git workbuddy2api-hub-v1.10.1
+git -C workbuddy2api-hub-v1.10.1 rev-parse HEAD
 PATCH_DIR='/absolute/path/to/workbuddy2api-hub-ops-patch'
-TARGET_DIR='/absolute/path/to/workbuddy2api-hub-v1.9.2'
+TARGET_DIR='/absolute/path/to/workbuddy2api-hub-v1.10.1'
 python3 -B "$PATCH_DIR/apply.py" --verify-package
 python3 -B "$PATCH_DIR/apply.py" --target "$TARGET_DIR" --dry-run
 ~~~
 
 SHA必须匹配上述完整提交；预检通过只代表可以应用，尚未部署。已有旧补丁或未知改动时，另建准确干净源码，保留旧部署。不删除状态/备份或重写校验绕过拒绝。回滚旧源码补丁使用其原版本安装器；当前安装器不能卸载旧包。
 
-这也适用于旧补丁→v1.9.2：在新基线整体安装，不直接覆盖旧已安装树。运行时独立`usage/ops-observations.jsonl`不属于安装器修改范围；它有界轮换且可用`WB_OPS_OBSERVE=0`关闭，不改写原usage历史。
+这也适用于旧补丁→v1.10.1：在新基线整体安装，不直接覆盖旧已安装树。运行时独立`usage/ops-observations.jsonl`不属于安装器修改范围；它有界轮换且可用`WB_OPS_OBSERVE=0`关闭，不改写原usage历史。
 
 区域暂停新增`usage/restriction-state.json`，与现有usage目录一起保留；它只含账号哈希、时间和区域，不含凭据。有效状态在重启后沿用原到期时间。坏文件/权限问题可从`/health/retry.restriction_pause`查看；无法从损坏文件恢复未知暂停，账号自身冷却仍独立生效。降级到不识别该文件的旧版不会获得这项跨重启保护，代码回退应保留现用数据。
 
@@ -36,7 +36,7 @@ SHA必须匹配上述完整提交；预检通过只代表可以应用，尚未�
 COMPOSE_FILE='/absolute/path/to/your/compose.yaml'
 SERVICE='your-hub-service'
 BACKUP_DIR='/absolute/path/to/private-backups/pre-ops-20261021'
-PATCHED_IMAGE='your-local/workbuddy2api-hub:1.7.30-ops.20261023.1'
+PATCHED_IMAGE='your-local/workbuddy2api-hub:1.10.1-ops.20261102.1'
 ROLLBACK_IMAGE='your-local/workbuddy2api-hub:rollback-before-ops-20261021'
 docker compose -f "$COMPOSE_FILE" config --services
 CONTAINER_ID=$(docker compose -f "$COMPOSE_FILE" ps -q "$SERVICE")
@@ -64,7 +64,7 @@ docker build -t "$PATCHED_IMAGE" "$TARGET_DIR"
 docker run --rm --network none --entrypoint python "$PATCHED_IMAGE" -B -c 'import wb_proxy; print(wb_proxy.retry_health_snapshot()["ops_patch_id"])'
 ~~~
 
-安装替换proxy/accounts/webtools/upstream_pool四个Python模块及dashboard，新增ops/stall/observe三个模块。保留生成的安装状态和代码备份；源码回滚由同包处理。Docker镜像复制全部wb_*.py和dashboard，包括官方quota_scan/window_probe/update_request，不复制安装器/代码备份。导入检查应输出新ID，只证明代码存在，不是对话验收。
+安装替换proxy/accounts/codearts/webtools/upstream_pool五个Python模块及dashboard，新增ops/stall/observe三个模块。保留生成的安装状态和代码备份；源码回滚由同包处理。Docker镜像复制全部wb_*.py和dashboard，包括官方codearts_crypto/quota_scan/window_probe/update_request，不复制安装器/代码备份。导入检查应输出新ID，只证明代码存在，不是对话验收。
 
 官方目录归档默认在`/app/catalog`。Docker应持久化此目录，或配置`WB_PROXY_CATALOG_DIR=/app/usage/catalog`复用现有usage挂载；不要覆盖现有usage。日志SQLite默认关闭，是否启用及保留上限由使用者决定。
 
@@ -80,7 +80,7 @@ docker compose -f "$COMPOSE_FILE" up -d --no-deps --no-build --pull never "$SERV
 
 v1.7.16提供可选`WB_CN_CHAT_UPSTREAM`，仅需要国内版改址时显式配置并重启；缺省沿用原址。它统一影响国内桌面/CLI对话、token刷新、模型目录和成长任务，账号X-Domain及国际版保持。示例为`https://www.workbuddy.cn`，公开安装器不设置此环境变量。
 
-公共默认请求体仍16MiB。确有更大历史需求可显式设置`WB_MAX_PAYLOAD_BYTES=52428800`，评估并发内存。新checkpoint缓存可能重建，应保留原JSONL；退出身份、出口退避、账号权重/备注和国际活跃模型沿用原配置，不因更新自动开启新策略。补签/抽奖按原生规则使用卡券或次数。
+公共默认请求体仍16MiB。v1.10.0起面板max_payload_mb支持1–256MiB并优先于环境变量；未设置时继续采用`WB_MAX_PAYLOAD_BYTES`。更大历史须评估并发内存，升级保留原上限。CodeArts默认关闭，需另行配置账号；更新不自动开启。新checkpoint缓存可能重建，应保留原JSONL；退出身份、出口退避、账号权重/备注和国际活跃模型沿用原配置。补签/抽奖按原生规则使用卡券或次数。
 
 v1.7.13～1.7.15新增额度窗口探针，原生`window_probe`缺省为true，会在重置时主动发起模型请求且不依赖签到开关。若保持旧版无主动探针行为，停服备份后仅添加`settings.json`的`"window_probe": false`，保留其它字段及权限。`quota_scan_models`默认空，主动额度扫描需自行选择模型。公开安装器不改这两项配置。
 
@@ -97,7 +97,7 @@ python3 -B "$PATCH_DIR/apply.py" --target "$TARGET_DIR" --rollback --dry-run
 python3 -B "$PATCH_DIR/apply.py" --target "$TARGET_DIR" --rollback
 ~~~
 
-恢复安装前的官方v1.9.2字节，不恢复更旧版本或业务数据；代码被再次修改时拒绝覆盖，需先检查。
+恢复安装前的官方v1.10.1字节，不恢复更旧版本或业务数据；代码被再次修改时拒绝覆盖，需先检查。
 
 Docker用户暂停请求，将image改回旧ROLLBACK_IMAGE，沿原参数定向启动。镜像缺失时从私有rollback-image.tar加载；当前账号/usage继续沿用，不自动用旧数据覆盖。恢复数据会丢失备份点之后新增内容，须另行保留当前数据并核对。
 

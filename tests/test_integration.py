@@ -97,8 +97,11 @@ class Handler:
         self.json_body = payload
         return status, payload
 
-    def _error(self, status, message, kind="server_error"):
-        return self._json(status, {"error": {"message": message, "type": kind}})
+    def _error(self, status, message, kind="server_error", reset_at=None):
+        error = {"message": message, "type": kind}
+        if reset_at is not None:
+            error["reset_at"] = reset_at
+        return self._json(status, {"error": error})
 
     @property
     def wfile(self):

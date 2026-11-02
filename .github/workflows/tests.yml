@@ -33,10 +33,19 @@ jobs:
       - name: Fetch the pinned official baseline
         run: |
           git clone --no-checkout https://github.com/ardeyouxipianyi/workbuddy2api-hub.git ../workbuddy-upstream
-          git -C ../workbuddy-upstream checkout --detach 736d08eaf067bf2c0487ec2872f48d8f8aaecc54
+          git -C ../workbuddy-upstream checkout --detach 28527f48cfaea0e456612eb8922cb51b5d804a22
       - name: Verify the package
         run: python apply.py --verify-package
       - name: Run synthetic offline tests
         run: python scripts/test_offline.py --upstream ../workbuddy-upstream --output .work/verification
       - name: Run synthetic dashboard tests
         run: python scripts/test_dashboard.py --upstream ../workbuddy-upstream --output .work/dashboard
+      - name: Package the verified commit
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.11'
+        run: python scripts/build_release.py --output .work/release
+      - uses: actions/upload-artifact@v4
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.11'
+        with:
+          name: release-bundle
+          path: .work/release/*
+          if-no-files-found: error
