@@ -67,6 +67,11 @@
       "patched_sha256": "f3a09e170e9393592179638378781b72be075fb6c9596e847db01e4e11b154da"
     }
   },
+  "official_python_tests": {
+    "count": 183,
+    "inventory_sha256": "0066b282ae7f8780c63ba9e4d823e003ef12f33ee94afceda66f04a3c27f7ebf",
+    "upstream_commit": "28527f48cfaea0e456612eb8922cb51b5d804a22"
+  },
   "patch_id": "v1.10.1-ops.20261102.1",
   "patch_source": "wushuai0802/workbuddy2api-hub-ops-patch",
   "payload_fingerprint": "49994b6ad59b9422830b8f1a16192ac636dd323c83def0b0e6170520fbad88e6",

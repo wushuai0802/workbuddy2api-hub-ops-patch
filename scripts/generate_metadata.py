@@ -11,6 +11,8 @@ COMMIT = '28527f48cfaea0e456612eb8922cb51b5d804a22'
 TAG = 'v1.10.1'
 PATCH_ID = 'v1.10.1-ops.20261102.1'
 PATCH_SOURCE = 'wushuai0802/workbuddy2api-hub-ops-patch'
+# A baseline migration must explicitly review this expected count as well.
+OFFICIAL_PYTHON_COUNTS = {COMMIT: 183}
 MODULES = ('dashboard.html', 'wb_proxy.py', 'wb_webtools.py', 'wb_accounts.py', 'wb_codearts.py', 'wb_ops.py', 'wb_stall.py', 'wb_upstream_pool.py', 'wb_observe.py')
 PUBLIC_DIRS = ('files', 'tests', 'docs', 'scripts', 'patches', '.github')
 PUBLIC_ROOT = ('README.md', 'README.en.md', 'LICENSE', 'NOTICE.md', 'THIRD-PARTY-zh.md', 'CHANGELOG.md',
@@ -25,6 +27,12 @@ def normalize(path):
     return path.read_bytes().replace(b'\r\n', b'\n')
 
 
+def official_test_inventory(upstream):
+    suites = sorted((upstream / 'tests').glob('_test_*.py'))
+    rows = ''.join(path.name + ':' + digest(normalize(path)) + '\n' for path in suites)
+    return {'upstream_commit': COMMIT, 'count': len(suites), 'inventory_sha256': digest(rows.encode('ascii'))}
+
+
 def public_files(root=ROOT):
     selected = [root / name for name in PUBLIC_ROOT if (root / name).is_file()]
     for name in PUBLIC_DIRS:
@@ -35,6 +43,8 @@ def public_files(root=ROOT):
             if path.is_symlink():
                 raise ValueError('symlink in package: ' + path.relative_to(root).as_posix())
             if path.is_file() and '__pycache__' not in path.parts and path.suffix not in ('.pyc', '.pyo'):
+                if name == 'patches' and path.name != PATCH_ID + '.patch':
+                    continue
                 selected.append(path)
     return sorted(selected, key=lambda path: path.relative_to(root).as_posix())
 
@@ -46,6 +56,9 @@ def main():
     upstream = args.upstream.resolve(strict=True)
     actual = subprocess.check_output(['git', '-C', str(upstream), 'rev-parse', 'HEAD'], text=True).strip()
     assert actual == COMMIT, 'upstream must be the pinned commit'
+    subprocess.run(['git', '-C', str(upstream), 'diff', '--exit-code', 'HEAD', '--', 'tests'], check=True, stdout=subprocess.DEVNULL)
+    inventory = official_test_inventory(upstream)
+    assert inventory['count'] == OFFICIAL_PYTHON_COUNTS[COMMIT], 'review the official suite count for this baseline explicitly'
     files, chunks = {}, []
     for name in MODULES:
         base = normalize(upstream / name) if (upstream / name).exists() else None
@@ -65,6 +78,7 @@ def main():
                 'patch_source': PATCH_SOURCE, 'payload_fingerprint': payload_identity,
                 'repository': 'https://github.com/ardeyouxipianyi/workbuddy2api-hub',
                 'upstream_commit': COMMIT, 'python_requires': '>=3.11', 'files': files,
+                'official_python_tests': inventory,
                 'compatibility': {name: digest(normalize(upstream / name)) for name in dependencies}}
     (ROOT / 'BASELINE.json').write_text(json.dumps(metadata, indent=2, sort_keys=True) + '\n', encoding='utf8')
     (ROOT / 'patches' / (PATCH_ID + '.patch')).write_text(''.join(chunks), encoding='utf8')

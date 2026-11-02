@@ -18,7 +18,8 @@ import uuid
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from apply import Bundle
-from scripts.offline_fixtures import prepare_test_fixtures
+from scripts.offline_fixtures import prepare_test_fixtures, test_command
+from scripts.generate_metadata import official_test_inventory
 
 PATCH_SUITES = ('test_installer.py', 'test_wb_stall.py', 'test_mixed_stall_proxy.py', 'test_keepalive_guard.py',
                 'test_auth_deadline.py', 'test_proxy_boundaries.py', 'test_leaked_mixed_stall.py',
@@ -31,7 +32,7 @@ PATCH_SUITES = ('test_installer.py', 'test_wb_stall.py', 'test_mixed_stall_proxy
                 'test_printed_call_boundaries.py', 'test_v1728.py', 'test_realm_fallback_boundaries.py', 'test_v1730.py',
                 'test_account_slot_lifecycle.py', 'test_heartbeat_lifecycle.py', 'test_connection_deadline.py', 'test_v1733.py', 'test_v180.py',
                 'test_restriction_persistence.py', 'test_entry_observation.py', 'test_task_restriction.py',
-                'test_v190.py', 'test_v192.py', 'test_v1100.py', 'test_v1101.py')
+                'test_v190.py', 'test_v192.py', 'test_v1100.py', 'test_v1101.py', 'test_maintenance.py')
 
 
 def main():
@@ -41,8 +42,10 @@ def main():
     args = parser.parse_args()
     upstream = args.upstream.resolve(strict=True)
     official_suites = sorted((upstream / 'tests').glob('_test_*.py'))
-    assert len(official_suites) == 183, 'pinned official Python inventory changed'
     bundle = Bundle(ROOT)
+    actual_commit = subprocess.check_output(['git', '-C', str(upstream), 'rev-parse', 'HEAD'], text=True).strip()
+    assert actual_commit == bundle.meta['upstream_commit'], 'use the pinned official commit'
+    assert official_test_inventory(upstream) == bundle.meta['official_python_tests'], 'pinned official Python inventory changed; explicitly update baseline metadata'
     assert set(bundle.status(bundle.target(upstream)).values()) == {'base'}, 'use clean pinned upstream'
     args.output.mkdir(parents=True, exist_ok=True)
     run = args.output.resolve() / ('run-' + uuid.uuid4().hex[:12])
@@ -84,7 +87,7 @@ def main():
         # Native/default-policy suites and v176 contracts control their own gate.
         suite_env['WB_ENABLE_ANTHROPIC_MESSAGES'] = '1' if path.parent == ROOT / 'tests' and path.name != 'test_v176.py' else ''
         with logfile.open('w', encoding='utf8') as output:
-            result = subprocess.run([sys.executable, '-B', str(path)], cwd=gateway, env=suite_env,
+            result = subprocess.run(test_command(path), cwd=gateway, env=suite_env,
                                     stdout=output, stderr=subprocess.STDOUT, timeout=180)
         text = logfile.read_text(encoding='utf8', errors='replace')
         counts = re.findall(r'Ran (\d+) tests?', text)

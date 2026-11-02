@@ -20,6 +20,9 @@ def main():
     filename = 'workbuddy2api-hub-v1.10.1-wushuai0802-ops-20261102-r1.zip'
     archive = args.output / filename
     members = [line.split('  ', 1)[1] for line in (ROOT / 'MANIFEST.sha256').read_text().splitlines()]
+    assert {name for name in members if name.startswith('patches/')} == {
+        'patches/' + bundle.meta['patch_id'] + '.patch'
+    }, 'release manifest must include only the current patch; regenerate metadata'
     members.append('MANIFEST.sha256')
     with zipfile.ZipFile(archive, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=9) as output:
         for name in sorted(members):

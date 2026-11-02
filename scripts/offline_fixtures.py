@@ -1,4 +1,53 @@
 """Adapt pinned upstream test stubs without changing their assertions."""
+import ast
+import datetime
+import re
+import sys
+
+
+def reset_fixture_clock(source):
+    """Derive a clock between the pinned suite's stale and live samples.
+
+    Keep its literal epochs, original dates and every assertion unchanged.
+    A changed fixture shape fails explicitly instead of silently using today.
+    """
+    tree = ast.parse(source)
+    def epoch(value):
+        match = re.search(r'(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) UTC([+-]\d+)', value)
+        assert match, 'pinned reset-time date shape changed'
+        zone = datetime.timezone(datetime.timedelta(hours=int(match[2])))
+        return datetime.datetime.strptime(match[1], '%Y-%m-%d %H:%M:%S').replace(tzinfo=zone).timestamp()
+    live, stale = [], []
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id in ('DETAIL_EN', 'DETAIL_CN') for t in node.targets):
+            live.append(epoch(ast.literal_eval(node.value)))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == 'test_a_stale_wall_clock_falls_back_to_the_local_window':
+            for child in ast.walk(node):
+                if isinstance(child, ast.Constant) and isinstance(child.value, str) and 'reset at ' in child.value:
+                    stale.append(epoch(child.value))
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in ('rate_limit_headers', 'rate_limit_reset_note'):
+            if node.args and isinstance(node.args[0], ast.Constant) and type(node.args[0].value) is int:
+                value = node.args[0].value
+                if 1_000_000_000 < value < 10_000_000_000:
+                    live.append(value)
+    assert len(live) >= 4 and stale, 'pinned reset-time live/stale inventory changed'
+    clock = min(live) - 3600
+    assert max(stale) < clock < min(live), 'no valid interval between stale and live samples'
+    return clock
+
+
+def test_command(path):
+    if path.name != '_test_rate_limit_reset_at.py':
+        return [sys.executable, '-B', str(path)]
+    clock = reset_fixture_clock(path.read_text(encoding='utf8'))
+    # Run the byte-identical official suite under a process-local clock.
+    wrapper = ('import runpy,sys,time,unittest.mock\n'
+               'path,clock=sys.argv[1],float(sys.argv[2])\n'
+               'sys.argv=[path]\n'
+               'with unittest.mock.patch.object(time,"time",return_value=clock):\n'
+               '    runpy.run_path(path,run_name="__main__")\n')
+    return [sys.executable, '-B', '-c', wrapper, str(path), str(clock)]
 
 
 def prepare_dashboard_fixtures(gateway):
@@ -31,18 +80,6 @@ def prepare_refresh_fixtures(gateway):
 
 
 def prepare_test_fixtures(gateway):
-    # Official reset tests use literal 2026-11-02 instants and expire on that
-    # date. Freeze their synthetic wall clock before those samples; retain all
-    # future/stale, header/body and exact-second assertions. Production time
-    # validation remains unchanged, and no other suite inherits this clock.
-    path = gateway / 'tests/_test_rate_limit_reset_at.py'
-    source = path.read_text(encoding='utf8')
-    old = 'if __name__ == "__main__":\n    unittest.main(verbosity=2)'
-    assert source.count(old) == 1, 'pinned reset-time fixture changed'
-    source = source.replace(old, 'if __name__ == "__main__":\n'
-                           '    with unittest.mock.patch.object(time, "time", return_value=1793500000):\n'
-                           '        unittest.main(verbosity=2)')
-    path.write_text(source, encoding='utf8')
     # Native 1.9.1 makes terminal stopping opt-in. Our guarded Responses/Chat
     # streams already stop unconditionally, a deliberately stronger old contract.
     # Preserve default tail consumption for the native aggregate, and assert no
