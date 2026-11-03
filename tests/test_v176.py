@@ -14,6 +14,8 @@ class V176DispatchTests(unittest.TestCase):
     def handler(self, path, payload):
         handler=wb.Handler.__new__(wb.Handler)
         handler.path=path
+        # v1.10.7 dispatch resolves the realm before applying regional routes.
+        handler.headers={}
         handler._is_panel_route=mock.Mock(return_value=False)
         handler._authorized=mock.Mock(return_value=True)
         handler._key_ok=mock.Mock(return_value=True)

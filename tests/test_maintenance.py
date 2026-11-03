@@ -55,6 +55,17 @@ class MaintenanceTests(unittest.TestCase):
             path.rename(root / 'tests/_test_renamed.py')
             self.assertNotEqual(official_test_inventory(root)['inventory_sha256'], first['inventory_sha256'])
 
+    def test_native_dynamic_date_suite_runs_without_clock_adapter(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / '_test_rate_limit_reset_at.py'
+            original = b'SAMPLE_RESET_AT = int(time.time()) + SAMPLE_RESET_IN\n'
+            path.write_bytes(original)
+            self.assertEqual(test_command(path), [sys.executable, '-B', str(path)])
+            self.assertEqual(path.read_bytes(), original)
+            path.write_text('SAMPLE_RESET_AT = unexpected_clock()\n')
+            with self.assertRaises(AssertionError):
+                test_command(path)
+
 
 if __name__ == '__main__':
     unittest.main()

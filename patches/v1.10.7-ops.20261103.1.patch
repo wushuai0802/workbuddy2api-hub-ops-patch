@@ -1,16 +1,16 @@
 --- a/dashboard.html
 +++ b/dashboard.html
-@@ -1504,6 +1504,9 @@
+@@ -1517,6 +1517,9 @@
    var ATTRS = ['title', 'placeholder', 'aria-label', 'data-label', 'alt'];
    var SKIP = {SCRIPT: 1, STYLE: 1, TEXTAREA: 1, NOSCRIPT: 1};
    var DICT = {
 +    '当前部署不支持日志终端窗口': 'Log viewer windows are unavailable for this deployment',
 +    '请通过部署管理器停止服务': 'Stop this service through its deployment manager',
 +    '未确认服务已关闭': 'Service shutdown was not confirmed',
-     '添加 API Key 账号': 'Add an API Key account',
-     '粘贴 CodeBuddy API 管理页签发的静态 Key': 'Paste the static key issued by the CodeBuddy API console',
-     '前缀。': 'prefix.',
-@@ -4018,7 +4021,7 @@
+     '媒体': 'Media',
+     '媒体生成': 'Media generation',
+     '生图 / 生视频的开关在「设置」页；这里看模型约束和最近任务。每次生成都会真实扣账号积分。': 'The image / video switches live on the Settings page; this page shows model limits and recent tasks. Every generation really spends account credits.',
+@@ -4088,7 +4091,7 @@
              title="在新窗口打开运行日志" aria-label="在新窗口打开运行日志">
        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
      </button>
@@ -19,7 +19,7 @@
              title="关闭网关服务（进程退出，需重新运行启动脚本）" aria-label="关闭网关服务">
        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
          <path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/>
-@@ -8529,6 +8532,21 @@
+@@ -8726,6 +8729,21 @@
  // macOS / 容器走同一条路（#427）。关闭服务不能凭一次 postJSON 的成败就宣布
  // 成功——容器或守护进程可能把进程重新拉起，所以要用 /health 复核（#426）。
  let GATEWAY_DOWN = false;
@@ -41,7 +41,7 @@
  
  function toggleConsoleWindow(){
    let win = null;
-@@ -8539,35 +8557,38 @@
+@@ -8736,35 +8754,38 @@
  }
  
  async function shutdownGateway(opts){
@@ -98,7 +98,7 @@
    const dot = document.getElementById('statusDot');
    if(dot) dot.style.background = 'var(--bad)';
    const t = document.getElementById('btnConsoleToggle');
-@@ -11473,7 +11494,7 @@
+@@ -11670,7 +11691,7 @@
    // 并行跑，其余照旧等待；异常自己收，别变成未处理的拒绝。
    loadGrowthTasks().catch(() => {});
    await Promise.all([loadAccounts(), loadModels(), loadAgentModelSelection(),
@@ -107,7 +107,16 @@
    updateRecentLimitButtons();
    // The head script already resolved this before first paint; re-apply it
    // here so the data loaders for the active page actually run.
-@@ -17105,20 +17126,20 @@
+@@ -11886,7 +11907,7 @@
+ function filterSettingsCategory(cat){
+   CURRENT_SETTINGS_CAT = cat || 'all';
+   try { localStorage.setItem('WB_SETTINGS_CAT', CURRENT_SETTINGS_CAT); } catch(e){}
+-  
++
+   // 1. Update capsule button active class
+   document.querySelectorAll('.settings-cat-btn').forEach(btn => {
+     btn.classList.toggle('active', btn.dataset.cat === CURRENT_SETTINGS_CAT);
+@@ -17576,20 +17597,20 @@
    // 否则 /usage/timeseries?…&until=… 这一条照样每轮都换 URL。
    const now = (untilAt === undefined || untilAt === null) ? Math.floor(Date.now() / 1000) : untilAt;
    if (state.range === 'today'){
@@ -161,7 +170,7 @@
  import urllib.error
  import urllib.request
  import uuid
-@@ -80,11 +83,20 @@
+@@ -84,11 +87,20 @@
  import wb_tiers
  import wb_upstream_pool
  import wb_webtools
@@ -182,7 +191,7 @@
  import wb_update_request
  IS_WINDOWS = os.name == "nt"
  
-@@ -289,6 +301,10 @@
+@@ -295,6 +307,10 @@
  # 任何进程：容器 / Linux 上没有窗口可开，Windows 上也不需要第二个 python 进程
  # （#427）。启动脚本仍可单独拉起 console_tail.py，那是命令行通道，与本按钮无关。
  # ---------------------------------------------------------------------------
@@ -192,8 +201,8 @@
 +
  UPSTREAM = "https://www.workbuddy.ai"
  CHAT_PATH = "/v2/chat/completions"
- MODELS_PATH = "/v2/enterprises/personal/models"
-@@ -379,7 +395,7 @@
+ 
+@@ -1082,7 +1098,7 @@
  # API from another origin. Management routes (accounts, settings, usage,
  # scheduler, panel) serve the dashboard, which is same-origin, so they get no
  # ACAO header - that keeps a stray page on the LAN from reading their replies.
@@ -202,7 +211,7 @@
  # Management paths that happen to live under /v1 must not be treated as API:
  # /v1/usage reports account-level spend and is gated by the panel session.
  MANAGEMENT_PATH_PREFIXES = ("/v1/usage", "/usage", "/accounts", "/settings",
-@@ -640,15 +656,11 @@
+@@ -1343,15 +1359,11 @@
      usage["cache_read_input_tokens"] = best
      usage["cached_tokens"] = best
      usage["prompt_cache_hit_tokens"] = best
@@ -220,7 +229,7 @@
      if isinstance(usage.get("input_tokens_details"), dict):
          input_details = dict(usage["input_tokens_details"])
          input_details["cached_tokens"] = best
-@@ -821,9 +833,12 @@
+@@ -1524,9 +1536,12 @@
      """
      if not isinstance(usage, dict):
          return 0
@@ -236,7 +245,7 @@
      for value in (prompt_details.get("cached_tokens"),
                    usage.get("prompt_cache_hit_tokens"),
                    usage.get("cache_read_input_tokens"),
-@@ -831,10 +846,12 @@
+@@ -1534,10 +1549,12 @@
                    input_details.get("cached_tokens"),
                    details.get("cached_tokens")):
          try:
@@ -251,16 +260,16 @@
              # Token counts must stay integers: the Codex client parses
              # response.completed strictly and rejects 123.0 (invalid number).
              return int(number)
-@@ -886,7 +903,7 @@
-         row.update(fp)
-     if account:
-         row["account"] = account
+@@ -1597,7 +1614,7 @@
+         row["proxy_slot"] = proxy_slot
+     if proxy_exit:
+         row["proxy_exit"] = proxy_exit
 -    acc = POOL.get(account) if (account and POOL) else None
 +    acc = POOL.get(account) if (account and POOL and realm != "codearts") else None
      row["realm"] = realm or (acc.realm if acc else CURRENT_REALM)
      # The refresher visits one account per tick, so on a large pool the cached
      # balance can be hours old; subtract this request's real cost at once so
-@@ -916,6 +933,9 @@
+@@ -1638,6 +1655,9 @@
          row["cache_hit_pct"] = round(fields.get("cached_tokens", 0) * 100.0
                                       / fields["prompt_tokens"], 1)
      _persist_usage(row, "usage persist failed")
@@ -270,21 +279,56 @@
      try:
          t_tokens = fields.get("total_tokens", 0)
          dur = f" {elapsed_ms:.0f}ms" if elapsed_ms is not None else ""
-@@ -951,6 +971,13 @@
+@@ -1660,13 +1680,14 @@
+ 
+ 
+ def record_upstream_usage(upstream, requested_model, usage, **kwargs):
+-    """Record the model actually billed upstream, preserving the client alias."""
++    """Record the billed model and immutable outbound attempt provenance."""
+     billed_model = getattr(upstream, "_wb_billed_model", requested_model)
+-    # 出口归因（#743）：每条完成行都带上响应对象的账号槽位与实际出口。
+-    account = POOL.get(getattr(upstream, "_wb_account_uid", "")) if POOL else None
+-    if account is not None:
+-        kwargs.setdefault("proxy_slot", account.proxy_slot)
+-        kwargs.setdefault("proxy_exit", egress_exit(account.proxy))
++    if getattr(upstream, "_ops_realm", None) == "codearts":
++        kwargs["realm"] = "codearts"
++    for key in ("proxy_slot", "proxy_exit"):
++        value = getattr(upstream, "_ops_" + key, None)
++        if value:
++            kwargs.setdefault(key, value)
+     record_usage(billed_model, usage, requested_model=requested_model, **kwargs)
+ 
+ 
+@@ -1680,11 +1701,24 @@
+     pure overhead on the request path. One append per request now.
+     """
+     try:
+-        os.makedirs(USAGE_DIR, exist_ok=True)
+-        with open(USAGE_LOG, "a", encoding="utf-8") as fh:
+-            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
++        wb_usage_io.append_line(
++            USAGE_LOG, json.dumps(row, ensure_ascii=False),
++            error_hook=lambda message: log("%s: %s" % (fail_label, message)))
      except Exception as exc:
          log("%s: %s" % (fail_label, exc))
- 
++
 +def _record_open_error(exc, model, status, message, **kwargs):
 +    """Attribute an entry failure to the attempted model without duplicate rows."""
-+    kwargs.setdefault('account', getattr(exc, 'account_uid', None))
++    source = getattr(exc, 'http_error', None) or getattr(exc, '__cause__', None) or exc
++    if not kwargs.get('account'):
++        kwargs['account'] = getattr(exc, 'account_uid', None) or getattr(source, 'account_uid', None)
++    for key in ("proxy_slot", "proxy_exit"):
++        value = getattr(exc, key, None) or getattr(source, key, None)
++        if value:
++            kwargs.setdefault(key, value)
 +    return _record_billed_error({'billed_model': getattr(exc, '_wb_billed_model', None)},
 +                               model, status, message, **kwargs)
 +
-+
+ 
  def upstream_failure_response(handler, model, exc, t_start, key_id=None):
      """一次上游失败的统一出口：先定状态码，再落盘，最后回客户端。
- 
-@@ -964,7 +991,7 @@
+@@ -1699,7 +1733,7 @@
      """
      message = str(exc)
      status = 503 if message.startswith("no usable account") else 502
@@ -293,16 +337,17 @@
                   elapsed_ms=int((time.time() - t_start) * 1000),
                   account=getattr(exc, "account_uid", None),
                   key=key_id)
-@@ -976,7 +1003,7 @@
+@@ -1711,8 +1745,7 @@
  
  def record_error(model, status, message, elapsed_ms=None, account=None,
                   usage=None, stream=None, ttft_ms=None, gen_ms=None, fp=None,
--                 outcome="failed", key=None, realm=None):
-+                 outcome="failed", key=None, effort=None, requested_model=None, realm=None):
+-                 outcome="failed", key=None, realm=None, proxy_slot=None,
+-                 proxy_exit=None):
++                 outcome="failed", key=None, effort=None, requested_model=None, realm=None, proxy_slot=None, proxy_exit=None):
      """Record one failed request as exactly one JSONL row.
  
      Passing the account uid records which account the request was bound to, so
-@@ -995,6 +1022,9 @@
+@@ -1731,6 +1764,9 @@
      only way a rejected request can be attributed to a key, so failures on the
      key's model whitelist still land on the right row instead of vanishing
      into the unattributed bucket.
@@ -312,7 +357,7 @@
      """
      fields = _extract_usage(usage) or {}
      row = {
-@@ -1007,6 +1037,8 @@
+@@ -1743,6 +1779,8 @@
          "message": str(message)[:200],
          "elapsed_ms": elapsed_ms,
      }
@@ -321,7 +366,7 @@
      if stream is not None:
          row["stream"] = bool(stream)
      if ttft_ms is not None:
-@@ -1020,11 +1052,16 @@
+@@ -1756,7 +1794,7 @@
          row["realm"] = realm
      if account:
          row["account"] = account
@@ -329,6 +374,10 @@
 +        acc = POOL.get(account) if POOL and realm != "codearts" else None
          if not realm:
              row["realm"] = acc.realm if acc else CURRENT_REALM
+     if proxy_slot:
+@@ -1764,7 +1802,12 @@
+     if proxy_exit:
+         row["proxy_exit"] = proxy_exit
      row["key"] = key or ""
 +    if effort:
 +        row["reasoning_effort"] = effort
@@ -339,7 +388,7 @@
      dur = f" {elapsed_ms:.0f}ms" if elapsed_ms is not None else ""
      # 账号与终态也带上看板日志。上面那段本来就把 account 写进了 JSONL，但日志
      # 行一直没打出来——出错时最想知道的「哪个账号、什么终态」反而要回去翻
-@@ -11151,7 +11188,7 @@
+@@ -11924,7 +11967,7 @@
      if mid == "glm-5.3-flash":
          # 强制修正：上游元数据虽宣告支持多模态，但后端实际未接入视觉通道（见 issue #315）
          vision = False
@@ -348,7 +397,7 @@
      tools = bool(meta.get("supportsToolCall"))
      thinks = bool(meta.get("supportsReasoning"))
      inputs = ["text"] + (["image"] if vision else [])
-@@ -11738,6 +11775,1305 @@
+@@ -12542,6 +12585,1311 @@
      if not line or line.startswith(":"):
          return ""
      return line
@@ -414,7 +463,7 @@
 +    return hashlib.sha256(''.join(records).encode('ascii')).hexdigest()
 +
 +_OPS_PATCH_FINGERPRINT = _patch_payload_fingerprint()
-+_OPS_PATCH_ID = "v1.10.1-ops.20261102.1"
++_OPS_PATCH_ID = "v1.10.7-ops.20261103.1"
 +_OBSERVATION_STORE = None
 +_OBSERVATION_STORE_LOCK = threading.Lock()
 +
@@ -870,6 +919,12 @@
 +        # fails. Keep that received provider usage available after close.
 +        holder["ops_provider_source"] = getattr(upstream, "_ops_codearts_source", None)
 +        holder["billed_model"] = getattr(upstream, "_wb_billed_model", None) or holder.get("model")
++        # Clear a preceding attempt's provenance when changing responses.
++        for key in ("proxy_slot", "proxy_exit"):
++            holder.pop(key, None)
++            value = getattr(upstream, "_ops_" + key, None)
++            if value:
++                holder[key] = value
 +        holder.pop("loop_evidence", None)
 +        carried = getattr(upstream, '_ops_generation_deadline', _UNSET_DEADLINE)
 +        if 'generation_deadline' not in holder and carried is not _UNSET_DEADLINE:
@@ -1654,7 +1709,7 @@
  def clean_chunk(raw):
      """Drop the empty noise fields the WorkBuddy gateway pads deltas with."""
      try:
-@@ -11760,11 +13096,16 @@
+@@ -12564,11 +13912,16 @@
          # PATCHED-BY-OPS: 原判断 `if not delta.get("function_call")` 对
          # {"name":"","arguments":""} 为假（非空 dict 是真值），空占位删不掉。
          # 改为显式检查：name 与 arguments 均空才视为占位噪音。
@@ -1672,7 +1727,7 @@
              else:
                  fc_empty = not fc
              if fc_empty:
-@@ -11785,7 +13126,7 @@
+@@ -12589,7 +13942,7 @@
      changed = False
      if isinstance(obj, dict):
          fc = obj.get("function_call")
@@ -1681,7 +1736,7 @@
              obj.pop("function_call", None)
              changed = True
          tc = obj.get("tool_calls")
-@@ -12086,6 +13427,129 @@
+@@ -12897,6 +14250,129 @@
          else:
              out.append(tc)
      return out
@@ -1811,7 +1866,7 @@
  def sanitize_messages(messages):
      out = []
      for m in messages or []:
-@@ -12101,8 +13565,11 @@
+@@ -12912,8 +14388,11 @@
                  item["content"] = sanitize_content(item["content"],
                                                     identity=identity)
              if isinstance(item.get("reasoning_content"), str):
@@ -1825,7 +1880,7 @@
              if "tool_calls" in item:
                  item["tool_calls"] = sanitize_tool_calls(item["tool_calls"])
              out.append(item)
-@@ -12385,7 +13852,7 @@
+@@ -13196,7 +14675,7 @@
  # enough on its own: `reasoning` is mirrored with a non-empty value.
  def backfill_reasoning_content(messages, model, thinking_enabled=None):
      if not model or not str(model).lower().startswith("deepseek"):
@@ -1834,7 +1889,7 @@
      if thinking_enabled is None:
          thinking_enabled = False
      has_trace = False
-@@ -12405,17 +13872,28 @@
+@@ -13216,17 +14695,28 @@
      for m in messages:
          if isinstance(m, dict) and m.get("role") == "assistant":
              item = dict(m)
@@ -1864,7 +1919,7 @@
              if not (isinstance(existing, str) and existing):
                  item["reasoning"] = rc if rc else " "
              out.append(item)
-@@ -12652,9 +14130,9 @@
+@@ -13463,9 +14953,9 @@
              if not isinstance(fn, dict):
                  dropped.append("<no function>")
                  continue
@@ -1877,7 +1932,7 @@
                  continue
              if name in seen:
                  dropped.append(name + " <dup>")
-@@ -12921,9 +14399,10 @@
+@@ -13732,9 +15222,10 @@
  
  def could_be_leaked_call(tail):
      """True while `tail` (starting at "<") may still grow into printed markup."""
@@ -1891,7 +1946,7 @@
          return True
      if len(low) > 96 or ">" in low:
          return False
-@@ -12934,22 +14413,13 @@
+@@ -13745,22 +15236,13 @@
      """Split `text` after the first complete call-closing tag.
  
      Returns (prefix, rest), or (None, text) while no call has closed yet.
@@ -1917,7 +1972,7 @@
      return None, text
  
  
-@@ -12976,51 +14446,106 @@
+@@ -13787,51 +15269,106 @@
  
      def __init__(self):
          self.buf = ""
@@ -2053,7 +2108,7 @@
          calls, clean = parse_leaked_tool_calls(buf)
          if not calls:
              calls, clean = parse_dsml_tool_calls(buf)
-@@ -13365,6 +14890,14 @@
+@@ -14176,6 +15713,14 @@
      return {"allowed_accounts": allowed} if allowed is not None else {}
  
  
@@ -2068,7 +2123,7 @@
  def key_model_message(entry, model):
      """Explain a per-key model restriction the same way the global ban does."""
      name = (entry or {}).get("name") or "未命名"
-@@ -13393,6 +14926,11 @@
+@@ -14204,6 +15749,11 @@
      return cfg
  
  
@@ -2080,7 +2135,7 @@
  def apply_prompt_mode(messages):
      """Apply the configured prompt mode to one request's messages.
  
-@@ -13403,7 +14941,7 @@
+@@ -14214,7 +15764,7 @@
      """
      cfg = prompt_mode_config()
      mode = cfg.get("mode") or "passthrough"
@@ -2089,7 +2144,7 @@
      if mode in ("custom", "append"):
          try:
              text = wb_prompt.load_prompt(mode, cfg.get("file"), cfg.get("text"))
-@@ -13441,9 +14979,12 @@
+@@ -14252,9 +15802,12 @@
      # one the upstream sees, with the client's fingerprint-y system text gone.
      messages = apply_prompt_mode(messages)
      messages = sanitize_messages(messages)
@@ -2102,7 +2157,7 @@
      if not messages or (messages[0].get("role") != "system"):
          messages = [{"role": "system", "content": SYSTEM_PROMPT}] + messages
      body = dict(payload)
-@@ -13761,10 +15302,10 @@
+@@ -14611,10 +16164,10 @@
  
  
  class ContentRejected(Exception):
@@ -2117,7 +2172,7 @@
      """
  
      def __init__(self, http_error=None, detail=""):
-@@ -13792,7 +15333,7 @@
+@@ -14642,7 +16195,7 @@
          # 时刻；其余 429 由网关按自己算出的冷却窗口补上。
          try:
              self.reset_at = float(reset_at) if reset_at else None
@@ -2126,7 +2181,7 @@
              self.reset_at = None
          # 429s answered without an upstream call (the pool is parked by the
          # daily token guard) carry their own text instead of the upstream
-@@ -13946,11 +15487,13 @@
+@@ -14796,11 +16349,13 @@
          account_slot_release(account)
          return
      released = [False]
@@ -2143,7 +2198,7 @@
          account_slot_release(account)
  
      try:
-@@ -14183,6 +15726,36 @@
+@@ -15033,6 +16588,36 @@
          return b""
  
  
@@ -2180,7 +2235,7 @@
  def model_scoped_errors_penalize_account():
      """Escape hatch: restore the old "any 5xx charges the account" behaviour."""
      raw = os.environ.get("WB_MODEL_SCOPED_ERRORS_PENALIZE", "")
-@@ -14383,19 +15956,136 @@
+@@ -15233,19 +16818,136 @@
  _RESTRICTION_LOCK = threading.Lock()
  _RESTRICTION_EVENTS = {}   # realm -> {uid: epoch}（窗口内被限制的账号）
  _RESTRICTION_HOLD = {}     # realm -> 暂停到哪个 epoch
@@ -2317,7 +2372,7 @@
          return max(0.0, _RESTRICTION_HOLD.get(realm, 0.0) - now)
  
  
-@@ -14409,16 +16099,22 @@
+@@ -15259,16 +16961,22 @@
      """
      now = time.time() if now is None else now
      uid = str(uid or "").strip() or "-"
@@ -2346,7 +2401,7 @@
      log("upstream restriction wave on %s: %d account(s) restricted within %.0fs; "
          "pausing dispatch for %.0fs to avoid cross-account bans (uid %s)"
          % (realm, len(events), RESTRICTION_WAVE_WINDOW,
-@@ -14449,8 +16145,8 @@
+@@ -15299,8 +17007,8 @@
  #: 识别风控限制 403 的正文特征。内容审核的 403 走降级提示词那条路，二者必须
  #: 分开：对被限制的账号换提示词没有意义。code 匹配用正则（requestId 是 hex，
  #: 裸字符串 "11140" 可能撞上），措辞只收实测的限制用语，不猜。
@@ -2357,7 +2412,7 @@
  
  
  def restriction_is_account_level(detail):
-@@ -14461,12 +16157,7 @@
+@@ -15311,12 +17019,7 @@
      异常行为，已被限制使用"}}。en 在前 zh 在后，短截断也保得住 code 与 en；
      拿不全的正文宁可漏判回内容审核路径，也不误判。
      """
@@ -2371,7 +2426,7 @@
  
  
  def _unescape_body(detail):
-@@ -14672,11 +16363,7 @@
+@@ -15522,11 +17225,7 @@
          return False
      if seconds <= 0:
          return False
@@ -2384,7 +2439,7 @@
      if sock is None:
          return False
      try:
-@@ -14724,10 +16411,14 @@
+@@ -15574,10 +17273,14 @@
          "1", "true", "yes", "on")
  
  
@@ -2400,7 +2455,7 @@
      # Refresh the daily guards before picking. The scan underneath is
      # incremental and TTL-cached, so this is a stat() plus a cached dict on
      # the hot path, and an account parked by any of the guards is skipped
-@@ -14745,12 +16436,14 @@
+@@ -15595,12 +17298,14 @@
              remaining_schedule_weights() if remaining_priority_enabled() else None)
      realm = target_realm or detect_model_realm(payload.get("model")) or CURRENT_REALM
      model = str(payload.get("model") or "")
@@ -2418,7 +2473,7 @@
          if pinned.realm != realm:
              raise PinnedAccountError(
                  409, "pinned account '%s' belongs to realm %s, request targets %s"
-@@ -14788,19 +16481,15 @@
+@@ -15638,19 +17343,15 @@
      # 每请求新生成（见 wb_identity.new_turn_request_id）。生成在重试循环外，
      # 循环里只把它传给身份构造；桌面端 / VSCode 分支不消费它，行为不变。
      turn_request_id = wb_identity.new_turn_request_id()
@@ -2441,7 +2496,7 @@
      # 重轮）会把同一个账号再挑一遍，若每次都记，一次请求就能给同一个账号记上
      # 好几笔 fails/degrade——池子越空、重轮越频繁，越容易把一个刚抖了一下的
      # 账号直接推过熔断阈值。一次请求对一个账号最多记一次。
-@@ -14808,7 +16497,6 @@
+@@ -15658,7 +17359,6 @@
      # A 401 may simply mean the access token expired before its JWT clock did.
      # Refresh at most once per account per request, then retry that same
      # account instead of silently rotating away from a recoverable credential.
@@ -2449,7 +2504,7 @@
      refresh_uid = None
  
      def pool_account(uid):
-@@ -14841,6 +16529,7 @@
+@@ -15691,6 +17391,7 @@
      last_403_detail = ""
      transient_hits = 0
      degraded_retried = False
@@ -2457,7 +2512,7 @@
      # 一次请求里因为 11140 换过的号数：默认 0，即第一个号被限制就停手。
      restricted_rotations = 0
      # 本机断网的次数：这一轮里只要出现过，最终报错就按「网络不可用」报，不按
-@@ -14857,11 +16546,17 @@
+@@ -15707,11 +17408,17 @@
      # per request, and when it is off the retry loop below is byte-for-byte the
      # old path.
      egress_backoff = wb_settings.egress_backoff_enabled(ACCOUNTS_DIR)
@@ -2476,7 +2531,7 @@
  
      def charge_egress(url, proxy):
          key = wb_upstream_pool.egress_key(url, proxy)
-@@ -14869,7 +16564,7 @@
+@@ -15719,7 +17426,7 @@
              egress_wait[key] = wb_egress.note_transient(key)
          return egress_wait[key]
  
@@ -2485,7 +2540,7 @@
                      max(2, total) + 1 + (MAX_PRODUCT_SWITCHES if auto_switch else 0))
      # 官方 VSCode 扩展的 X-Conversation-ID 是 32hex、会话稳定；网关没有会话
      # 映射，至少保证同一次 open_upstream（含换号重试）里是同一个 id。桌面端 /
-@@ -14882,9 +16577,43 @@
+@@ -15732,9 +17439,43 @@
      # tried 记的是「这一轮试过且失败」的账号，busy 只是「此刻没空」，等它的请求
      # 结束后这个账号完全可用，不该被当成失败账号影响熔断或亲和。
      busy = set()
@@ -2531,7 +2586,7 @@
      def pick_account():
          """按当前 exclude/busy 选一个账号，并占住它的在飞名额。
  
-@@ -14900,438 +16629,454 @@
+@@ -15750,450 +17491,466 @@
              candidate = POOL.pick_for_session(**kwargs) if POOL else None
              if candidate is None:
                  return None
@@ -2669,23 +2724,6 @@
 -            # 头之后还要读几十秒，那段时间上游仍算这个账号在跑）。绑定后本地
 -            # 标记置空，循环开头就不会再重复归还。
 -            bind_account_slot_to_response(resp, account)
--            slot_held = None
--            # The third element is the reasoning effort this request ran at: the
--            # body is rebuilt per attempt, but the effort is a property of the
--            # model and the request, and the callers record it on the usage row.
--            return resp, account, upstream_effort_of(upstream_body, model)
--        except urllib.error.HTTPError as exc:
--            if exc.code == 429:
--                try:
--                    detail = read_http_error(exc, 600).decode("utf-8", "replace")
--                except Exception:
--                    detail = ""
--                reset_at = parse_rate_limit_reset(detail)
--                if rate_limit_is_account_level(detail, reset_at):
--                    wait = account.note_soft_rate("HTTP 429 (account soft rate)")
--                    log("account %s soft-rate limited (%r), cooling %.0fs (streak %d)"
--                        % (account.uid[:8], credential_scope_phrase(detail), wait,
--                           account.soft_streak))
 +            if deadline_at is not None and time.monotonic() >= deadline_at:
 +                raise TimeoutError("upstream connection deadline exceeded")
 +            if pinned is not None:
@@ -2721,6 +2759,9 @@
 +                continue
 +            tried.add(account.uid)
 +            last_uid = account.uid
++            attempt_proxy_slot = getattr(account, "proxy_slot", None)
++            attempt_proxy = account.proxy
++            attempt_proxy_exit = egress_exit(attempt_proxy)
 +            cfg = wb_accounts.get_realm_config(account.realm)
 +            chat_url = account.chat_base_url() + CHAT_PATH
 +            # The cache key is account scoped, so it is rebuilt per candidate rather
@@ -2776,8 +2817,8 @@
 +                if remaining <= 0:
 +                    raise TimeoutError("upstream connection deadline exceeded")
 +                timeout = min(timeout, remaining)
-+            try:
-+                resp = wb_accounts.urlopen(req, timeout=timeout, proxy=account.proxy)
+             try:
++                resp = wb_accounts.urlopen(req, timeout=timeout, proxy=attempt_proxy)
 +                if deadline_at is not None and time.monotonic() >= deadline_at:
 +                    raise TimeoutError("upstream connection deadline exceeded")
 +                _apply_stream_idle_timeout(resp, idle_timeout)
@@ -2797,6 +2838,20 @@
 +                # body is rebuilt per attempt, but the effort is a property of the
 +                # model and the request, and the callers record it on the usage row.
 +                effort = upstream_effort_of(upstream_body, model)
+                 resp._wb_account_uid = account.uid
+-            except Exception:
+-                pass
+-            slot_held = None
+-            # The third element is the reasoning effort this request ran at: the
+-            # body is rebuilt per attempt, but the effort is a property of the
+-            # model and the request, and the callers record it on the usage row.
+-            return resp, account, upstream_effort_of(upstream_body, model)
+-        except urllib.error.HTTPError as exc:
+-            # 归因（#743）：所有 HTTPError 分支共用，exit 的 raise 路径也能
+-            # 带回实际账号与出口；400 分支因此不再需要单独补一次。
+-            try:
++                resp._ops_proxy_slot = attempt_proxy_slot
++                resp._ops_proxy_exit = attempt_proxy_exit
 +                if slot_held is not None:
 +                    bind_account_slot_to_response(resp, slot_held)
 +                    slot_held = None
@@ -2804,6 +2859,24 @@
 +                return completed_response, account, effort
 +            except urllib.error.HTTPError as exc:
 +                release_slot()
+                 exc.account_uid = account.uid
+-                exc.proxy_slot = account.proxy_slot
+-                exc.proxy_exit = egress_exit(account.proxy)
+-            except Exception:
+-                pass
+-            if exc.code == 429:
+-                try:
+-                    detail = read_http_error(exc, 600).decode("utf-8", "replace")
+-                except Exception:
+-                    detail = ""
+-                reset_at = parse_rate_limit_reset(detail)
+-                if rate_limit_is_account_level(detail, reset_at):
+-                    wait = account.note_soft_rate("HTTP 429 (account soft rate)")
+-                    log("account %s soft-rate limited (%r), cooling %.0fs (streak %d)"
+-                        % (account.uid[:8], credential_scope_phrase(detail), wait,
+-                           account.soft_streak))
++                exc.proxy_slot = attempt_proxy_slot
++                exc.proxy_exit = attempt_proxy_exit
 +                if exc.code == 429:
 +                    try:
 +                        detail = read_http_error(exc, 600).decode("utf-8", "replace")
@@ -3220,6 +3293,9 @@
 +                    _close_upstream(resp)
 +                    resp = None
 +                release_slot()
++                exc.account_uid = account.uid
++                exc.proxy_slot = attempt_proxy_slot
++                exc.proxy_exit = attempt_proxy_exit
 +                if deadline_at is not None and time.monotonic() >= deadline_at:
 +                    raise TimeoutError("upstream connection deadline exceeded") from exc
 +                if wb_accounts.is_tls_verify_error(exc):
@@ -3379,7 +3455,7 @@
          try:
              response._wb_billed_model = paid_model
          except Exception:
-@@ -15455,7 +17200,7 @@
+@@ -16317,7 +18074,7 @@
      return wb_settings.realm_fallback_enabled(ACCOUNTS_DIR) is True
  
  
@@ -3388,7 +3464,7 @@
      """回退的目标 realm；返回 "" 表示这次请求不该回退。
  
      三个条件同时成立：
-@@ -15473,7 +17218,10 @@
+@@ -16335,7 +18092,10 @@
      if POOL is None:
          return ""
      try:
@@ -3400,7 +3476,7 @@
              return ""
      except Exception:
          return ""
-@@ -15500,12 +17248,27 @@
+@@ -16362,12 +18122,27 @@
      """
      realm = target_realm or detect_model_realm(payload.get("model")) or CURRENT_REALM
  
@@ -3429,7 +3505,7 @@
          detail = getattr(exc, "detail", "") or getattr(exc, "message", "") \
              or str(exc)
          log("realm fallback: %s cannot serve '%s' (%s), retrying on %s"
-@@ -15821,7 +17584,65 @@
+@@ -16683,7 +18458,65 @@
  # 摊成「一块一次」，同时不会让首字节延迟变差（见 iter_sse_lines）。
  SSE_READ_BLOCK = 64 * 1024
  
@@ -3496,7 +3572,7 @@
      """按块读取流式响应并逐行产出，把逐行 read 的 syscall 开销摊掉。
  
      直接 `for line in resp` 迭代 http.client.HTTPResponse 时，每一行都要走
-@@ -15842,14 +17663,28 @@
+@@ -16704,14 +18537,28 @@
      攒下的写出掉：一个读取块里的事件因此合成一次 write，而下一个字节一到就
      立刻产出——延迟与逐块写完全一样，只是不再一个 chunk 一次 sendall。
      """
@@ -3528,7 +3604,7 @@
      while True:
          if before_read is not None:
              before_read()
-@@ -15863,15 +17698,46 @@
+@@ -16725,15 +18572,46 @@
              if remaining > 0:
                  raise http.client.IncompleteRead(b"", remaining)
              break
@@ -3582,7 +3658,7 @@
  
  SSE_HEARTBEAT_SECONDS = 15.0
  
-@@ -15891,6 +17757,7 @@
+@@ -16753,6 +18631,7 @@
          self._last_write_at = time.monotonic()
          self._stop = threading.Event()
          self._closed = False
@@ -3590,7 +3666,7 @@
          self._thread = threading.Thread(
              target=self._run, name="wb-sse-heartbeat", daemon=True)
          self._thread.start()
-@@ -15899,6 +17766,8 @@
+@@ -16761,6 +18640,8 @@
          if not data:
              return
          with self._lock:
@@ -3599,7 +3675,7 @@
              if self._closed:
                  return
              self._write(data)
-@@ -15916,15 +17785,18 @@
+@@ -16778,15 +18659,18 @@
                  try:
                      self._write(b": keepalive\n\n")
                      self._last_write_at = time.monotonic()
@@ -3620,7 +3696,7 @@
  
      def __enter__(self):
          return self
-@@ -15934,14 +17806,18 @@
+@@ -16796,14 +18680,18 @@
          return False
  
  
@@ -3640,7 +3716,7 @@
      for line in iter_sse_lines(raw_iter):
          data = strip_data_prefix(line.decode("utf-8", "replace"))
          if data == "[DONE]":
-@@ -15955,6 +17831,12 @@
+@@ -16817,6 +18705,12 @@
              chunk = json.loads(data)
          except Exception:
              continue
@@ -3653,7 +3729,7 @@
          if first_chunk_at is None:
              first_chunk_at = time.time()
          if chunk.get("id"):
-@@ -15969,8 +17851,12 @@
+@@ -16831,8 +18725,12 @@
              delta = choice.get("delta") or {}
              if delta.get("content"):
                  content.append(delta["content"])
@@ -3667,7 +3743,7 @@
              for tc in delta.get("tool_calls") or []:
                  idx = tc.get("index")
                  if idx is None:
-@@ -16001,7 +17887,8 @@
+@@ -16863,7 +18761,8 @@
              # 占位。原判断对空 dict 成立，会凭空生成 tool_call 并伪造 id，
              # 导致 finish_reason 被改成 "tool_calls"（参数全空）→ 严格客户端死等。
              # 故：只要 name 为空即视为无效占位直接跳过。
@@ -3677,7 +3753,7 @@
              if fc and isinstance(fc, dict) and not fc_is_empty:
                  idx = 0
                  if idx not in tool_calls_map:
-@@ -16021,13 +17908,36 @@
+@@ -16883,13 +18782,36 @@
                          entry["function"]["arguments"] += fc["arguments"]
              if choice.get("finish_reason"):
                  finish = choice["finish_reason"]
@@ -3716,7 +3792,7 @@
          finish = "tool_calls"
      # PATCH2-BY-OPS: 二次防御——剔除「无函数名且无参数」的空 tool_call。
      # 即使上游以 tool_calls 数组形式发空占位，也不会泄漏给客户端。
-@@ -16045,6 +17955,8 @@
+@@ -16907,6 +18829,8 @@
              k: v for k, v in tool_calls_map.items()
              if not is_truncated_arguments((v.get("function") or {}).get("arguments"))
          }
@@ -3725,7 +3801,7 @@
      if tool_calls_map:
          ordered_tcs = [tool_calls_map[k] for k in sorted(tool_calls_map.keys())]
          message["tool_calls"] = ordered_tcs
-@@ -16081,6 +17993,8 @@
+@@ -16943,6 +18867,8 @@
      if usage:
          normalize_usage_cache_aliases(usage)
          out["usage"] = usage
@@ -3734,7 +3810,7 @@
      out["elapsed_ms"] = int((time.time() - started) * 1000)
      out["first_chunk_at"] = first_chunk_at
      return out
-@@ -16618,10 +18532,16 @@
+@@ -17480,10 +19406,16 @@
          })
      body["messages"] = convo
      body["stream"] = True
@@ -3753,7 +3829,7 @@
  
  
  def internal_calls_from_chat(chat_obj, web_tools=False):
-@@ -16944,7 +18864,7 @@
+@@ -17806,7 +19738,7 @@
              else:
                  log("responses: WARNING unhandled input item type=%r keys=%s"
                      % (itype, sorted(item.keys())[:8]))
@@ -3762,7 +3838,7 @@
  
  
  def _looks_like_compaction_prompt(messages):
-@@ -17543,6 +19463,9 @@
+@@ -18405,6 +20337,9 @@
      text = _anthropic_text(text)
      if text:
          content.append({"type": "text", "text": text})
@@ -3772,7 +3848,7 @@
      tool_calls = message.get("tool_calls")
      if isinstance(tool_calls, list):
          for call in tool_calls:
-@@ -17697,14 +19620,16 @@
+@@ -18559,14 +20494,16 @@
                  "index": state["thinking_idx"],
                  "delta": {"type": "thinking_delta", "thinking": reason},
              })
@@ -3797,7 +3873,7 @@
          for call in delta.get("tool_calls") or []:
              if not isinstance(call, dict):
                  continue
-@@ -17751,7 +19676,7 @@
+@@ -18613,7 +20550,7 @@
                  })
          finish = choice.get("finish_reason")
          if finish:
@@ -3806,7 +3882,7 @@
      if state["failed"]:
          return
      if not state["started"]:
-@@ -17785,12 +19710,10 @@
+@@ -18647,12 +20584,10 @@
      if not u:
          return None
      det = u.get("completion_tokens_details") or {}
@@ -3820,7 +3896,7 @@
          },
          "output_tokens": u.get("completion_tokens") or 0,
          "output_tokens_details": {"reasoning_tokens": det.get("reasoning_tokens") or 0},
-@@ -17812,7 +19735,8 @@
+@@ -18674,7 +20609,8 @@
      choice = (chat_obj.get("choices") or [{}])[0]
      msg = choice.get("message") or {}
      text = msg.get("content") or ""
@@ -3830,7 +3906,7 @@
      output = []
      if reasoning:
          output.append({
-@@ -17843,8 +19767,9 @@
+@@ -18705,8 +20641,9 @@
                  "name": name,
                  "arguments": fn.get("arguments") or "{}",
              })
@@ -3842,7 +3918,7 @@
          dsml_calls, clean_t = parse_dsml_tool_calls(text)
          if dsml_calls:
              for dc in dsml_calls:
-@@ -17857,21 +19782,26 @@
+@@ -18719,21 +20656,26 @@
                      "arguments": dc.get("arguments") or "{}",
                  })
              text = clean_t
@@ -3873,7 +3949,7 @@
          "model": model,
          "output": output,
          "output_text": text,
-@@ -17889,7 +19819,514 @@
+@@ -18751,7 +20693,520 @@
          obj["usage"] = u
      if finish == "length":
          obj["incomplete_details"] = {"reason": "max_output_tokens"}
@@ -3985,6 +4061,9 @@
 +
 +
 +def _record_billed_usage(holder, requested_model, usage, **kwargs):
++    for key in ("proxy_slot", "proxy_exit"):
++        if holder.get(key):
++            kwargs.setdefault(key, holder[key])
 +    if holder.get("realm") == "codearts":
 +        kwargs["realm"] = "codearts"
 +        kwargs.pop("effort", None)
@@ -3995,6 +4074,9 @@
 +
 +
 +def _record_billed_error(holder, requested_model, status, message, **kwargs):
++    for key in ("proxy_slot", "proxy_exit"):
++        if holder.get(key):
++            kwargs.setdefault(key, holder[key])
 +    if holder.get("realm") == "codearts":
 +        kwargs["realm"] = "codearts"
 +        kwargs.pop("effort", None)
@@ -4388,7 +4470,7 @@
  
  
  def reasoning_only_response(result):
-@@ -17907,27 +20344,41 @@
+@@ -18769,27 +21224,41 @@
  
  
  def stream_responses_events(upstream, model, holder):
@@ -4436,7 +4518,7 @@
      # Echo the request capabilities the client actually sent, same as the
      # non-streaming path; these were hardcoded before.
      meta = holder.get("request_meta") or {}
-@@ -17939,13 +20390,13 @@
+@@ -18801,13 +21270,13 @@
              "status": status,
              "model": model,
              "output": [o for o in outputs if o],
@@ -4452,7 +4534,7 @@
          if u:
              obj["usage"] = u
          if ns_map:
-@@ -17954,6 +20405,13 @@
+@@ -18816,6 +21285,13 @@
      def ev(etype, payload):
          nonlocal seq
          seq += 1
@@ -4466,7 +4548,7 @@
          data = {"type": etype, "sequence_number": seq}
          data.update(payload)
          body = json.dumps(data, ensure_ascii=False)
-@@ -17975,14 +20433,66 @@
+@@ -18837,14 +21313,66 @@
      def msg_item(status):
          item = {"id": msg_id, "type": "message", "status": status,
                  "role": "assistant", "content": []}
@@ -4536,7 +4618,7 @@
          if reason_index is not None and outputs[reason_index] is None:
              full_r = "".join(reason_parts)
              yield ev("response.reasoning_summary_text.done", {
-@@ -17996,7 +20506,9 @@
+@@ -18858,7 +21386,9 @@
              yield ev("response.output_item.done",
                       {"output_index": reason_index, "item": outputs[reason_index]})
          # 1. Emit completed structured tool calls
@@ -4547,7 +4629,7 @@
              entry = tool_calls_map[idx]
              if entry.get("custom"):
                  yield ev("response.custom_tool_call_input.done", {
-@@ -18036,26 +20548,31 @@
+@@ -18898,26 +21428,31 @@
              })
          # Flush remaining buffered text if any
          if text_buffer:
@@ -4583,7 +4665,7 @@
              for dc in dsml_calls:
                  # DSML 形状的网路工具呼叫一样由反代执行
                  if _own_web_tools and wb_webtools.is_internal_tool(dc.get("name")):
-@@ -18098,7 +20615,9 @@
+@@ -18960,7 +21495,9 @@
          # 这一轮如果有代跑的网路工具呼叫，就把完成事件留给下一轮，
          # 否则客户端会以为整个回合已经结束（旧版是在回合用尽时补一个合成的
          # resp_wrapup，那才是 issue #43 真正的病灶）。
@@ -4594,7 +4676,7 @@
              holder.setdefault("internal_calls", []).extend(
                  {"name": v["name"], "arguments": v["arguments"]}
                  for v in _internal_calls.values()
-@@ -18142,38 +20661,38 @@
+@@ -19004,38 +21541,38 @@
                  yield ev("response.web_search_call.completed", {
                      "output_index": _ws_idx, "item_id": _ws_id,
                  })
@@ -4657,7 +4739,7 @@
                  usage = {
                      "prompt_tokens": prompt_est,
                      "completion_tokens": comp,
-@@ -18182,51 +20701,86 @@
+@@ -19044,51 +21581,86 @@
                      "prompt_tokens_details": {"cached_tokens": 0},
                  }
                  holder["usage"] = usage
@@ -4772,7 +4854,7 @@
          u = chunk.get("usage")
          if u:
              if usage is None or (u.get("total_tokens") or 0) >= (usage.get("total_tokens") or 0):
-@@ -18236,26 +20790,17 @@
+@@ -19098,26 +21670,17 @@
              delta = choice.get("delta") or {}
              piece = delta.get("reasoning_content")
              if piece:
@@ -4804,7 +4886,7 @@
                  # web_search / web_fetch 由反代执行，不转发给客户端
                  if idx in _internal_calls or (
                          _own_web_tools and fn_name
-@@ -18328,31 +20873,8 @@
+@@ -19190,31 +21753,8 @@
                          })
              piece = delta.get("content")
              if piece:
@@ -4838,7 +4920,7 @@
                  # DSML tool call buffering: do not stream raw DSML tags to client
                  text_buffer += piece
                  while text_buffer:
-@@ -18361,7 +20883,7 @@
+@@ -19223,7 +21763,7 @@
                          text_parts.append(text_buffer)
                          yield ev("response.output_text.delta", {
                              "item_id": msg_id, "output_index": msg_index,
@@ -4847,7 +4929,7 @@
                          })
                          text_buffer = ""
                          break
-@@ -18372,13 +20894,12 @@
+@@ -19234,13 +21774,12 @@
                              text_parts.append(lead)
                              yield ev("response.output_text.delta", {
                                  "item_id": msg_id, "output_index": msg_index,
@@ -4866,7 +4948,7 @@
                      cand = text_buffer[idx:idx+30]
                      is_cand = ("DSML" in cand) or (len(cand) < 10 and not any(c in cand for c in (" ", "\t", "\n", ">")))
                      if is_cand:
-@@ -18386,7 +20907,7 @@
+@@ -19248,7 +21787,7 @@
                          text_parts.append(lead)
                          yield ev("response.output_text.delta", {
                              "item_id": msg_id, "output_index": msg_index,
@@ -4875,7 +4957,7 @@
                          })
                          text_buffer = text_buffer[idx:]
                          break
-@@ -18398,19 +20919,31 @@
+@@ -19260,19 +21799,31 @@
                              text_parts.append(lead)
                              yield ev("response.output_text.delta", {
                                  "item_id": msg_id, "output_index": msg_index,
@@ -4909,7 +4991,7 @@
      # Truncated streams (max_tokens, dropped connection) can leave tool-call
      # arguments as half-written JSON. Do not close those calls out as
      # completed: drop them before finalize so the client never receives a
-@@ -19036,7 +21569,7 @@
+@@ -19898,7 +22449,7 @@
          configured - both are real, and the usage log keeps them apart from
          rows written before the key field existed.
          """
@@ -4918,7 +5000,7 @@
      def _cross_realm_error(self, model, realm):
          """Explain a model/exit mismatch instead of letting upstream reject it.
          Sending gpt-6-astra to the domestic exit (or deepseek-v4-pro to the
-@@ -19247,6 +21780,23 @@
+@@ -20109,6 +22660,23 @@
              return self._get_console_state()
          if path == "/health":
              return self._get_health()
@@ -4942,7 +5024,7 @@
          if path == "/realm":
              return self._get_realm()
          if path == "/codearts/overview":
-@@ -19339,18 +21889,26 @@
+@@ -20209,18 +22777,26 @@
          return self._json(200, info)
  
      def _get_console_state(self):
@@ -4972,7 +5054,27 @@
          # 回响应、延迟退出：0.4s 让 _json 的 body 先 flush 到 socket；端口
          # 随进程释放，下次启动走原来的启动脚本。
          def _bye():
-@@ -22331,7 +24889,11 @@
+@@ -21204,14 +23780,14 @@
+             return self._error(
+                 503, "media slots busy (%d in flight); retry shortly" % MEDIA_SLOTS,
+                 "server_error")
+-        cost_hint = media_image_cost_hint(prepared["model"]["id"])
+-        spend_ok, spend_why = media_key_spend_allow(
+-            self._key_id(), cost_hint, int(config.get("daily_credits_per_key") or 0))
+-        if not spend_ok:
+-            return self._media_error(wb_media.MediaError("NO_CREDIT", spend_why))
+         excluded = set()
+         tried = 0
+         try:
++            cost_hint = media_image_cost_hint(prepared["model"]["id"])
++            spend_ok, spend_why = media_key_spend_allow(
++                self._key_id(), cost_hint, int(config.get("daily_credits_per_key") or 0))
++            if not spend_ok:
++                return self._media_error(wb_media.MediaError("NO_CREDIT", spend_why))
+             while tried < MEDIA_ROTATE_MAX:
+                 try:
+                     account = self._pick_media_account(
+@@ -23949,7 +26525,11 @@
              "accounts": account_views(),
          })
  
@@ -4984,7 +5086,7 @@
          """Serve /v1/responses by translating to chat completions upstream."""
          # A legacy `/responses/compact` call carries the summarization prompt in
          # the body, not a `compaction_trigger`, so it counts as compaction too.
-@@ -22369,6 +24931,7 @@
+@@ -23987,6 +26567,7 @@
          }
          model = payload.get("model") or "deepseek-v4.1-flash"
          want_stream = bool(payload.get("stream"))
@@ -4992,7 +5094,7 @@
          t_start = time.time()
          fp = prompt_fingerprint(chat_req.get("messages"))
          log(
-@@ -22394,24 +24957,25 @@
+@@ -24012,24 +26593,25 @@
                  return self._handle_codearts_responses(
                      chat_req, session_key, model, want_stream, compaction,
                      custom_names, request_meta, ns_map, fp, t_start)
@@ -5024,7 +5126,7 @@
                           elapsed_ms=int((time.time() - t_start) * 1000),
                           account=getattr(exc, "account_uid", None),
                           key=self._key_id())
-@@ -22419,19 +24983,19 @@
+@@ -24037,19 +26619,19 @@
                                      "（本次不计入账号熔断）" % (exc.detail or "DNS/路由失败"),
                                 "invalid_request_error")
          except wb_accounts.TLSVerifyError as exc:
@@ -5046,8 +5148,8 @@
 +            _record_open_error(exc, model, exc.code, detail,
                           elapsed_ms=int((time.time() - t_start) * 1000),
                           account=getattr(exc, "account_uid", None),
-                          key=self._key_id())
-@@ -22443,7 +25007,8 @@
+                          proxy_slot=getattr(exc, "proxy_slot", None),
+@@ -24063,7 +26645,8 @@
              if compaction:
                  return self._responses_compaction_response(
                      upstream, model, fp, account, t_start, want_stream,
@@ -5057,7 +5159,7 @@
              if want_stream:
                  return self._responses_stream_response(
                      upstream, model, custom_names, request_meta, fp, account, t_start, ns_map,
-@@ -22455,7 +25020,8 @@
+@@ -24075,7 +26658,8 @@
                  effort=effort)
  
      def _responses_compaction_response(self, upstream, model, fp, account, t_start,
@@ -5067,7 +5169,7 @@
          """Answer Codex remote compaction v2 with one `compaction` item.
  
          Codex sends the full retained history plus `{"type":"compaction_trigger"}`
-@@ -22467,26 +25033,36 @@
+@@ -24087,26 +26671,36 @@
          items` and keeps the uncompacted history, which is how a long thread
          walks past the model's window.
          """
@@ -5111,7 +5213,7 @@
          item = {
              "id": _new_id("cmp_"),
              "type": "compaction",
-@@ -22548,7 +25124,10 @@
+@@ -24168,7 +26762,10 @@
          except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
              self.close_connection = True
  
@@ -5122,7 +5224,7 @@
          self.send_response(200)
          self.send_header("Content-Type", "text/event-stream; charset=utf-8")
          self.send_header("Cache-Control", "no-cache")
-@@ -22562,81 +25141,118 @@
+@@ -24182,81 +26779,118 @@
                    "base_body": base_body,
                    "base_messages": (base_body or {}).get("messages"),
                    "session_key": session_key,
@@ -5306,7 +5408,7 @@
      def _responses_nonstream_response(self, upstream, model, custom_names, request_meta, fp, account, t_start, namespace_map=None, base_body=None, session_key=None, realm=None, effort=None, allow_web_tools=True):
          # 跟串流那条一样：客户端宣告 web_search / web_fetch 时由反代代跑。
          # 中间那几轮对客户端不可见，最后才组成一个 Responses 物件回传；不这样
-@@ -22644,53 +25260,63 @@
+@@ -24264,53 +26898,63 @@
          # 一句 unsupported call。
          sources = []
          rounds = 0
@@ -5398,7 +5500,7 @@
          return self._json(200, result)
  
      def _handle_messages_count_tokens(self, payload):
-@@ -22707,7 +25333,11 @@
+@@ -24327,7 +26971,11 @@
              return self._anthropic_error(400, str(exc), "invalid_request_error")
          return self._json(200, {"input_tokens": _anthropic_estimate_chat_tokens(chat)})
  
@@ -5410,7 +5512,7 @@
          """Serve an Anthropic Messages request through the chat pipeline."""
          try:
              chat_req = messages_to_chat(payload)
-@@ -22716,6 +25346,7 @@
+@@ -24336,6 +26984,7 @@
          model = chat_req.get("model") or "unknown"
          want_stream = bool(chat_req.get("stream"))
          session_key = extract_session_key(self.headers, chat_req)
@@ -5418,7 +5520,7 @@
          t_start = time.time()
          fp = prompt_fingerprint(chat_req.get("messages"))
          try:
-@@ -22741,17 +25372,18 @@
+@@ -24361,17 +27010,18 @@
              if req_realm == "codearts":
                  return self._handle_codearts_messages(
                      chat_req, session_key, model, want_stream, fp, t_start)
@@ -5442,7 +5544,7 @@
                           elapsed_ms=int((time.time() - t_start) * 1000),
                           account=getattr(exc, "account_uid", None),
                           key=self._key_id())
-@@ -22759,7 +25391,7 @@
+@@ -24379,7 +27029,7 @@
                                            (exc.detail or "content rejected"),
                                            "permission_error")
          except LocalNetworkError as exc:
@@ -5451,7 +5553,7 @@
                           elapsed_ms=int((time.time() - t_start) * 1000),
                           account=getattr(exc, "account_uid", None),
                           key=self._key_id())
-@@ -22768,12 +25400,12 @@
+@@ -24388,12 +27038,12 @@
                                                % (exc.detail or "DNS/路由失败"),
                                           "api_error")
          except wb_accounts.TLSVerifyError as exc:
@@ -5466,7 +5568,7 @@
                           elapsed_ms=int((time.time() - t_start) * 1000),
                           account=getattr(exc, "account_uid", None),
                           key=self._key_id())
-@@ -22783,7 +25415,7 @@
+@@ -24403,7 +27053,7 @@
                  detail = read_http_error(exc, 600).decode("utf-8", "replace")
              except Exception:
                  detail = str(exc)
@@ -5474,8 +5576,8 @@
 +            _record_open_error(exc, model, exc.code, detail,
                           elapsed_ms=int((time.time() - t_start) * 1000),
                           account=getattr(exc, "account_uid", None),
-                          key=self._key_id())
-@@ -22792,8 +25424,8 @@
+                          proxy_slot=getattr(exc, "proxy_slot", None),
+@@ -24414,8 +27064,8 @@
          except Exception as exc:
              message = str(exc)
              low = message.lower()
@@ -5486,7 +5588,7 @@
                           elapsed_ms=int((time.time() - t_start) * 1000),
                           account=getattr(exc, "account_uid", None),
                           key=self._key_id())
-@@ -22811,22 +25443,35 @@
+@@ -24433,29 +27083,38 @@
                  base_body=chat_req, session_key=session_key,
                  realm=req_realm, effort=effort)
  
@@ -5527,17 +5629,18 @@
 +            _record_billed_error(holder, model, 502, "messages upstream error: %s" % exc, usage=_saved_attempt_usage(holder),
 +                         elapsed_ms=wall, account=account.uid, key=self._key_id(), effort=effort)
              return self._anthropic_error(502, "upstream stream error: %s" % exc)
-         finally:
-             try:
-@@ -22834,6 +25479,7 @@
-             except Exception:
-                 pass
- 
+-        finally:
+-            try:
+-                upstream.close()
+-            except Exception:
+-                pass
+-
++
 +    @_track_response('messages', True)
      def _messages_stream_response(self, upstream, model, fp, account, t_start,
                                    base_body=None, session_key=None, realm=None,
                                    session_meta=None, effort=None):
-@@ -22844,19 +25490,27 @@
+@@ -24466,19 +27125,27 @@
          if cors_origin_allowed(self.path):
              self.send_header("Access-Control-Allow-Origin", "*")
          self.end_headers()
@@ -5575,7 +5678,7 @@
                           ttft_ms=first_ms,
                           gen_ms=(wall - first_ms) if first_ms is not None else None,
                           fp=fp, account=account.uid, realm=realm,
-@@ -22864,24 +25518,37 @@
+@@ -24486,24 +27153,37 @@
              return
          except Exception as exc:
              wall = int((time.time() - t_start) * 1000)
@@ -5618,8 +5721,8 @@
                       ttft_ms=first_ms,
                       gen_ms=(wall - first_ms) if first_ms is not None else None,
                       fp=fp, account=account.uid, realm=realm,
-@@ -23042,6 +25709,11 @@
-         payload = self._payload_or_error(allow_list=(path == "/accounts/import"))
+@@ -24681,6 +27361,11 @@
+             payload = self._payload_or_error(allow_list=(path == "/accounts/import"))
          if payload is None:
              return
 +        if not is_account_route and "n" in payload and (
@@ -5630,9 +5733,9 @@
          if is_account_route:
              return self._handle_accounts(path, payload)
          try:
-@@ -23051,9 +25723,10 @@
-         _apply_model_aliases(payload, aliases)
-         _apply_background_model_alias(payload)
+@@ -24693,9 +27378,10 @@
+             return self._handle_media_post(path, payload)
+         _apply_deepseek_flash_target(payload, self._request_realm() or CURRENT_REALM)
          # Check per-key concurrency limit (#359)
 -        key_ok, cur_key_conc, max_key_conc = _acquire_key_slot(self.key_entry)
 +        key_entry = getattr(self, "key_entry", None)
@@ -5643,7 +5746,7 @@
              message = ("Rate limit reached: API key '%s' reached its concurrency limit (%d in flight); retry shortly"
                         % (key_name, max_key_conc))
              record_error(payload.get("model") or "unknown", 429, message,
-@@ -23092,11 +25765,19 @@
+@@ -24734,11 +27420,19 @@
              finally:
                  _chat_slots.release()
          finally:
@@ -5665,7 +5768,7 @@
          if BLOCK_BACKGROUND_REQUESTS:
              reason = background_request_reason(payload)
              if reason:
-@@ -23118,6 +25799,7 @@
+@@ -24760,6 +27454,7 @@
          t_start = time.time()
          explicit_realm = self._request_realm()
          req_realm = explicit_realm or CURRENT_REALM
@@ -5673,7 +5776,7 @@
          if req_realm == "codearts":
              blocked = self._banned_model_error(payload.get("model")) or self._key_model_error(payload.get("model"))
              if blocked:
-@@ -23150,25 +25832,26 @@
+@@ -24792,25 +27487,26 @@
              key_blocked = self._key_model_error(payload.get("model"))
              if key_blocked:
                  return self._error(400, key_blocked, "invalid_request_error")
@@ -5707,7 +5810,7 @@
                           elapsed_ms=int((time.time() - t_start) * 1000),
                           account=getattr(exc, "account_uid", None),
                           key=self._key_id())
-@@ -23176,19 +25859,19 @@
+@@ -24818,19 +27514,19 @@
                                      "（本次不计入账号熔断）" % (exc.detail or "DNS/路由失败"),
                                 "invalid_request_error")
          except wb_accounts.TLSVerifyError as exc:
@@ -5729,8 +5832,8 @@
 +            _record_open_error(exc, model, exc.code, detail,
                           elapsed_ms=int((time.time() - t_start) * 1000),
                           account=getattr(exc, "account_uid", None),
-                          key=self._key_id())
-@@ -23208,10 +25891,12 @@
+                          proxy_slot=getattr(exc, "proxy_slot", None),
+@@ -24852,10 +27548,12 @@
                      **key_open_kwargs(getattr(self, "key_entry", None)))
              if want_stream:
                  return self._chat_stream_response(
@@ -5745,7 +5848,7 @@
  
      def _open_codearts_chat(self, payload, session_key):
          """选号并打开 CodeArts 的 SSE 上游；返回 (stream, account, model)。"""
-@@ -23223,7 +25908,7 @@
+@@ -24867,7 +27565,7 @@
          body = wb_codearts.build_chat_body(payload, session_key)
          stream, account, model = wb_codearts.open_chat(
              cfg, body, session_key, allowed_accounts=self._key_allowed_accounts())
@@ -5754,7 +5857,7 @@
  
      def _codearts_error(self, model, exc, t_start, realm):
          """把 CodeArts 异常落一条用量行，再回一个可读的 OpenAI 错误。"""
-@@ -23260,9 +25945,11 @@
+@@ -24904,9 +27602,11 @@
          with upstream:
              if want_stream:
                  return self._chat_stream_response(
@@ -5768,7 +5871,7 @@
  
      def _handle_codearts_responses(self, chat_req, session_key, model, want_stream,
                                     compaction, custom_names, request_meta, ns_map,
-@@ -23320,241 +26007,126 @@
+@@ -24964,241 +27664,126 @@
                  upstream, model, fp, account, t_start, base_body=chat_req,
                  session_key=session_key, realm="codearts", effort=effort)
  
@@ -6123,7 +6226,7 @@
          egress_on = wb_settings.egress_backoff_enabled(ACCOUNTS_DIR)
          egress_key = None
          if egress_on:
-@@ -23562,20 +26134,27 @@
+@@ -25206,25 +27791,27 @@
                  account.chat_base_url() + getattr(account, "chat_path", CHAT_PATH),
                  account.proxy)
          try:
@@ -6137,6 +6240,11 @@
 +            _record_billed_error(holder, model, 502, str(exc), usage=_saved_attempt_usage(holder), elapsed_ms=int((time.time() - t_start) * 1000),
 +                         account=account.uid, key=self._key_id(), effort=effort)
              return self._error(502, f"upstream stream error: {exc}")
+-        finally:
+-            try:
+-                upstream.close()
+-            except Exception:
+-                pass
          if egress_on and egress_key:
              wb_egress.note_success(egress_key)
          wall = int((time.time() - t_start) * 1000)
@@ -6155,7 +6263,7 @@
                       elapsed_ms=wall, ttft_ms=first_ms,
                       gen_ms=(wall - first_ms) if first_ms is not None else None,
                       fp=fp, account=account.uid, realm=realm,
-@@ -23974,6 +26553,7 @@
+@@ -25627,6 +28214,7 @@
          print("          %s" % launcher_hint(args.port + 1))
          print()
          raise SystemExit(1)
@@ -6258,12 +6366,13 @@
 -        return "Error running %s: %s: %s" % (name, type(exc).__name__, exc)+        return "Error running %s: %s: %s" % (name, type(exc).__name__, exc)
 --- a/wb_accounts.py
 +++ b/wb_accounts.py
-@@ -1,10 +1,12 @@
+@@ -1,11 +1,13 @@
  import re
  import base64
 +import http.client
  import datetime
  import json
+ import math
  import os
  import random
  import ssl
@@ -6271,7 +6380,7 @@
  import sys
  import threading
  import time
-@@ -215,6 +217,25 @@
+@@ -216,6 +218,25 @@
      return is_tls_verify_error(TLSVerifyError(str(text)))
  
  
@@ -6297,7 +6406,7 @@
  def _retryable(exc):
      """Transient network faults worth another attempt (TLS resets, timeouts, 5xx)."""
      if is_tls_verify_error(exc):
-@@ -316,8 +337,200 @@
+@@ -317,8 +338,200 @@
      return opener.open(req, timeout=timeout)
  
  
@@ -6499,7 +6608,7 @@
      """urlopen + json decode with retries.
  
      Chinese networks and CDN edges routinely drop a TLS handshake with
-@@ -327,6 +540,9 @@
+@@ -328,6 +541,9 @@
      attempts = max(1, int(retries or 1))
      last = None
      for attempt in range(1, attempts + 1):
@@ -6509,7 +6618,7 @@
          req = urllib.request.Request(
              url,
              data=data,
-@@ -334,7 +550,9 @@
+@@ -335,7 +551,9 @@
              headers=headers or {},
          )
          try:
@@ -6520,7 +6629,7 @@
                  return json.loads(resp.read().decode("utf-8"))
          except Exception as exc:
              last = exc
-@@ -342,7 +560,10 @@
+@@ -343,7 +561,10 @@
                  break
              if log:
                  log("network retry %d/%d after %s" % (attempt, attempts, exc))
@@ -6532,7 +6641,7 @@
      if last is not None and is_tls_verify_error(last):
          raise TLSVerifyError(tls_verify_hint(last)) from last
      raise last
-@@ -1718,7 +1939,7 @@
+@@ -1763,7 +1984,7 @@
          if (not getattr(self, "is_paid_user", False)
                  and wb_tiers.requires_pro(model, self.realm)):
              return False
@@ -6541,7 +6650,7 @@
              return False
          if self.daily_limit_blocked():
              return False
-@@ -2023,7 +2244,28 @@
+@@ -2121,7 +2342,28 @@
          with self._refresh_lock:
              return self._refresh_locked()
  
@@ -6571,7 +6680,7 @@
          if self.is_api_key:
              # 静态 Key 无法 refresh（refresh 端点只认 OAuth 设备流）。返回
              # False 而不是把 token_expired 置 True：这类账号按定义就是长期
-@@ -2052,11 +2294,34 @@
+@@ -2150,11 +2392,34 @@
          if self.enterprise_id:
              headers["X-Enterprise-Id"] = self.enterprise_id
          try:
@@ -6610,7 +6719,7 @@
                  self.token_expired = True
                  self._set_last_error("登录已过期 (HTTP 401)，请重新登录")
              else:
-@@ -2204,6 +2469,42 @@
+@@ -2302,6 +2567,42 @@
          if not pool:
              pool = wb_webprompts.builtin_prompts()
          return random.choice(pool) if pool else DAILY_CHAT_WEB_PROMPT
@@ -6653,7 +6762,7 @@
      def daily_chat_web(self, prompt=None, trigger="unknown"):
          """网页通道的每日活跃会话（issue #75 / #59 / #90）。
  
-@@ -2222,10 +2523,12 @@
+@@ -2320,10 +2621,12 @@
              return {"ok": False, "error": "web daily chat is only for international accounts"}
          # 当日已经成功过一次就不再开新会话：多个定时点、手动触发与并发调度
          # 可能在同一账号上重叠，重复跑只会多消耗一次网页活跃额度。
@@ -6668,7 +6777,7 @@
          wb_activity.record_attempt(self, wb_activity.TASK_DAILY_CHAT, trigger, res)
          return res
  
-@@ -2246,6 +2549,9 @@
+@@ -2344,6 +2647,9 @@
          返回里带 attempts（实际跑了几轮）、models_tried、model，其余字段与
          _daily_chat_web_once 一致。
          """
@@ -6678,7 +6787,7 @@
          models = self.web_fallback_models() or [self.daily_chat_model()]
          turn_cap, rounds = self.daily_chat_web_policy()
          budget = self.daily_chat_budget()
-@@ -2264,6 +2570,10 @@
+@@ -2362,6 +2668,10 @@
          except Exception:
              pass
          for index in range(rounds):
@@ -6689,7 +6798,7 @@
              wait = turn_cap
              if deadline is not None:
                  remaining = deadline - time.time()
-@@ -2278,6 +2588,9 @@
+@@ -2376,6 +2686,9 @@
              res["attempts"] = index + 1
              res["models_tried"] = tried + [model]
              res["model"] = model
@@ -6699,7 +6808,7 @@
              if res.get("ok"):
                  return res
              last = res
-@@ -2664,13 +2977,16 @@
+@@ -2762,13 +3075,16 @@
          # 不能把「账号受限」伪装成「今日活跃已完成」。
          if self.restricted_until > time.time():
              return {"ok": False, "skipped": True, "restricted": True,
@@ -6717,7 +6826,7 @@
          wb_activity.record_attempt(self, wb_activity.TASK_DAILY_CHAT, trigger, res)
          return res
  
-@@ -2763,26 +3079,19 @@
+@@ -2861,26 +3177,19 @@
              return result
          except urllib.error.HTTPError as exc:
              try:
@@ -6755,7 +6864,7 @@
          except Exception as exc:
              return {"ok": False, "error": str(exc)}
  
-@@ -3764,6 +4073,21 @@
+@@ -3862,6 +4171,21 @@
  AUTH_CHALLENGE_MARK = "www-authenticate: "
  
  
@@ -6777,7 +6886,7 @@
  def auth_challenge(headers):
      """The `WWW-Authenticate` value of a 401, whitespace-collapsed and bounded.
  
-@@ -3773,7 +4097,7 @@
+@@ -3871,7 +4195,7 @@
      answered", which the body alone cannot tell apart.
      """
      try:
@@ -6786,7 +6895,7 @@
      except Exception:
          return ""
      return " ".join(str(value or "").split())[:160]
-@@ -3811,11 +4135,13 @@
+@@ -3909,11 +4233,13 @@
      `http_error_message()` keeps that header in the diagnosis string.
      """
      lower = str(text or "").lower()
@@ -6802,7 +6911,7 @@
              or "token expired" in lower)
  
  
-@@ -4086,12 +4412,6 @@
+@@ -4184,12 +4510,6 @@
              "last_error": self.last_error,
              "logs": self.logs[-10:],
          }
@@ -6817,7 +6926,7 @@
  # 都被当成「损坏的账号」解析并打一条 error 日志（settings.json 是面板设置，
 --- a/wb_codearts.py
 +++ b/wb_codearts.py
-@@ -1392,6 +1392,8 @@
+@@ -1401,6 +1401,8 @@
          self._last_text = ""
          self._usage = None
          self._created = int(time.time())
@@ -6826,7 +6935,7 @@
  
      def __enter__(self):
          return self
-@@ -1401,6 +1403,10 @@
+@@ -1410,6 +1412,10 @@
          return False
  
      def close(self):
@@ -6837,7 +6946,7 @@
          try:
              self.raw.close()
          except Exception:
-@@ -1651,7 +1657,12 @@
+@@ -1660,7 +1666,12 @@
          try:
              stream.preflight()
          except CodeArtsUpstreamError as exc:
@@ -6851,7 +6960,7 @@
              if _is_concurrency_message(str(exc)):
                  last_error = exc
                  if attempt < 2:
-@@ -1659,7 +1670,10 @@
+@@ -1668,7 +1679,10 @@
                      continue
              raise
          except Exception:

@@ -136,6 +136,7 @@ class TerminalAndBillingTests(unittest.TestCase):
 class PolicyAndSlotTests(unittest.TestCase):
     def handler(self,path='/v1/chat/completions',dispatch=None):
         h=wb.Handler.__new__(wb.Handler);h.path=path;h.key_entry={'id':'synthetic-key','concurrency_limit':1}
+        h.headers={}  # Native v1.10.7 resolves realm before regional routing.
         h._is_panel_route=mock.Mock(return_value=False);h._authorized=mock.Mock(return_value=True);h._key_ok=mock.Mock(return_value=True)
         h._payload_or_error=mock.Mock(return_value=dict(BODY));h._error=mock.Mock();h._anthropic_error=mock.Mock()
         h._dispatch_chat_post=dispatch or mock.Mock();h._handle_messages=dispatch or mock.Mock()

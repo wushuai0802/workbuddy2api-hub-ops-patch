@@ -40,7 +40,17 @@ def reset_fixture_clock(source):
 def test_command(path):
     if path.name != '_test_rate_limit_reset_at.py':
         return [sys.executable, '-B', str(path)]
-    clock = reset_fixture_clock(path.read_text(encoding='utf8'))
+    source = path.read_text(encoding='utf8')
+    tree = ast.parse(source)
+    dynamic = next((node for node in tree.body if isinstance(node, ast.Assign)
+                    and any(isinstance(target, ast.Name) and target.id == 'SAMPLE_RESET_AT'
+                            for target in node.targets)), None)
+    if dynamic is not None:
+        # v1.10.7 derives future samples itself. Run the byte-identical native
+        # suite without a synthetic wall clock, validating its reviewed shape.
+        assert ast.unparse(dynamic.value) == 'int(time.time()) + SAMPLE_RESET_IN', 'native dynamic clock changed'
+        return [sys.executable, '-B', str(path)]
+    clock = reset_fixture_clock(source)
     # Run the byte-identical official suite under a process-local clock.
     wrapper = ('import runpy,sys,time,unittest.mock\n'
                'path,clock=sys.argv[1],float(sys.argv[2])\n'
@@ -100,6 +110,15 @@ def prepare_test_fixtures(gateway):
     source = source.replace('self.assertTrue(stream.reached_end)', 'self.assertEqual(stream.reached_end, index == 0)')
     path.write_text(source, encoding='utf8')
     prepare_refresh_fixtures(gateway)
+    # Numeric-IP classification is a pure URL contract. Supply its exact
+    # public DNS result without permitting DNS or a non-loopback connection.
+    path = gateway / 'tests/_test_media_client.py'
+    source = path.read_text(encoding='utf8')
+    old = '        C.assert_public_url("https://8.8.8.8/x.png")'
+    assert source.count(old) == 1, 'pinned media numeric URL fixture changed'
+    source = source.replace(old, '        with mock.patch.object(C.socket, "getaddrinfo", '
+                            'return_value=[(2, 1, 6, "", ("8.8.8.8", 443))]):\n    ' + old)
+    path.write_text(source, encoding='utf8')
     # The native compaction stub suppresses the unguarded accounting helper.
     # Our adapter uses the same lower-level ledger as the other six adapters.
     path = gateway / 'tests/_test_remote_compaction.py'
@@ -137,10 +156,9 @@ def prepare_test_fixtures(gateway):
     # This is a Windows portable-runtime contract even on Linux runners.
     # math/zlib are linked into the target python DLL; Linux exposes them as
     # extensions. Keep the missing-dependency assertion for all other imports.
-    old = 'if m not in local and m not in sys.builtin_module_names)'
+    old = 'windows_builtins = ("msvcrt", "nt", "winreg", "math")'
     assert source.count(old) == 1, 'pinned Windows builtin profile changed'
-    source = source.replace(old, 'if m not in local and m not in '
-                           '(sys.builtin_module_names + ("math", "zlib")))')
+    source = source.replace(old, 'windows_builtins = ("msvcrt", "nt", "winreg", "math", "zlib")')
     assets.write_text(source, encoding='utf8')
 
     # These suites rebind the parent's hardcoded ACCOUNTS_DIR, but the inline

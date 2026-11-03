@@ -5,6 +5,7 @@
 - [历版补丁范围原文](PATCHES-before-round2-20261102.md)
 - [历版验证原文](VERIFICATION-versions-before-round2-20261102.md)
 - [旧 Release notes 原文](release-notes-before-v1101.md)
+- [v1.10.1 Release notes](release-v1101-20261102.md)、[迁移前保护清单](PROTECTIONS-v1101-20261102.md)
 - [v1.10.1](V1101.md)、[v1.9.2](V192.md)、[v1.9.0](V190.md)
 
 main 只留当前 patch，历史文件仍在 git/tag/Release 中，例如：

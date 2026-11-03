@@ -2,11 +2,11 @@
 
 [中文](README.md) · [Protection contracts](docs/PROTECTIONS.md) · [Install and rollback](docs/INSTALL.md) · [Verification limits](docs/VERIFICATION.md)
 
-Cumulative operational safeguards for [WorkBuddy2API-Hub](https://github.com/ardeyouxipianyi/workbuddy2api-hub). Patch `v1.10.1-ops.20261102.1` requires Python 3.11+ and official v1.10.1 at `28527f48cfaea0e456612eb8922cb51b5d804a22`. MIT attribution remains in [NOTICE](NOTICE.md) and [THIRD-PARTY-zh](THIRD-PARTY-zh.md).
+Cumulative operational safeguards for [WorkBuddy2API-Hub](https://github.com/ardeyouxipianyi/workbuddy2api-hub). Patch `v1.10.7-ops.20261103.1` requires Python 3.11+ and official v1.10.7 at `d177043f873fd1e7132b3219be24e4f1f7abefda`. MIT attribution remains in [NOTICE](NOTICE.md) and [THIRD-PARTY-zh](THIRD-PARTY-zh.md).
 
 ## Install and rollback
 
-Download the ZIP and SHA256SUMS.txt from the [formal release](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.10.1-ops.20261102.1), or obtain its exact tag. Preserve the old image, source and data, then preflight a clean pinned official source tree:
+Download the ZIP and SHA256SUMS.txt from the [formal release](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.10.7-ops.20261103.1), or obtain its exact tag. Preserve the old image, source and data, then preflight a clean pinned official source tree:
 
 ~~~sh
 python3 -B apply.py --verify-package
@@ -17,7 +17,7 @@ Follow [INSTALL](docs/INSTALL.md) for complete application and targeted deployme
 
 ## Verification limits
 
-Current main inventories 236 Python suites (53 patch and 183 official) and 65 Node suites across Linux Python 3.11/3.12 and Windows Python 3.11. Synthetic tests, health and fingerprints do not establish real long-session completion, CodeArts login or removal of cloud restrictions. The installer does not change accounts, keys, routing or schedules. [PROTECTIONS](docs/PROTECTIONS.md) is the contract reference; [PATCHES](docs/PATCHES.md) links to details.
+Current main inventories 250 Python suites (54 patch and 196 official) and 65 Node suites across Linux Python 3.11/3.12 and Windows Python 3.11. Synthetic tests, health and fingerprints do not establish real long-session completion, CodeArts login or removal of cloud restrictions. The installer does not change accounts, keys, routing or schedules. [PROTECTIONS](docs/PROTECTIONS.md) is the contract reference; [PATCHES](docs/PATCHES.md) links to details.
 
 ## Maintenance and history
 

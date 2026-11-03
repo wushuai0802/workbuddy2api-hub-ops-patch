@@ -28,9 +28,10 @@ DEPENDENCIES = {
     "wb_prompt.py", "wb_scheduler.py", "wb_settings.py", "wb_tasks.py",
     "wb_updates.py", "wb_webagent.py", "wb_quota_scan.py", "wb_window_probe.py", "wb_update_request.py",
     "wb_tiers.py", "wb_update_apply.py", "wb_update_external.py", "wb_update_portable.py", "wb_webprompts.py",
+    "wb_media.py", "wb_media_client.py", "wb_media_tasks.py", "wb_usage_io.py",
 }
-BASE_TAG = "v1.10.1"
-UPSTREAM_COMMIT = "28527f48cfaea0e456612eb8922cb51b5d804a22"
+BASE_TAG = "v1.10.7"
+UPSTREAM_COMMIT = "d177043f873fd1e7132b3219be24e4f1f7abefda"
 
 
 def digest(data):
