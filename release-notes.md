@@ -1,8 +1,8 @@
-升级官方v1.10.7，参考r1补丁迁移，保留全部既有运维保护。
+升级官方v1.10.9，保留现有运维保护和用户配置。
 
-- 基线 `d177043f873fd1e7132b3219be24e4f1f7abefda`，补丁 `v1.10.7-ops.20261103.1`，9个payload。
-- 原生媒体、Key持久化、DeepSeek区域费率/出站路由、CodeArts并发/OAuth与有界可选自动签到沿用官方；媒体和自动签到默认关闭。
-- 连接快照贯穿六接口成功、失败和恢复归因，换连接清旧出口；CodeArts跨池隔离保留。账本用官方原子追加；媒体额度拒绝/异常单次释放，非流式关闭仍由现有守卫拥有。
-- 新增12项合成合同，清单250 Python（54补丁＋196官方）与65 Node。未移除保护或调整循环阈值、重试、期限、白名单、风控；完整保护合同见docs/PROTECTIONS.md。
-- ZIP取自准确main提交通过的三平台CI artifact，SHA256SUMS随包发布。账号、Key、设置、历史和风控不由安装器修改。无真实模型、媒体、签到、活跃或消息验收，不据合成测试宣称云端可用。
-- Pin official v1.10.7. Preserve native features and all existing protection contracts, add immutable per-attempt provenance, use native atomic ledger append and close the media quota slot leak. Inventory: 250 Python and 65 Node suites; no live-cloud availability claim.
+- 准确基线`077fb2fcfc273e29bd1266e527afc4a3d548b516`，补丁`v1.10.9-ops.20261105.1`。
+- 采用官方CodeArts工具归一化/空函数修复、配置并发锁、账号任务/备注/保活、图片/视觉及推理参数、429状态码保留，另有日志轮转、namespace和面板更新。
+- 国际Flash取消旧免费/强制-sg切换，遵循官方目录费率及原模型身份。保留全部循环、期限、认证、名额、记账、白名单和风控保护；六模块字节/29关键AST保持。
+- 新增5项跨模块回归，完整清单253 Python（55补丁＋198官方）与66 Node。候选和main三平台分别验证，正式ZIP只取通过的准确main CI artifact。
+- 安装器不改账号、Key、任务或自动领取设置。没有额外真实模型、图片生成、手动签到/活跃或云端解封验收，正常授权排程可能自然运行。
+- Pin official v1.10.9. Preserve native CodeArts tools/configuration/tasks/vision/429 behavior and all existing protection contracts. Five added cross-component cases bring the inventory to 253 Python and 66 Node suites. Retain user settings and publish exact passing main-CI bytes; no live-provider availability claim.

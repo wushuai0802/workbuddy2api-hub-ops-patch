@@ -30,7 +30,7 @@ def main():
     (gateway / 'dashboard.html').write_bytes(bundle.payload.get('dashboard.html', (upstream / 'dashboard.html').read_bytes()))
     shutil.copytree(upstream / 'tests', gateway / 'tests', ignore=shutil.ignore_patterns('__pycache__'))
     suites = sorted((gateway / 'tests').glob('_test_*.js'))
-    assert len(suites) == 63, 'pinned dashboard suite inventory changed'
+    assert len(suites) == 64, 'pinned dashboard suite inventory changed'
     official_count = len(suites)
     prepare_dashboard_fixtures(gateway)
     suites.append(ROOT / 'tests/test_dashboard_controls.js')

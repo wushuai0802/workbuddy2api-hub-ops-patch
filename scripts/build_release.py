@@ -17,7 +17,7 @@ def main():
     args = parser.parse_args()
     bundle = Bundle(ROOT)
     args.output.mkdir(parents=True, exist_ok=True)
-    filename = 'workbuddy2api-hub-v1.10.7-wushuai0802-ops-20261103-r1.zip'
+    filename = 'workbuddy2api-hub-v1.10.9-wushuai0802-ops-20261105-r1.zip'
     archive = args.output / filename
     members = [line.split('  ', 1)[1] for line in (ROOT / 'MANIFEST.sha256').read_text().splitlines()]
     assert {name for name in members if name.startswith('patches/')} == {
@@ -28,7 +28,7 @@ def main():
         for name in sorted(members):
             path = ROOT / safe_relative(name)
             assert path.is_file() and not path.is_symlink()
-            item = zipfile.ZipInfo('workbuddy2api-hub-ops-patch/' + name, (2026, 11, 3, 0, 0, 0))
+            item = zipfile.ZipInfo('workbuddy2api-hub-ops-patch/' + name, (2026, 11, 5, 0, 0, 0))
             item.compress_type = zipfile.ZIP_DEFLATED
             item.external_attr = 0o100644 << 16
             output.writestr(item, path.read_bytes())

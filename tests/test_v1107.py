@@ -120,15 +120,17 @@ class V1107Tests(AccountSlotTests):
                 self.assertEqual(rows[0]['account'], account.uid)
                 self.assertNotIn('proxy_slot', rows[0])
 
-    def test_native_flash_catalog_and_chat_routing_remain_realm_scoped(self):
+    def test_native_flash_catalog_keeps_metered_identity_without_legacy_rewrite(self):
         for force in (False, True):
             with mock.patch.object(wb.wb_settings, 'deepseek_flash_force_sg', return_value=force):
                 for realm in ('intl', 'cn'):
                     body = {'model': MODEL}
                     wb._apply_deepseek_flash_target(body, realm)
-                    self.assertEqual(body['model'], MODEL + '-sg' if force and realm == 'intl' else MODEL)
+                    # Official v1.10.8 removed the old free/forced-SG switch.
+                    # Keep both realm identities and their actual catalog rate.
+                    self.assertEqual(body['model'], MODEL)
                     entry = wb.model_entry(MODEL, {'credits': 'x0.11'}, realm)
-                    self.assertEqual(entry['credits'], 'x0.00' if realm == 'intl' and not force else 'x0.11')
+                    self.assertEqual(entry['credits'], 'x0.11')
 
     def test_media_defaults_closed_and_local_references_rejected(self):
         config = wb.wb_settings.media_config(wb.ACCOUNTS_DIR)

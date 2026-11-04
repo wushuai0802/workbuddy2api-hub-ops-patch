@@ -7,12 +7,12 @@ from pathlib import Path
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
-COMMIT = 'd177043f873fd1e7132b3219be24e4f1f7abefda'
-TAG = 'v1.10.7'
-PATCH_ID = 'v1.10.7-ops.20261103.1'
+COMMIT = '077fb2fcfc273e29bd1266e527afc4a3d548b516'
+TAG = 'v1.10.9'
+PATCH_ID = 'v1.10.9-ops.20261105.1'
 PATCH_SOURCE = 'wushuai0802/workbuddy2api-hub-ops-patch'
 # A baseline migration must explicitly review this expected count as well.
-OFFICIAL_PYTHON_COUNTS = {COMMIT: 196}
+OFFICIAL_PYTHON_COUNTS = {COMMIT: 198}
 MODULES = ('dashboard.html', 'wb_proxy.py', 'wb_webtools.py', 'wb_accounts.py', 'wb_codearts.py', 'wb_ops.py', 'wb_stall.py', 'wb_upstream_pool.py', 'wb_observe.py')
 PUBLIC_DIRS = ('files', 'tests', 'docs', 'scripts', 'patches', '.github')
 PUBLIC_ROOT = ('README.md', 'README.en.md', 'LICENSE', 'NOTICE.md', 'THIRD-PARTY-zh.md', 'CHANGELOG.md',

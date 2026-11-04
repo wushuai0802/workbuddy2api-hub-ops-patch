@@ -1016,27 +1016,7 @@ BACKGROUND_MODEL_NAMES = tuple(
 
 
 def _apply_deepseek_flash_target(payload, realm=None):
-    """Rewrite client deepseek-v4.1-flash to -sg when deepseek_flash_force_sg is on.
-
-    International only: the domestic catalog has no -sg variant, and its
-    deepseek-v4.1-flash is a metered model on its own exit.
-    """
-    if (realm or CURRENT_REALM) != "intl":
-        return
-    if not isinstance(payload, dict):
-        return
-    name = payload.get("model")
-    if not isinstance(name, str):
-        return
-    if name.strip().lower() != "deepseek-v4.1-flash":
-        return
-    try:
-        force_sg = wb_settings.deepseek_flash_force_sg(ACCOUNTS_DIR)
-    except Exception:
-        force_sg = False
-    if force_sg:
-        payload["model"] = "deepseek-v4.1-flash-sg"
-        log("route: deepseek-v4.1-flash -> deepseek-v4.1-flash-sg (force_sg)")
+    return
 
 
 def _apply_background_model_alias(payload):
@@ -2656,7 +2636,12 @@ _STATS_TTL = float(os.environ.get("WB_STATS_TTL", 15))
 # reads rows that arrived since the last scan.
 # ---------------------------------------------------------------------------
 _daily_usage = {"day": "", "totals": None, "credits": None, "models": None,
-                "offset": 0, "at": 0.0}
+                "offset": 0, "at": 0.0,
+                # See _scan_daily_usage's caller: (size, dev, inode) of the log
+                # the cached offset was taken against, plus the 64 bytes just
+                # before it. Without these a rewritten-then-regrown log (log
+                # rotation with copytruncate) looked like a plain append.
+                "key": None, "tail": None}
 _daily_usage_lock = threading.Lock()
 
 
@@ -2742,11 +2727,23 @@ def daily_usage_stats(ttl=None):
         else:
             state = {"tokens": {}, "credits": {}, "models": {}}
         offset = int(c["offset"] or 0)
-        try:
-            size = os.path.getsize(USAGE_LOG)
-        except OSError:
-            size = 0
-        if offset > size:
+        log_key = _usage_log_key(USAGE_LOG)
+        # Resume the cached fold only when the bytes it counted are provably
+        # still there. `offset > size` alone misses the case that actually
+        # bites: log rotation with `copytruncate` empties the file in place
+        # (same inode) and it then grows past the old offset, so the size test
+        # passes while the bytes underneath were replaced. The daily counters
+        # would then keep yesterday's numbers *and* silently skip every row in
+        # the first `offset` bytes of today's file - which parks accounts on
+        # the daily guard while the panel shows a total that never happened.
+        # `_log_offset_holds` covers size/device/inode and
+        # `_log_tail_signature` re-reads the seam, which is what tells an
+        # append apart from a rewrite. Same rule, same two helpers, as the
+        # perf/aggregate/recent folds above.
+        if offset and not (c.get("key") is not None
+                           and c.get("tail") is not None
+                           and _log_offset_holds(c["key"], log_key, offset)
+                           and _log_tail_signature(offset, USAGE_LOG) == c["tail"]):
             state = {"tokens": {}, "credits": {}, "models": {}}
             offset = 0
         try:
@@ -2754,11 +2751,15 @@ def daily_usage_stats(ttl=None):
         except Exception as exc:
             log("daily token scan failed: %s" % exc)
             _daily_usage.update({"day": day, "totals": None, "offset": 0,
-                                 "at": time.time()})
+                                 "key": None, "tail": None, "at": time.time()})
             return None
+        # Record the position we consumed *and* the seam behind it, so the next
+        # call can prove this prefix still holds the same bytes.
         _daily_usage.update({"day": day, "totals": state["tokens"],
                              "credits": state["credits"],
                              "models": state["models"], "offset": offset,
+                             "key": _usage_log_key(USAGE_LOG),
+                             "tail": _log_tail_signature(offset, USAGE_LOG),
                              "at": time.time()})
         return _daily_state_copy(_daily_usage)
 
@@ -11065,7 +11066,6 @@ def runtime_settings_view():
         "pricing_enabled": wb_settings.pricing_enabled(ACCOUNTS_DIR),
         "auto_switch_product": wb_settings.auto_switch_product(ACCOUNTS_DIR),
         "auto_switch_products": wb_settings.auto_switch_products(ACCOUNTS_DIR),
-        "deepseek_flash_force_sg": wb_settings.deepseek_flash_force_sg(ACCOUNTS_DIR),
         "free_model_credit_fallback": wb_settings.free_model_credit_fallback(ACCOUNTS_DIR),
         "enable_anthropic_messages": wb_settings.enable_anthropic_messages(ACCOUNTS_DIR),
         "filter_models_by_key": wb_settings.filter_models_by_key(ACCOUNTS_DIR),
@@ -11149,7 +11149,7 @@ def runtime_settings_view():
         "accounts_dir": ACCOUNTS_DIR,
         "usage_dir": USAGE_DIR,
         "settings_file": wb_settings.settings_path(ACCOUNTS_DIR),
-        "version": "1.10.7",
+        "version": "1.10.9",
     }
 def current_account():
     """Account used for display purposes (health / usage summaries)."""
@@ -12042,22 +12042,7 @@ def model_entry(mid, meta, realm=None):
     if meta.get("onlyReasoning") is not None:
         item["always_reasoning"] = bool(meta.get("onlyReasoning"))
     # ---- misc ----
-    # deepseek-v4.1-flash is the international free channel (credit 0). The
-    # same id in the domestic catalog is a 0.11x metered model, so the free /
-    # forced -sg rules must stay international-only.
-    if mid == "deepseek-v4.1-flash" and realm == "intl":
-        force_sg = False
-        try:
-            force_sg = wb_settings.deepseek_flash_force_sg(ACCOUNTS_DIR)
-        except Exception:
-            pass
-        if force_sg:
-            item["credits"] = "x0.11"
-            item["upstream_target"] = "deepseek-v4.1-flash-sg"
-        else:
-            item["credits"] = "x0.00"
-            item["upstream_target"] = "deepseek-v4.1-flash"
-    elif meta.get("credits"):
+    if meta.get("credits"):
         item["credits"] = meta["credits"]
     if meta.get("vendor"):
         item["vendor"] = meta["vendor"]
@@ -12647,7 +12632,7 @@ def _patch_payload_fingerprint():
     return hashlib.sha256(''.join(records).encode('ascii')).hexdigest()
 
 _OPS_PATCH_FINGERPRINT = _patch_payload_fingerprint()
-_OPS_PATCH_ID = "v1.10.7-ops.20261103.1"
+_OPS_PATCH_ID = "v1.10.9-ops.20261105.1"
 _OBSERVATION_STORE = None
 _OBSERVATION_STORE_LOCK = threading.Lock()
 
@@ -19094,7 +19079,8 @@ def expand_namespace_tools(tools, _depth=0):
                 subs = entry.get("functions")
             if not isinstance(subs, list):
                 subs = []
-            child_ns = str(entry.get("name") or ns_name or "")
+            own = str(entry.get("name") or "")
+            child_ns = _NS_SEP.join([p for p in (ns_name, own) if p])
             for sub in subs:
                 collect(sub, depth + 1, child_ns)
             return
@@ -19147,10 +19133,10 @@ def resolve_namespaced_name(name, mapping):
     if name in mapping:
         return name, mapping[name]
     if "::" in name:
-        idx = name.find("::")
+        idx = name.rfind("::")
         if idx > 0:
             tail = name[idx + 2:]
-            head = name[:idx]
+            head = name[:idx].replace("::", _NS_SEP)
             if tail in mapping:
                 return tail, mapping[tail]
             return tail, head
@@ -19823,7 +19809,15 @@ def responses_to_chat(payload, compaction=False):
             chat["tools"] = wb_webtools.install_tool_defs(chat.get("tools") or [], wants)
             chat["_web_tools"] = True
     if payload.get("tool_choice") and not compaction:
-        chat["tool_choice"] = payload["tool_choice"]
+        tc = payload["tool_choice"]
+        if isinstance(tc, dict) and isinstance(chat.get("_namespace_map"), dict):
+            fn = tc.get("function")
+            if isinstance(fn, dict) and fn.get("name"):
+                bare_name, _ = resolve_namespaced_name(fn["name"], chat["_namespace_map"])
+                tc = dict(tc)
+                tc["function"] = dict(fn)
+                tc["function"]["name"] = bare_name
+        chat["tool_choice"] = tc
     if payload.get("parallel_tool_calls") is not None and not compaction:
         chat["parallel_tool_calls"] = payload["parallel_tool_calls"]
     return chat
@@ -22024,7 +22018,7 @@ class Handler(BaseHTTPRequestHandler):
             super().finish()
         except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
             pass
-    server_version = "wb-proxy/1.10.7"
+    server_version = "wb-proxy/1.10.9"
     def log_message(self, fmt, *args):
         # 静默过滤前端看板高频定时心跳的正常 200 GET 请求（/logs、/usage、/accounts 轮询等）
         # 避免自增死循环刷屏与日志污染。遇 4xx/5xx 异常或所有非 GET 业务操作依然如实记录。
@@ -24597,15 +24591,6 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(400, str(exc), "invalid_request_error")
             wb_identity.configure_versions(stored)
             reply["identity_versions"] = stored
-        if "deepseek_flash_force_sg" in payload:
-            raw = payload.get("deepseek_flash_force_sg")
-            if not isinstance(raw, bool):
-                return self._error(400, "deepseek_flash_force_sg must be true or false", "invalid_request_error")
-            wb_settings.set_deepseek_flash_force_sg(ACCOUNTS_DIR, raw)
-            reply["deepseek_flash_force_sg"] = raw
-            with _lock:
-                _models_cache["intl"] = {"at": 0.0, "data": None}
-                _models_cache["cn"] = {"at": 0.0, "data": None}
         if "free_model_credit_fallback" in payload:
             raw = payload.get("free_model_credit_fallback")
             if not isinstance(raw, bool):
@@ -25568,6 +25553,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, result)
             if path == "/codearts/models/refresh":
                 return self._json(200, wb_codearts.refresh_models(cfg))
+            if path == "/codearts/credits/refresh":
+                return self._json(200, wb_codearts.refresh_credits(cfg))
             if path == "/codearts/accounts/checkin":
                 # uid 可空：空 = 全员签到。
                 result = wb_codearts.checkin(cfg, uid)
@@ -25578,6 +25565,13 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/codearts/accounts/proxy":
                 result = wb_codearts.set_proxy_slot(
                     cfg, uid, payload.get("slot_id"))
+            elif path == "/codearts/accounts/note":
+                result = wb_codearts.set_note(cfg, uid, payload.get("note"))
+            elif path == "/codearts/accounts/tasks":
+                result = wb_codearts.set_tasks_enabled(
+                    cfg, uid, payload.get("enabled", True))
+            elif path == "/codearts/accounts/test":
+                result = wb_codearts.test_account(cfg, uid)
             elif path == "/codearts/accounts/enable":
                 result = wb_codearts.enable(cfg, uid)
             elif path == "/codearts/accounts/disable":
@@ -26406,6 +26400,7 @@ class Handler(BaseHTTPRequestHandler):
         if not uid:
             return self._error(400, "uid required")
         removed = POOL.remove(uid)
+        invalidate_tasks_cache()
         log("account %s deleted" % uid[:8])
         return self._json_panel(200, {"deleted": removed, "accounts": account_views()})
 
@@ -27570,6 +27565,7 @@ class Handler(BaseHTTPRequestHandler):
     def _codearts_error(self, model, exc, t_start, realm):
         """把 CodeArts 异常落一条用量行，再回一个可读的 OpenAI 错误。"""
         elapsed = int((time.time() - t_start) * 1000)
+        err_type = "invalid_request_error"
         if isinstance(exc, wb_codearts.CodeArtsBadRequest):
             status = 400
         elif isinstance(exc, wb_codearts.CodeArtsAuthError):
@@ -27578,11 +27574,13 @@ class Handler(BaseHTTPRequestHandler):
             status = 409
         elif isinstance(exc, wb_codearts.CodeArtsConflict):
             status = 409
+        elif isinstance(exc, wb_codearts.CodeArtsError) and exc.status == 429:
+            status, err_type = 429, "rate_limit_error"
         else:
             status = 502
         record_error(model, status, str(exc)[:200], elapsed_ms=elapsed,
                      realm=realm, key=self._key_id())
-        return self._error(status, str(exc), "invalid_request_error")
+        return self._error(status, str(exc), err_type)
 
     def _handle_codearts_chat(self, payload, session_key, realm):
         """`/v1/chat/completions` 的 CodeArts 分支。"""

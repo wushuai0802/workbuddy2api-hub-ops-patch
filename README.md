@@ -2,11 +2,13 @@
 
 [English](README.en.md) · [保护清单](docs/PROTECTIONS.md) · [安装与回滚](docs/INSTALL.md) · [验证边界](docs/VERIFICATION.md)
 
-为[官方 WorkBuddy2API-Hub](https://github.com/ardeyouxipianyi/workbuddy2api-hub)提供累积运维保护。当前补丁 `v1.10.7-ops.20261103.1` 仅适用于官方 v1.10.7，提交 `d177043f873fd1e7132b3219be24e4f1f7abefda`，需要 Python 3.11+。许可和来源见 [NOTICE](NOTICE.md)、[THIRD-PARTY-zh](THIRD-PARTY-zh.md)。
+为[官方 WorkBuddy2API-Hub](https://github.com/ardeyouxipianyi/workbuddy2api-hub)提供累积运维保护。当前补丁 `v1.10.9-ops.20261105.1` 仅适用于官方 v1.10.9，提交 `077fb2fcfc273e29bd1266e527afc4a3d548b516`，需要 Python 3.11+。许可和来源见 [NOTICE](NOTICE.md)、[THIRD-PARTY-zh](THIRD-PARTY-zh.md)。
+
+本版采用CodeArts工具/图片/任务及429原生修复，保留全部本地保护与现有用户设置。国际Flash不再采用旧免费/强制-sg改道逻辑，详见[版本说明](docs/V1109.md)。
 
 ## 安装与回滚
 
-从[正式 Release](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.10.7-ops.20261103.1)下载 ZIP 与 SHA256SUMS.txt，或获取准确 tag；保存原镜像、源码和业务数据，在干净的固定官方源码上预检：
+从[正式 Release](https://github.com/wushuai0802/workbuddy2api-hub-ops-patch/releases/tag/v1.10.9-ops.20261105.1)下载 ZIP 与 SHA256SUMS.txt，或获取准确 tag；保存原镜像、源码和业务数据，在干净的固定官方源码上预检：
 
 ~~~sh
 python3 -B apply.py --verify-package
@@ -17,7 +19,7 @@ python3 -B apply.py --target /absolute/path/to/clean-official-source --dry-run
 
 ## 验证边界
 
-当前 main 清单为 250 Python（54 补丁＋196 官方）与 65 Node 套件；CI 覆盖 Linux Python 3.11/3.12 与 Windows Python 3.11。合成测试、健康与指纹不证明真实长会话完成、CodeArts 登录或云端解封。安装器不修改账号、Key、路由与调度。保护合同以 [PROTECTIONS](docs/PROTECTIONS.md) 为准，详情见 [PATCHES](docs/PATCHES.md)。
+当前 main 清单为 253 Python（55 补丁＋198 官方）与 66 Node 套件；CI 覆盖 Linux Python 3.11/3.12 与 Windows Python 3.11。合成测试、健康与指纹不证明真实长会话完成、CodeArts 登录或云端解封。安装器不修改账号、Key、路由与调度。保护合同以 [PROTECTIONS](docs/PROTECTIONS.md) 为准，详情见 [PATCHES](docs/PATCHES.md)。
 
 ## 维护节奏与历史
 

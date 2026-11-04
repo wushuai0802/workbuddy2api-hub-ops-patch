@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.10.9-ops.20261105.1 — 2026-11-05
+
+- 固定官方v1.10.9 / `077fb2fcfc273e29bd1266e527afc4a3d548b516`，采用CodeArts工具、图片、推理/采样、账号任务与429，以及并发配置、UID过滤、日志轮转、namespace和看板更新。
+- 保留现有用户设置及全部本地保护；六个模块字节和29个关键AST与v1.10.7一致。国际Flash沿官方目录，不再走旧免费/强制-sg改写。
+- 新增5项跨模块合成合同；清单253 Python＋66 Node。旧版本、tag和Release保留，main/ZIP只含当前patch；不据合成测试声称云端可用。
+- Pin official v1.10.9 and retain native CodeArts/UI/accounting fixes plus all existing local protection contracts. Add five cross-component tests; inventory 253 Python and 66 Node suites. Preserve configured routes/tasks and auto-claim preferences; no live-cloud claim.
+
 ## v1.10.7-ops.20261103.1 — 2026-11-03
 
 - 固定官方v1.10.7 / `d177043f873fd1e7132b3219be24e4f1f7abefda`。原生媒体、区域费率/出站路由、Key持久化和CodeArts并发/OAuth/有界自动签到保持原生；媒体与自动签到默认关闭。

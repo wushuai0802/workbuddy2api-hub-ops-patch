@@ -30,8 +30,8 @@ DEPENDENCIES = {
     "wb_tiers.py", "wb_update_apply.py", "wb_update_external.py", "wb_update_portable.py", "wb_webprompts.py",
     "wb_media.py", "wb_media_client.py", "wb_media_tasks.py", "wb_usage_io.py",
 }
-BASE_TAG = "v1.10.7"
-UPSTREAM_COMMIT = "d177043f873fd1e7132b3219be24e4f1f7abefda"
+BASE_TAG = "v1.10.9"
+UPSTREAM_COMMIT = "077fb2fcfc273e29bd1266e527afc4a3d548b516"
 
 
 def digest(data):

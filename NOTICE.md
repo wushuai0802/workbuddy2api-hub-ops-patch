@@ -1,6 +1,6 @@
 # Attribution
 
-The supplied v1.10.7 / 20261103-r1 archive (SHA256 `a953a71bea060154c966c4086e0c8bf6feae9a4fdb9e59f05f9e44bfdbfb473d`) informed immutable outbound provenance, the native atomic-ledger bridge and media quota slot cleanup. Twelve synthetic contracts were rewritten for this repository's fixtures. No script from that archive was executed; private verification/transcripts were excluded. Native media, regional pricing/routing, Key persistence and bounded opt-in CodeArts auto-claim remain upstream features. Original MIT attribution remains.
+The supplied v1.10.9 / 20261103-r1 archive (SHA256 `a953a71bea060154c966c4086e0c8bf6feae9a4fdb9e59f05f9e44bfdbfb473d`) informed immutable outbound provenance, the native atomic-ledger bridge and media quota slot cleanup. Twelve synthetic contracts were rewritten for this repository's fixtures. No script from that archive was executed; private verification/transcripts were excluded. Native media, regional pricing/routing, Key persistence and bounded opt-in CodeArts auto-claim remain upstream features. Original MIT attribution remains.
 
 The supplied v1.10.1 / 20261102-r2 archive (SHA256 `724d9650d0623f5580872040f0f6eaf1f7ed87c6519117328fdcf9a299d41ab1`) informed literal tool-name validation, reset overflow handling, CodeArts lease ownership and provider-isolated safeguards/accounting. Its 22 synthetic cases were adapted to this repository's existing fixtures; private verification/transcript files and installer scripts were not imported or executed. Original MIT attribution remains.
 
@@ -8,7 +8,7 @@ The supplied v1.9.0 / 20261028-r1 archive (SHA256 `2b847b3230231b365b44575a550cd
 
 This unofficial bundle derives from [WorkBuddy2API-Hub](https://github.com/ardeyouxipianyi/workbuddy2api-hub), distributed under MIT. Original notice is preserved in [LICENSE](LICENSE).
 
-Supported upstream: v1.10.7, commit `d177043f873fd1e7132b3219be24e4f1f7abefda`.
+Supported upstream: v1.10.9, commit `077fb2fcfc273e29bd1266e527afc4a3d548b516`.
 
 The user-supplied v1.7.33-r3 reference (SHA256 `25a5e39264eb1be3aac512a541c32734c787944ab3de402ca0a36ce5748832af`) informed Windows timed-read interruption and cancellation during recovery. We adapted these boundaries to our existing pooled-lease ownership, initial heartbeat and deadline safeguards, with independent synthetic regressions. Reference installers and private verification data were not executed or republished.
 
